@@ -16,7 +16,7 @@
     euler-events-hs.url = "github:juspay/euler-events-hs/main";
     euler-events-hs.inputs.haskell-flake.follows = "haskell-flake";
 
-    sequelize.url = "github:juspay/haskell-sequelize/beckn-compatible";
+    sequelize.url = "github:vijaygupta18/haskell-sequelize/decouple-drainer-from-app";
     sequelize.inputs.nixpkgs.follows = "nixpkgs";
     sequelize.inputs.haskell-flake.follows = "haskell-flake";
     sequelize.inputs.flake-parts.follows = "flake-parts";
