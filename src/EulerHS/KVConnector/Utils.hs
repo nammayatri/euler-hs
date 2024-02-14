@@ -569,6 +569,9 @@ isWhereClauseDiffCheckEnabled = fromMaybe True $ readMaybe =<< lookupEnvT @Strin
 isRecachingEnabled :: Bool
 isRecachingEnabled = fromMaybe False $ readMaybe =<< lookupEnvT @String "IS_RECACHING_ENABLED"
 
+isCachingDbFindEnabled :: Bool
+isCachingDbFindEnabled = fromMaybe False $ readMaybe =<< lookupEnvT @String "IS_CACHING_DB_FIND_ENABLED"
+
 shouldLogFindDBCallLogs :: Bool
 shouldLogFindDBCallLogs = fromMaybe False $ readMaybe =<< lookupEnvT @String "IS_FIND_DB_LOGS_ENABLED"
 
