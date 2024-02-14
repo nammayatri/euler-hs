@@ -1101,16 +1101,16 @@
         ]
       },
       "locked": {
-        "lastModified": 1696055637,
-        "narHash": "sha256-RVlpKevWjt9pB9Ia61+ILFcbjB8omiRA6zehmPb6FHg=",
-        "owner": "juspay",
+        "lastModified": 1706179382,
+        "narHash": "sha256-uhv/uKOwu1IfFnYyFFB4k5dMrYcorjs1DCd6ehm9ReA=",
+        "owner": "nammayatri",
         "repo": "haskell-sequelize",
-        "rev": "991064c0b9b5f5cf691b19d53ac6b0c9109a2dff",
+        "rev": "38a8266d1bfa0ade37aa6b3ded2e1435f6839e7e",
         "type": "github"
       },
       "original": {
-        "owner": "juspay",
-        "ref": "beckn-compatible",
+        "owner": "nammayatri",
+        "ref": "backend/decoupled-drainer-changes",
         "repo": "haskell-sequelize",
         "type": "github"
       }

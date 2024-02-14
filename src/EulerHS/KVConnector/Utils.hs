@@ -23,7 +23,7 @@ import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified EulerHS.KVConnector.Encoding as Encoding
 import           EulerHS.KVConnector.Metrics (incrementMetric, KVMetric(..))
-import           EulerHS.KVConnector.Types (MeshMeta(..), MeshResult, MeshError(..), MeshConfig, KVConnector(..), PrimaryKey(..), SecondaryKey(..),
+import           EulerHS.KVConnector.Types (DBCommandVersion' (..), MeshMeta(..), MeshResult, MeshError(..), MeshConfig, KVConnector(..), PrimaryKey(..), SecondaryKey(..),
                     DBLogEntry(..), Operation(..), Source(..), MerchantID(..))
 import qualified EulerHS.Language as L
 import           EulerHS.Types (ApiTag(..))
@@ -41,6 +41,7 @@ import           Data.Either.Extra (mapRight, mapLeft)
 import  EulerHS.KVConnector.Encoding ()
 import           Safe (atMay)
 import qualified EulerHS.Logger.Types as Log
+import           Sequelize.SQLObject (ToSQLObject (..))
 import           EulerHS.KVDB.Types (KVDBReply)
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.HashMap.Internal as HMI
@@ -54,20 +55,24 @@ import           EulerHS.KVConnector.Helper.Utils
 
 jsonKeyValueUpdates ::
   forall be table. (HasCallStack, Model be table, MeshMeta be table)
-  => [Set be table] -> [(Text, A.Value)]
-jsonKeyValueUpdates = fmap jsonSet
+  => DBCommandVersion' -> [Set be table] -> [(Text, A.Value)]
+jsonKeyValueUpdates version = fmap (jsonSet version)
 
 jsonSet ::
   forall be table.
   (HasCallStack, Model be table, MeshMeta be table) =>
-  Set be table -> (Text, A.Value)
-jsonSet (Set column value) = (key, modifiedValue)
+  DBCommandVersion' -> Set be table -> (Text, A.Value)
+jsonSet V1' (Set column value) = (key, modifiedValue)
   where
     key = B._fieldName . fromColumnar' . column . columnize $
       B.dbTableSettings (meshModelTableEntityDescriptor @table @be)
     modifiedValue = A.toJSON value
-
-jsonSet (SetDefault _) = error "Default values are not supported"
+jsonSet V2 (Set column value) = (key, modifiedValue)
+  where
+    key = B._fieldName . fromColumnar' . column . columnize $
+      B.dbTableSettings (meshModelTableEntityDescriptor @table @be)
+    modifiedValue = A.toJSON . convertToSQLObject $ value
+jsonSet _ (SetDefault _) = error "Default values are not supported"
 
 -- | Update the model by setting it's fields according the given
 --   key value mapping.
@@ -244,11 +249,13 @@ secondaryKeysFiltered table = filter filterEmptyValues (secondaryKeys table)
 applyFPair :: (t -> b) -> (t, t) -> (b, b)
 applyFPair f (x, y) = (f x, f y)
 
-getPKeyAndValueList :: forall table. (HasCallStack, KVConnector (table Identity), A.ToJSON (table Identity)) => table Identity -> [(Text, A.Value)]
-getPKeyAndValueList table = do
+getPKeyAndValueList :: forall table. (HasCallStack, KVConnector (table Identity), A.ToJSON (table Identity)) => DBCommandVersion' -> table Identity -> [(Text, A.Value)]
+getPKeyAndValueList version table = do
   let (PKey k) = primaryKey table
       keyValueList = sortBy (compare `on` fst) k
-      rowObject = A.toJSON table
+      rowObject = case version of
+        V1' -> A.toJSON table
+        V2 -> mkSQLObject table
   case rowObject of
     A.Object hm -> DL.foldl' (\acc x -> (go hm x) : acc) [] keyValueList
     _ -> error "Cannot work on row that isn't an Object"
