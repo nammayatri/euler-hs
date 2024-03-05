@@ -493,7 +493,7 @@ getFieldsAndValuesFromClause dt = \case
     processOr xs = concatMap (getFieldsAndValuesFromClause dt) xs
 
     showVal res = case res of
-      A.String r -> T.toLower r
+      A.String r -> r
       A.Number n -> T.pack $ show n
       A.Array l  -> T.pack $ show l
       A.Object o -> T.pack $ show o
