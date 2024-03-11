@@ -33,7 +33,7 @@ import EulerHS.CachedSqlDBQuery
       createSqlWoReturing,
       updateOneSqlWoReturning,
       SqlReturning(..) )
-import           EulerHS.KVConnector.Types (DBCommandVersion' (..), KVConnector(..), MeshConfig, MeshResult, MeshError(..), MeshMeta(..), SecondaryKey(..), tableName, keyMap, Source(..), TableMappings(..))
+import           EulerHS.KVConnector.Types (DBCommandVersion' (..), KVConnector(..), MeshConfig(..), MeshResult, MeshError(..), MeshMeta(..), SecondaryKey(..), tableName, keyMap, Source(..), TableMappings(..))
 import           EulerHS.KVConnector.DBSync (getCreateQuery, getUpdateQuery, getDeleteQuery, getDbDeleteCommandJson, getDbUpdateCommandJson, getDbUpdateCommandJsonWithPrimaryKey, getDbDeleteCommandJsonWithPrimaryKey)
 import           EulerHS.KVConnector.InMemConfig.Flow (searchInMemoryCache, pushToInMemConfigStream, fetchRowFromDBAndAlterImc)
 import           EulerHS.KVConnector.InMemConfig.Types (ImcStreamCommand(..))
@@ -312,7 +312,7 @@ modifyOneKV dbConf meshCfg whereClause mbSetClause updateWoReturning isLive = do
       L.logDebugT "modifyOneKV" ("Modifying nothing - Row is deleted already for " <> tableName @(table Identity))
       pure (KV, Right Nothing)
     Right (kvLiveRows, _) -> do
-      findFromDBIfMatchingFailsRes <- findFromDBIfMatchingFails dbConf whereClause kvLiveRows
+      findFromDBIfMatchingFailsRes <- findFromDBIfMatchingFails dbConf meshCfg{ enableForKVReadOnly = False }  whereClause kvLiveRows
       case findFromDBIfMatchingFailsRes of
         (_, Right [])        -> pure (KV, Right Nothing)
         (SQL, Right [dbRow]) -> updateInKVOrSQL (Just dbRow) updVals setClause
@@ -722,7 +722,7 @@ findWithKVConnector dbConf meshCfg whereClause = do --This function fetches all 
         let matchingRes = findOneMatching whereClause rows
         if isJust matchingRes
           then pure (source, Right matchingRes)
-          else (SQL,) <$> findOneFromDB dbConf whereClause
+          else (SQL,) <$> findOneFromDBWrapper meshCfg (findOneFromDB dbConf whereClause)
       (source, Left err) -> pure (source, Left err)
 
     kvFetch :: m (Source, MeshResult (Maybe (table Identity)))
@@ -734,7 +734,7 @@ findWithKVConnector dbConf meshCfg whereClause = do --This function fetches all 
           case eitherKvRows of
             Right ([], []) -> do
               -- (SQL,) <$> findOneFromDB dbConf whereClause
-              res <- findOneFromDB dbConf whereClause
+              res <- findOneFromDBWrapper meshCfg (findOneFromDB dbConf whereClause)
               case res of
                 Right (Just dbRow) -> do
                   if isCachingDbFindEnabled && meshCfg.meshEnabled
@@ -754,7 +754,7 @@ findWithKVConnector dbConf meshCfg whereClause = do --This function fetches all 
               L.logInfoT "findWithKVConnector" ("Returning nothing - Row is deleted already for " <> tableName @(table Identity))
               pure $ (KV, Right Nothing)
             Right (kvLiveRows, _) -> do
-              second (mapRight DMaybe.listToMaybe) <$> findFromDBIfMatchingFails dbConf whereClause kvLiveRows
+              second (mapRight DMaybe.listToMaybe) <$> findFromDBIfMatchingFails dbConf meshCfg whereClause kvLiveRows
             Left err -> pure (KV, Left err)
         else do
           (SQL,) <$> findOneFromDB dbConf whereClause
@@ -770,13 +770,14 @@ findFromDBIfMatchingFails :: forall be table beM m.
     FromJSON (table Identity),
     L.MonadFlow m) =>
   DBConfig beM ->
+  MeshConfig ->
   Where be table ->
   [table Identity] ->
   m (Source, MeshResult [table Identity])
-findFromDBIfMatchingFails dbConf whereClause kvRows = do
+findFromDBIfMatchingFails dbConf meshCfg whereClause kvRows = do
   case findAllMatching whereClause kvRows of -- For solving partial data case - One row in SQL and one in DB
     [] -> do
-      dbRes <- findOneFromDB dbConf whereClause
+      dbRes <- findOneFromDBWrapper meshCfg (findOneFromDB dbConf whereClause)
       case dbRes of
         Right (Just dbRow) -> do
           let kvPkeys = map getLookupKeyByPKey kvRows
@@ -879,7 +880,7 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
                 ! #limit ((shift +) <$> mbLimit)
                 ! #offset (Just updatedOffset) -- Offset is 0 in case mbOffset Nothing
                 ! defaults)
-          dbRes <- runQuery dbConf findAllQueryUpdated
+          dbRes <- if meshCfg.enableForKVReadOnly then pure $ Right [] else runQuery dbConf findAllQueryUpdated
           case dbRes of
             Left err -> pure $ Left $ MDBError err
             Right [] -> pure $ Right $ applyOptions offset matchedKVLiveRows
@@ -991,7 +992,7 @@ findAllWithKVConnector dbConf meshCfg whereClause = do
       case kvRes of
         Right kvRows -> do
           let matchedKVLiveRows = findAllMatching whereClause (fst kvRows)
-          dbRes <- runQuery dbConf findAllQuery
+          dbRes <- if meshCfg.enableForKVReadOnly then pure $ Right [] else runQuery dbConf findAllQuery
           case dbRes of
             Right dbRows -> pure $ Right $ matchedKVLiveRows ++ getUniqueDBRes dbRows (uncurry (++) kvRows)
             Left err     -> return $ Left $ MDBError err
@@ -1039,7 +1040,7 @@ findAllWithKVAndConditionalDBInternal dbConf meshCfg whereClause orderBy = do
                       ! #where_ whereClause
                       ! #orderBy (if isJust orderBy then Just [DMaybe.fromJust orderBy] else Nothing)
                       ! defaults)
-              dbRes <- runQuery dbConf findAllQueryUpdated
+              dbRes <- if meshCfg.enableForKVReadOnly then pure $ Right [] else runQuery dbConf findAllQueryUpdated
               case dbRes of
                 Right dbRows -> pure $ Right $ getUniqueDBRes dbRows (snd kvRows)
                 Left err     -> return $ Left $ MDBError err
@@ -1267,3 +1268,10 @@ deleteAllReturningWithKVConnector dbConf meshCfg whereClause = do
         | isRecachingEnabled = KV
         | otherwise = KV_AND_SQL
   pure res
+
+findOneFromDBWrapper :: L.MonadFlow m =>
+  MeshConfig -> 
+  m (MeshResult (Maybe (table Identity))) ->
+  m (MeshResult (Maybe (table Identity)))
+findOneFromDBWrapper meshCfg action = do
+  if meshCfg.enableForKVReadOnly then pure $ Right Nothing else action
