@@ -53,6 +53,9 @@ import qualified Database.Redis as DR
 import qualified Data.Maybe as DM
 import           EulerHS.KVConnector.Helper.Utils
 
+redisKeyPrefix :: Text
+redisKeyPrefix = fromMaybe "" $ lookupEnvT "REDIS_KEY_PREFIX"
+
 jsonKeyValueUpdates ::
   forall be table. (HasCallStack, Model be table, MeshMeta be table)
   => DBCommandVersion' -> [Set be table] -> [(Text, A.Value)]
@@ -230,14 +233,14 @@ getLookupKeyByPKey table = do
   let tName = tableName @(table Identity)
   let (PKey k) = primaryKey table
   let lookupKey = getSortedKey k
-  tName <> keyDelim <> lookupKey
+  redisKeyPrefix <> tName <> keyDelim <> lookupKey
 
 getSecondaryLookupKeys :: forall table. (KVConnector (table Identity)) => table Identity -> [Text]
 getSecondaryLookupKeys table = do
   let tName = tableName @(table Identity)
   let skeys = secondaryKeysFiltered table
   let tupList = map (\(SKey s) -> s) skeys
-  let list = map (\x -> tName <> keyDelim <> getSortedKey x ) tupList
+  let list = map (\x -> redisKeyPrefix <> tName <> keyDelim <> getSortedKey x ) tupList
   list
 
 secondaryKeysFiltered :: forall table. (KVConnector (table Identity)) => table Identity -> [SecondaryKey]
@@ -508,7 +511,7 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = 
   where
 
     getPrimaryKeyFromFieldAndValueHelper (k, v) = do
-      let constructedKey = modelName <> "_" <> k <> "_" <> v
+      let constructedKey = redisKeyPrefix <> modelName <> "_" <> k <> "_" <> v
       case HM.lookup k keyHashMap of
         Just True -> pure $ Right $ Just [fromString $ T.unpack (constructedKey <> getShardedHashTag constructedKey)]
         Just False -> do
