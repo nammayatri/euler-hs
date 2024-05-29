@@ -35,11 +35,7 @@ import           Data.Aeson ((.=))
 import Sequelize.SQLObject (ToSQLObject)
 ------------ TYPES AND CLASSES ------------
 
--- toJSON V1 = [] this is how aeson works, so if we add V2 here, it will be not backward compatible
-data DBCommandVersion = V1
-  deriving (Generic, Show, ToJSON, FromJSON)
-
-data DBCommandVersion' = V1' | V2
+data DBCommandVersion = V1 | V2
   deriving (Generic, Show, ToJSON, FromJSON)
 
 data PrimaryKey = PKey [(Text,Text)]
