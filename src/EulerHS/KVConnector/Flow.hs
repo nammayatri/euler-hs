@@ -147,7 +147,7 @@ createKV meshCfg value = do
           shard = getShardedHashTag pKeyText
           pKey = fromString . T.unpack $ pKeyText <> shard
       time <- fromIntegral <$> L.getCurrentDateInMillis
-      let qCmd = getCreateQuery (tableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity))
+      let qCmd = getCreateQuery (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity))
       revMappingRes <- mapM (\secIdx -> do
         let sKey = fromString . T.unpack $ secIdx
         _ <- L.runKVDB meshCfg.kvRedis $ L.sadd sKey [pKey]
@@ -449,8 +449,8 @@ updateObjectRedis meshCfg updVals setClauses addPrimaryKeyToWhereClause whereCla
           shard     = getShardedHashTag pKeyText
           pKey      = fromString . T.unpack $ pKeyText <> shard
           mkUpdateCmd version = if addPrimaryKeyToWhereClause
-                        then getDbUpdateCommandJsonWithPrimaryKey version (tableName @(table Identity)) setClauses obj whereClause
-                        else getDbUpdateCommandJson version (tableName @(table Identity)) setClauses whereClause
+                        then getDbUpdateCommandJsonWithPrimaryKey version (getTableName @(table Identity)) setClauses obj whereClause
+                        else getDbUpdateCommandJson version (getTableName @(table Identity)) setClauses whereClause
           qCmd      = getUpdateQuery (pKeyText <> shard) time meshCfg.meshDBName (mkUpdateCmd V1') (mkUpdateCmd V2) (getTableMappings @(table Identity)) updatedModel
       case resultToEither $ A.fromJSON updatedModel of
         Right value -> do
@@ -1105,8 +1105,8 @@ deleteObjectRedis meshCfg addPrimaryKeyToWhereClause whereClause obj = do
       shard     = getShardedHashTag pKeyText
       pKey      = fromString . T.unpack $ pKeyText <> shard
       mkDeleteCmd version = if addPrimaryKeyToWhereClause
-                    then getDbDeleteCommandJsonWithPrimaryKey version (tableName @(table Identity)) obj whereClause
-                    else getDbDeleteCommandJson version (tableName @(table Identity)) whereClause
+                    then getDbDeleteCommandJsonWithPrimaryKey version (getTableName @(table Identity)) obj whereClause
+                    else getDbDeleteCommandJson version (getTableName @(table Identity)) whereClause
 
       qCmd      = getDeleteQuery (pKeyText <> shard) time meshCfg.meshDBName (mkDeleteCmd V1') (mkDeleteCmd V2) (getTableMappings @(table Identity))
   kvDbRes <- L.runKVDB meshCfg.kvRedis $ L.multiExecWithHash (encodeUtf8 shard) $ do
