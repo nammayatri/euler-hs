@@ -56,6 +56,7 @@ class KVConnector table where
 
 class TableMappings a where
   getTableMappings :: [(String,String)]
+  getTableName :: Text
 
 
 --------------- EXISTING DB MESH ---------------
