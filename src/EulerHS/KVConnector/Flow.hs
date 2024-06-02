@@ -508,7 +508,7 @@ updateObjectRedis meshCfg updVals setClauses addPrimaryKeyToWhereClause whereCla
       let (appendedKeys, appendedValues) = applyFPair (T.intercalate "_") $ unzip sortArr
       if any (\(_, v) -> v=="") kvTup
         then Nothing
-        else Just $ tName <> "_" <> appendedKeys <> "_" <> appendedValues
+        else Just $ redisKeyPrefix <> tName <> "_" <> appendedKeys <> "_" <> appendedValues
 
     isKeyModified :: [(Text, Text)] -> HM.HashMap Text Bool -> Bool
     isKeyModified sKey updValsMap = foldl' (\r k -> HM.member (fst k) updValsMap || r) False sKey

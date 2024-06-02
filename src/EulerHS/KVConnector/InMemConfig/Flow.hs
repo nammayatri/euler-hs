@@ -305,7 +305,7 @@ searchInMemoryCache meshCfg dbConf whereClause = do
       where
 
         getPrimaryKeyFromFieldAndValueHelper (k, v) = do
-          let constructedKey = modelName <> "_" <> k <> "_" <> v
+          let constructedKey = redisKeyPrefix <> modelName <> "_" <> k <> "_" <> v
           case HM.lookup k keyHashMap of
             Just True -> pure $ Right $ Just [fromString $ T.unpack (constructedKey <> getShardedHashTag constructedKey)]
             Just False -> do
