@@ -56,6 +56,12 @@ import           EulerHS.KVConnector.Helper.Utils
 redisKeyPrefix :: Text
 redisKeyPrefix = fromMaybe "" $ lookupEnvT "REDIS_KEY_PREFIX"
 
+dropPrefix :: ByteString -> (Bool, ByteString)
+dropPrefix str
+  -- BSC.drop (BSC.length (fromString (T.unpack redisKeyPrefix))) 
+  | fromString (T.unpack redisKeyPrefix) `BSC.isPrefixOf` str = (True, BSC.drop (BSC.length (fromString (T.unpack redisKeyPrefix))) str)
+  | otherwise = (False,str)
+
 jsonKeyValueUpdates ::
   forall be table. (HasCallStack, Model be table, MeshMeta be table)
   => DBCommandVersion' -> [Set be table] -> [(Text, A.Value)]
@@ -172,7 +178,11 @@ getDataFromPKeysHelper meshCfg (pKey : pKeys) latencyLogging = do
   CM.when latencyLogging $ L.logInfo ("Latency for redisFindAll"::Text)  (show result)
   result <- getDataFromPKeysRedisHelper res
   case result of
-    Left e -> return $ Left e
+    Left e -> do --TODO: Remove after fixing moving to new prefix based system.
+      let dropPrefix' = dropPrefix <$> pKey
+      if not (null dropPrefix') && fst (DL.head dropPrefix')
+        then getDataFromPKeysHelper meshCfg ((snd<$>dropPrefix'):pKeys) latencyLogging
+        else return $ Left e
     Right (a, b) -> do
       remainingPKeysResult <- getDataFromPKeysHelper meshCfg pKeys latencyLogging
       case remainingPKeysResult of
@@ -213,7 +223,10 @@ getDataFromPKeysRedis meshCfg latencyLogging (pKey : pKeys)  = do
                 then return $ Right (decodeRes ++ (fst remainingResult), snd remainingResult)
                 else return $ Right (fst remainingResult, decodeRes ++ (snd remainingResult))
             Left err -> return $ Left err
-        Left e -> return $ Left e
+        Left e -> do
+          -- TODO: Remove this code after prod Release
+          let (hadPrefix, key') = dropPrefix pKey
+          bool (return (Left e)) (getDataFromPKeysRedis meshCfg latencyLogging (key':pKeys)) hadPrefix
     Right Nothing -> do
       getDataFromPKeysRedis meshCfg latencyLogging pKeys
     Left e -> return $ Left $ MRedisError e
