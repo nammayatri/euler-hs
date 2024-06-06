@@ -194,133 +194,138 @@ library
 
   hs-source-dirs:  src
 
-test-suite language
-  import:         common-lang
-  type:           exitcode-stdio-1.0
-  main-is:        Main.hs
-  other-modules:
-    ArtSpec
-    -- CachedDBSpec
-    Client
-    Common
-    DBSetup
-    EulerHS.TestData.Types
-    EulerHS.Testing.Flow.Interpreter
-    EulerHS.Testing.Types
-    HttpAPISpec
-    FlowSpec
-    KVDBArtSpec
-    MaskingSpec
-    PubSubSpec
-    Scenario1
-    SQLArtSpec
-    KV.FlowHelper
-    KV.TestSchema.ServiceConfiguration
-    KV.InsertSpec
-    KV.TestSchema.ThUtils
-    KV.TestSchema.Mesh
-    KV.TestHelper
-    KV.FindOneSpec
+flag enable-tests
+  description: Enable building tests
+  default: False
 
-  build-depends:
-    , aeson
-    , aeson-pretty
-    , async
-    , beam-core
-    , beam-sqlite
-    , beam-mysql
-    , bytestring
-    , containers
-    , data-default
-    , directory
-    , euler-hs
-    , extra
-    , filepath
-    , generic-arbitrary
-    , generic-lens
-    , hedis
-    , hspec
-    , http-client
-    , http-client-tls
-    , named
-    , process
-    , QuickCheck
-    , quickcheck-instances
-    , random
-    , safe-exceptions
-    , sequelize             
-    , servant               
-    , servant-client        
-    , servant-mock         
-    , servant-server        
-    , string-conversions
-    , text
-    , tls
-    , typed-process
-    , unordered-containers
-    , uuid
-    , vector
-    , warp
-    , warp-tls
-    , x509-store
-    , tls
-    , connection
-    , time
-    , tinylog
-    , template-haskell
-    , casing
-    , scientific
-    , hspec-core
-    , cereal
+if flag(enable-tests)
+  test-suite language
+    import:         common-lang
+    type:           exitcode-stdio-1.0
+    main-is:        Main.hs
+    other-modules:
+      ArtSpec
+      -- CachedDBSpec
+      Client
+      Common
+      DBSetup
+      EulerHS.TestData.Types
+      EulerHS.Testing.Flow.Interpreter
+      EulerHS.Testing.Types
+      HttpAPISpec
+      FlowSpec
+      KVDBArtSpec
+      MaskingSpec
+      PubSubSpec
+      Scenario1
+      SQLArtSpec
+      KV.FlowHelper
+      KV.TestSchema.ServiceConfiguration
+      KV.InsertSpec
+      KV.TestSchema.ThUtils
+      KV.TestSchema.Mesh
+      KV.TestHelper
+      KV.FindOneSpec
 
-  ghc-options:    -threaded -O2
-  hs-source-dirs: test/language
+    build-depends:
+      , aeson
+      , aeson-pretty
+      , async
+      , beam-core
+      , beam-sqlite
+      , beam-mysql
+      , bytestring
+      , containers
+      , data-default
+      , directory
+      , euler-hs
+      , extra
+      , filepath
+      , generic-arbitrary
+      , generic-lens
+      , hedis
+      , hspec
+      , http-client
+      , http-client-tls
+      , named
+      , process
+      , QuickCheck
+      , quickcheck-instances
+      , random
+      , safe-exceptions
+      , sequelize             
+      , servant               
+      , servant-client        
+      , servant-mock         
+      , servant-server        
+      , string-conversions
+      , text
+      , tls
+      , typed-process
+      , unordered-containers
+      , uuid
+      , vector
+      , warp
+      , warp-tls
+      , x509-store
+      , tls
+      , connection
+      , time
+      , tinylog
+      , template-haskell
+      , casing
+      , scientific
+      , hspec-core
+      , cereal
 
-test-suite db
-  import:         common-lang
-  type:           exitcode-stdio-1.0
-  main-is:        Main.hs
-  other-modules:
-    KVDB.KVDBSpec
-    SQLDB.TestData.Connections
-    SQLDB.TestData.Scenarios.MySQL
-    SQLDB.TestData.Scenarios.Postgres
-    SQLDB.TestData.Scenarios.SQLite
-    SQLDB.TestData.Types
-    SQLDB.Tests.MySQLDBSpec
-    SQLDB.Tests.PostgresDBSpec
-    SQLDB.Tests.QueryExamplesSpec
-    SQLDB.Tests.SQLiteDBSpec
+    ghc-options:    -threaded -O2
+    hs-source-dirs: test/language
 
-  build-depends:
-    , aeson
-    , beam-core
-    , beam-mysql
-    , beam-postgres
-    , beam-sqlite
-    , bytestring
-    , euler-hs
-    , hspec
-    , mysql-haskell
-    , postgresql-simple
-    , process
-    , servant
-    , servant-mock
-    , time
+  test-suite db
+    import:         common-lang
+    type:           exitcode-stdio-1.0
+    main-is:        Main.hs
+    other-modules:
+      KVDB.KVDBSpec
+      SQLDB.TestData.Connections
+      SQLDB.TestData.Scenarios.MySQL
+      SQLDB.TestData.Scenarios.Postgres
+      SQLDB.TestData.Scenarios.SQLite
+      SQLDB.TestData.Types
+      SQLDB.Tests.MySQLDBSpec
+      SQLDB.Tests.PostgresDBSpec
+      SQLDB.Tests.QueryExamplesSpec
+      SQLDB.Tests.SQLiteDBSpec
 
-  hs-source-dirs: testDB
+    build-depends:
+      , aeson
+      , beam-core
+      , beam-mysql
+      , beam-postgres
+      , beam-sqlite
+      , bytestring
+      , euler-hs
+      , hspec
+      , mysql-haskell
+      , postgresql-simple
+      , process
+      , servant
+      , servant-mock
+      , time
 
-test-suite extra
-  import:         common-lang
-  type:           exitcode-stdio-1.0
-  main-is:        Main.hs
-  other-modules:
-    Options
+    hs-source-dirs: testDB
 
-  build-depends:
-    , aeson
-    , euler-hs
-    , hspec
-    , bytestring
+  test-suite extra
+    import:         common-lang
+    type:           exitcode-stdio-1.0
+    main-is:        Main.hs
+    other-modules:
+      Options
 
-  hs-source-dirs: test/extra
+    build-depends:
+      , aeson
+      , euler-hs
+      , hspec
+      , bytestring
+
+    hs-source-dirs: test/extra
