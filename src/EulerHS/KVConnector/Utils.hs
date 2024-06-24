@@ -59,7 +59,15 @@ redisKeyPrefix = fromMaybe "" $ lookupEnvT "REDIS_KEY_PREFIX"
 dropPrefix :: ByteString -> (Bool, ByteString)
 dropPrefix str
   -- BSC.drop (BSC.length (fromString (T.unpack redisKeyPrefix))) 
-  | fromString (T.unpack redisKeyPrefix) `BSC.isPrefixOf` str = (True, BSC.drop (BSC.length (fromString (T.unpack redisKeyPrefix))) str)
+  | not (null redisKeyPrefix) && fromString (T.unpack redisKeyPrefix) `BSC.isPrefixOf` str = do 
+    -- (True, BSC.drop (BSC.length (fromString (T.unpack redisKeyPrefix))) str)
+    let droppedKey = BSC.drop (BSC.length (fromString (T.unpack redisKeyPrefix))) str
+    -- now we will check if "{shard-" is present in the key if present then don't take anything after {
+    if "{shard-" `BSC.isInfixOf` droppedKey
+      then do 
+        let pkeyText = decodeUtf8 $ BSC.takeWhile (/= '{') droppedKey
+        (True, encodeUtf8 (pkeyText <> getShardedHashTag pkeyText))
+      else (True, droppedKey)
   | otherwise = (False,str)
 
 jsonKeyValueUpdates ::
@@ -173,16 +181,15 @@ getDataFromPKeysHelper :: forall table m. (
 getDataFromPKeysHelper _ [] latencyLogging = pure $ Right ([], [])
 getDataFromPKeysHelper meshCfg (pKey : pKeys) latencyLogging = do
   currentTime <- liftIO getCurrentTime
-  res <- L.runKVDB meshCfg.kvRedis $ L.mget (fromString . T.unpack . decodeUtf8 <$> pKey)
+  let pKeyWithoutPrefix = map dropPrefix pKey
+  -- here we will take all the keys which are true for drop prefix and skip the false ones
+  let pKeys' = map snd $ filter fst pKeyWithoutPrefix
+  res <- L.runKVDB meshCfg.kvRedis $ L.mget (fromString . T.unpack . decodeUtf8 <$> (pKey <> pKeys'))
   result <- liftIO $ latency currentTime
   CM.when latencyLogging $ L.logInfo ("Latency for redisFindAll"::Text)  (show result)
   result <- getDataFromPKeysRedisHelper res
   case result of
-    Left e -> do --TODO: Remove after fixing moving to new prefix based system.
-      let dropPrefix' = dropPrefix <$> pKey
-      if not (null dropPrefix') && fst (DL.head dropPrefix')
-        then getDataFromPKeysHelper meshCfg ((snd<$>dropPrefix'):pKeys) latencyLogging
-        else return $ Left e
+    Left e -> return $ Left e
     Right (a, b) -> do
       remainingPKeysResult <- getDataFromPKeysHelper meshCfg pKeys latencyLogging
       case remainingPKeysResult of
@@ -224,11 +231,12 @@ getDataFromPKeysRedis meshCfg latencyLogging (pKey : pKeys)  = do
                 else return $ Right (fst remainingResult, decodeRes ++ (snd remainingResult))
             Left err -> return $ Left err
         Left e -> do
-          -- TODO: Remove this code after prod Release
-          let (hadPrefix, key') = dropPrefix pKey
-          bool (return (Left e)) (getDataFromPKeysRedis meshCfg latencyLogging (key':pKeys)) hadPrefix
+          -- to handle the case where the key is not found in the redis and log the error
+          L.logErrorT "getDataFromPKeysRedis" $ "Error while decoding: " <> show e
+          return $ Right ([], [])
     Right Nothing -> do
-      getDataFromPKeysRedis meshCfg latencyLogging pKeys
+      let (hadPrefix, keyWithoutPrefix) = dropPrefix pKey
+      bool (getDataFromPKeysRedis meshCfg latencyLogging pKeys) (getDataFromPKeysRedis meshCfg latencyLogging (keyWithoutPrefix : pKeys)) hadPrefix
     Left e -> return $ Left $ MRedisError e
 
 ------------- KEY UTILS ------------------
@@ -530,7 +538,16 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = 
         Just False -> do
           res <- L.runKVDB meshCfg.kvRedis $ L.smembers (fromString $ T.unpack constructedKey)
           case res of
-            Right r -> pure $ Right $ Just r
+            -- Todo: To be removed after redis key prefix is implemented
+            -- Right r -> pure $ Right $ Just r 
+            Right r -> do
+              let (hadPrefix, keyWithoutPrefix) = dropPrefix (fromString $ T.unpack constructedKey)
+              if hadPrefix 
+                then do
+                  result' <- L.runKVDB meshCfg.kvRedis $ L.smembers keyWithoutPrefix
+                  let withoutPrefixResult = either (const []) id result'
+                  pure $ Right $ Just $ r ++ withoutPrefixResult
+                else pure $ Right $ Just r
             Left e -> pure $ Left $ MRedisError e
         _ -> pure $ Right Nothing
 
