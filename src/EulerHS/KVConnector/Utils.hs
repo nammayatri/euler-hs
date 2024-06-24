@@ -181,10 +181,7 @@ getDataFromPKeysHelper :: forall table m. (
 getDataFromPKeysHelper _ [] latencyLogging = pure $ Right ([], [])
 getDataFromPKeysHelper meshCfg (pKey : pKeys) latencyLogging = do
   currentTime <- liftIO getCurrentTime
-  let pKeyWithoutPrefix = map dropPrefix pKey
-  -- here we will take all the keys which are true for drop prefix and skip the false ones
-  let pKeys' = map snd $ filter fst pKeyWithoutPrefix
-  res <- L.runKVDB meshCfg.kvRedis $ L.mget (fromString . T.unpack . decodeUtf8 <$> (pKey <> pKeys'))
+  res <- L.runKVDB meshCfg.kvRedis $ L.mget (fromString . T.unpack . decodeUtf8 <$> pKey)
   result <- liftIO $ latency currentTime
   CM.when latencyLogging $ L.logInfo ("Latency for redisFindAll"::Text)  (show result)
   result <- getDataFromPKeysRedisHelper res
@@ -204,7 +201,11 @@ getDataFromPKeysRedis' :: forall table m. (
     L.MonadFlow m, MonadIO m) => MeshConfig -> Bool -> [ByteString] -> m (MeshResult ([table Identity], [table Identity]))
 getDataFromPKeysRedis' _ _ []  = pure $ Right ([], [])
 getDataFromPKeysRedis' meshCfg latencyLogging pKeys = do
-  let groupedKeys = groupKeysBySlot pKeys
+  -- Todo: to be removed
+  let pKeyWithoutPrefix = map dropPrefix pKeys
+  -- here we will take all the keys which are true for drop prefix and skip the false ones
+  let pKeys' = map snd $ filter fst pKeyWithoutPrefix
+  let groupedKeys = groupKeysBySlot (pKeys <> pKeys')
   getDataFromPKeysHelper meshCfg groupedKeys latencyLogging
 
 getDataFromPKeysRedis :: forall table m. (
@@ -235,6 +236,7 @@ getDataFromPKeysRedis meshCfg latencyLogging (pKey : pKeys)  = do
           L.logErrorT "getDataFromPKeysRedis" $ "Error while decoding: " <> show e
           return $ Right ([], [])
     Right Nothing -> do
+      -- Todo: to be removed
       let (hadPrefix, keyWithoutPrefix) = dropPrefix pKey
       bool (getDataFromPKeysRedis meshCfg latencyLogging pKeys) (getDataFromPKeysRedis meshCfg latencyLogging (keyWithoutPrefix : pKeys)) hadPrefix
     Left e -> return $ Left $ MRedisError e
