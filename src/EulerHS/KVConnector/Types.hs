@@ -107,6 +107,7 @@ data MeshConfig = MeshConfig
   , kvRedis         :: Text
   , redisTtl        :: L.KVDBDuration
   , kvHardKilled    :: Bool
+  , enableForKVReadOnly :: Bool
   }
   deriving (Generic, Eq, Show, A.ToJSON)
 
