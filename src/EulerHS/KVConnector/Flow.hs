@@ -154,7 +154,7 @@ createKV meshCfg value = do
         L.runKVDB meshCfg.kvRedis $ L.expire sKey meshCfg.redisTtl
         ) $ getSecondaryLookupKeys val
       case foldEither revMappingRes of
-        Left err -> pure $ Left $ MRedisError err
+        Left err -> pure $ Left $ RedisError (show err <> "Primary key => " <> show pKey <> " Secondary key => " <> show (getSecondaryLookupKeys val) <> " in createKV")
         Right _ -> do
           kvRes <- L.runKVDB meshCfg.kvRedis $ L.multiExecWithHash (encodeUtf8 shard) $ do
             _ <- L.xaddTx
@@ -164,7 +164,7 @@ createKV meshCfg value = do
             L.setexTx pKey meshCfg.redisTtl (BSL.toStrict $ Encoding.encode_ meshCfg.cerealEnabled val)
           case kvRes of
             Right _ -> pure $ Right val
-            Left err -> pure $ Left (MRedisError err)
+            Left err -> pure $ Left $ RedisError (show err <> "Primary key => " <> show pKey <> " Secondary key => " <> show (getSecondaryLookupKeys val) <> " in createKV")
     Left err -> pure $ Left err
 
 
@@ -188,13 +188,13 @@ createInRedis meshCfg val = do
     L.runKVDB meshCfg.kvRedis $ L.expire sKey meshCfg.redisTtl
     ) $ getSecondaryLookupKeys val
   case foldEither revMappingRes of
-    Left err -> pure $ Left $ MRedisError err
+    Left err -> pure $ Left $ RedisError (show err <> "Primary key => " <> show pKey <> " Secondary key => " <> show (getSecondaryLookupKeys val))
     Right _ -> do
       kvRes <- L.runKVDB meshCfg.kvRedis $ L.multiExecWithHash (encodeUtf8 shard) $
         L.setexTx pKey meshCfg.redisTtl (BSL.toStrict $ Encoding.encode_ meshCfg.cerealEnabled val)
       case kvRes of
         Right _ -> pure $ Right val
-        Left err -> pure $ Left (MRedisError err)
+        Left err -> pure $ Left (RedisError (show err <> "Primary key => " <> show pKey <> " Secondary key => " <> show (getSecondaryLookupKeys val)))
 
 ---------------- Update -----------------
 
@@ -382,7 +382,7 @@ modifyOneKV dbConf meshCfg whereClause mbSetClause updateWoReturning isLive = do
               Right (Just obj) -> do
                 reCacheDBRowsRes <- reCacheDBRows meshCfg [obj]
                 case reCacheDBRowsRes of
-                  Left err -> return $ Left $ MRedisError err
+                  Left err -> return $ Left $ RedisError (show err <> "Primary key => " <> show (getLookupKeyByPKey obj) <> " Secondary key => " <> show (getSecondaryLookupKeys obj) <> " in updateInKVOrSQL")
                   Right _  -> mapRight Just <$> if isLive
                     then updateObjectRedis meshCfg updVals setClause False whereClause obj
                     else deleteObjectRedis meshCfg False whereClause obj
@@ -466,7 +466,7 @@ updateObjectRedis meshCfg updVals setClauses addPrimaryKeyToWhereClause whereCla
                 L.setexTx pKey meshCfg.redisTtl (BSL.toStrict $ Encoding.encode_ meshCfg.cerealEnabled value)
               case kvdbRes of
                 Right _ -> pure $ Right value
-                Left err -> pure $ Left $ MRedisError err
+                Left err -> pure $ Left $ RedisError (show err <> "Primary key => " <> show pKey <> " Secondary key => " <> show (getSecondaryLookupKeys value) <> " in updateObjectRedis")
             Left err -> pure $ Left err
         Left err -> pure $ Left $ MDecodingError err
 
@@ -643,7 +643,7 @@ updateKVAndDBResults meshCfg whereClause eitherDbRows eitherKvRows mbUpdateVals 
           let uniqueDbRows =  getUniqueDBRes allDBRows kvLiveAndDeadRows
           reCacheDBRowsRes <- reCacheDBRows meshCfg uniqueDbRows
           case reCacheDBRowsRes of
-            Left err -> return $ Left $ MRedisError err
+            Left err -> return $ Left $ RedisError (show err <> "Primary key => " <> show (getLookupKeyByPKey <$> uniqueDbRows) <> " Secondary key => " <> show (getSecondaryLookupKeys <$> uniqueDbRows) <> " in updateKVAndDBResults")
             Right _  -> do
               let allRows = matchedKVLiveRows ++ uniqueDbRows
               sequence <$> if isLive
@@ -1116,7 +1116,7 @@ deleteObjectRedis meshCfg addPrimaryKeyToWhereClause whereClause obj = do
           [("command", BSL.toStrict $ A.encode qCmd)]
     L.setexTx pKey meshCfg.redisTtl (BSL.toStrict $ Encoding.encodeDead $ Encoding.encode_ meshCfg.cerealEnabled obj)
   case kvDbRes of
-    Left err -> return . Left $ MRedisError err
+    Left err -> return . Left $ RedisError (show err <> " for key " <> show pKey <> "in DeleteObjectRedis")
     Right _  -> do
       when meshCfg.memcacheEnabled $ pushToInMemConfigStream meshCfg ImcDelete obj
       return $ Right obj
