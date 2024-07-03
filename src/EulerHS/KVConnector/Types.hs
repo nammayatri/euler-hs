@@ -82,6 +82,7 @@ data MeshError
   = MKeyNotFound Text
   | MDBError T.DBError
   | MRedisError T.KVDBReply
+  | RedisError Text
   | MDecodingError Text
   | MUpdateFailed Text
   | MMultipleKeysFound Text

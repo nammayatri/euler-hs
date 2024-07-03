@@ -126,7 +126,7 @@ getDataFromRedisForPKey meshCfg pKey = do
       let traceMsg = "redis_fetch_noexist: Could not find key: " <> show pKey
       L.logWarningT "getCacheWithHash" traceMsg
       return $ Right Nothing
-    Left e -> return $ Left $ MRedisError e
+    Left e -> return $ Left $ RedisError $ (show e <> " for key: " <> show pKey <> " in getDataFromRedisForPKey")
 
 
 slotMap :: SMap.Map DR.HashSlot [ByteString]
@@ -239,7 +239,7 @@ getDataFromPKeysRedis meshCfg latencyLogging (pKey : pKeys)  = do
       -- Todo: to be removed
       let (hadPrefix, keyWithoutPrefix) = dropPrefix pKey
       bool (getDataFromPKeysRedis meshCfg latencyLogging pKeys) (getDataFromPKeysRedis meshCfg latencyLogging (keyWithoutPrefix : pKeys)) hadPrefix
-    Left e -> return $ Left $ MRedisError e
+    Left e -> return $ Left $ RedisError $ (show e <> " for key: " <> show (pKey : pKeys))
 
 ------------- KEY UTILS ------------------
 
@@ -550,7 +550,7 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = 
                   let withoutPrefixResult = either (const []) id result'
                   pure $ Right $ Just $ r ++ withoutPrefixResult
                 else pure $ Right $ Just r
-            Left e -> pure $ Left $ MRedisError e
+            Left e -> pure $ Left $ RedisError $ (show e <> " for key: " <> show constructedKey)
         _ -> pure $ Right Nothing
 
     intersectList (x : y : xs) = intersectList (intersect x y : xs)
