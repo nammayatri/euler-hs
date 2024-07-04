@@ -58,6 +58,7 @@ import qualified EulerHS.KVConnector.Encoding as Encoding
 import qualified Data.Maybe as DMaybe
 import Data.Time.Clock(getCurrentTime, NominalDiffTime, UTCTime, diffUTCTime)
 import qualified System.Environment as SE
+import qualified EulerHS.KVConnector.Metrics as Metrics
 
 createWoReturingKVConnector :: forall (table :: (Type -> Type) -> Type) be m beM.
   ( HasCallStack,
@@ -811,15 +812,19 @@ findOneFromRedis meshCfg whereClause = do
       modelName = tableName @(table Identity)
       keyHashMap = keyMap @(table Identity)
       andCombinationsFiltered = mkUniq $ filterPrimaryAndSecondaryKeys keyHashMap <$> andCombinations
+      secondaryKeyLength = sum $ getSecondaryKeyLength keyHashMap <$> andCombinationsFiltered
   eitherKeyRes <- mapM (getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap) andCombinationsFiltered
   case foldEither eitherKeyRes of
     Right keyRes -> do
       L.logDebugT "findOneFromRedis" ("KeyRes: " <> show keyRes)
+      let lenKeyRes = lengthOfLists keyRes
       latencyLogging <- liftIO $ fromMaybe False . (>>= readMaybe) <$> SE.lookupEnv "EULER_LOG_REDIS_LANTECY"
       allRowsRes <- foldEither <$> mapM (getDataFromPKeysRedis meshCfg latencyLogging) (mkUniq keyRes)
       case allRowsRes of
         Right allRowsResPairList -> do
           let (allRowsResLiveListOfList, allRowsResDeadListOfList) = unzip allRowsResPairList
+              total_length = secondaryKeyLength + lenKeyRes
+          Metrics.incrementRedisCallMetric "REDIS_FIND_ONE" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit )
           return $ Right (concat allRowsResLiveListOfList, concat allRowsResDeadListOfList)
         Left err -> return $ Left err
     Left err -> pure $ Left err
@@ -1070,15 +1075,19 @@ redisFindAll meshCfg whereClause = do
       modelName = tableName @(table Identity)
       keyHashMap = keyMap @(table Identity)
       andCombinationsFiltered = mkUniq $ filterPrimaryAndSecondaryKeys keyHashMap <$> andCombinations
+      secondaryKeyLength = sum $ getSecondaryKeyLength keyHashMap <$> andCombinationsFiltered
   eitherKeyRes <- mapM (getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap) andCombinationsFiltered
   flagPipe <- liftIO $ fromMaybe False . (>>= readMaybe) <$> SE.lookupEnv "enablePipelining" -- Just for Testing
   latencyLogging <- liftIO $ fromMaybe False . (>>= readMaybe) <$> SE.lookupEnv "EULER_LOG_REDIS_LANTECY" -- Just for Testing
   case foldEither eitherKeyRes of
     Right keyRes -> do
+      let lenKeyRes = lengthOfLists keyRes
       allRowsRes <- (if flagPipe then foldEither <$> mapM (getDataFromPKeysRedis' meshCfg latencyLogging) (mkUniq keyRes) else foldEither <$> mapM (getDataFromPKeysRedis meshCfg latencyLogging) (mkUniq keyRes))
       case allRowsRes of
         Right allRowsResPairList -> do
           let (allRowsResLiveListOfList, allRowsResDeadListOfList) = unzip allRowsResPairList
+              total_length = secondaryKeyLength + lenKeyRes
+          Metrics.incrementRedisCallMetric "REDIS_FIND_ALL" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit )
           return $ Right (concat allRowsResLiveListOfList, concat allRowsResDeadListOfList)
         Left err -> return $ Left err
     Left err -> pure $ Left err
