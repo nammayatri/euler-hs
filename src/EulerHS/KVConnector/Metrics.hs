@@ -25,7 +25,8 @@ incrementKVMetric handle metric dblog isLeftRes = do
   L.runIO $ ((kvCounter handle) (metric, tag, action, source, model, mid, latency, cpuLatency, diffFound, isLeftRes))
 
 data KVMetricHandler = KVMetricHandler
-  { kvCounter :: (KVMetric, Text, Operation, Source, Text, Text, Int, Integer, Bool, Bool) -> IO ()
+  { kvCounter :: (KVMetric, Text, Operation, Source, Text, Text, Int, Integer, Bool, Bool) -> IO (),
+    kvCalls :: (Text, Text, Text, Int, Bool, Bool) -> IO()
   }
 
 data KVMetric = KVAction
@@ -33,13 +34,19 @@ data KVMetric = KVAction
 mkKVMetricHandler :: IO KVMetricHandler
 mkKVMetricHandler = do
   metrics <- register collectionLock
-  pure $ KVMetricHandler $ \case
-    (KVAction, tag, action, source, model , mid, latency, cpuLatency, diffFound, isLeftRes) -> do
-      inc (metrics </> #kv_action_counter) tag action source model  mid
-      observe (metrics </> #kv_latency_observe) (int2Double latency) tag action source model
-      observe (metrics </> #kv_cpu_latency_observe) (fromInteger cpuLatency) tag action source model
-      when diffFound $ inc (metrics </> #kv_diff_counter) tag action source model
-      when isLeftRes $ inc (metrics </> #kv_sql_error_counter) tag action source model mid
+  pure $ KVMetricHandler  
+    (\case
+      (KVAction, tag, action, source, model , mid, latency, cpuLatency, diffFound, isLeftRes) -> do
+        -- inc (metrics </> #kv_action_counter) tag action source model  mid
+        -- observe (metrics </> #kv_latency_observe) (int2Double latency) tag action source model
+        -- observe (metrics </> #kv_cpu_latency_observe) (fromInteger cpuLatency) tag action source model
+        -- when diffFound $ inc (metrics </> #kv_diff_counter) tag action source model
+        when isLeftRes $ inc (metrics </> #kv_sql_error_counter) tag action source model mid)
+    (\case
+      (tag,action,model,_redisCalls,redisSoftLimitExceeded, redisHardLimitExceeded) -> do
+            when redisSoftLimitExceeded (inc (metrics </> #kvRedis_soft_db_limit_exceeded) tag action model)
+            when redisHardLimitExceeded (inc (metrics </> #kvRedis_hard_db_limit_exceeded) tag action model))
+
 
 kv_action_counter = counter #kv_action_counter
       .& lbl @"tag" @Text
@@ -78,12 +85,22 @@ kv_cpu_latency_observe = histogram #kv_cpu_latency_observe
       .& lbl @"model" @Text
       .& build
 
+kvRedis_soft_db_limit_exceeded = counter #kvRedis_soft_db_limit_exceeded
+      .& lbl @"tag" @Text
+      .& lbl @"action" @Text
+      .& lbl @"model" @Text
+      .& build
+
+kvRedis_hard_db_limit_exceeded = counter #kvRedis_hard_db_limit_exceeded
+      .& lbl @"tag" @Text
+      .& lbl @"action" @Text
+      .& lbl @"model" @Text
+      .& build
+
 collectionLock =
-     kv_action_counter
-  .> kv_diff_counter
-  .> kv_sql_error_counter
-  .> kv_latency_observe
-  .> kv_cpu_latency_observe
+  kv_sql_error_counter
+  .> kvRedis_soft_db_limit_exceeded
+  .> kvRedis_hard_db_limit_exceeded
   .> MNil
 
 
@@ -108,3 +125,17 @@ incrementMetric metric dblog isLeftRes = when isKVMetricEnabled $ do
   case env of
     Just val -> incrementKVMetric val metric dblog isLeftRes
     Nothing -> pure ()
+
+
+incrementKVRedisCallsMetric :: L.MonadFlow m => KVMetricHandler -> Text -> Text -> Text -> Int ->Bool -> Bool -> m()
+incrementKVRedisCallsMetric handler tag action model redisCalls redisSoftLimitExceeded redisHardLimitExceeded = do
+      L.runIO $ kvCalls handler (tag, action, model, redisCalls, redisSoftLimitExceeded,redisHardLimitExceeded)
+
+incrementRedisCallMetric :: (HasCallStack , L.MonadFlow m) => Text -> Text -> Int -> Bool -> Bool -> m()
+incrementRedisCallMetric action model dbCalls redisSoftLimitExceeded redisHardLimitExceeded  = do  --when isKVMetricEnabled $ do
+      env <- L.getOption KVMetricCfg
+      case env of
+            Just val -> do
+                   let tag = "redisCallMetrics"
+                   incrementKVRedisCallsMetric val tag action model dbCalls redisSoftLimitExceeded redisHardLimitExceeded
+            Nothing -> pure ()

@@ -560,6 +560,9 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = 
 filterPrimaryAndSecondaryKeys :: HM.HashMap Text Bool -> [(Text, Text)] -> [(Text, Text)]
 filterPrimaryAndSecondaryKeys keyHashMap fieldsAndValues = filter (\(k, _) -> HM.member k keyHashMap) fieldsAndValues
 
+getSecondaryKeyLength :: HM.HashMap Text Bool -> [(Text, Text)] -> Int
+getSecondaryKeyLength keyHashMap = length . filter (\(k, _) -> HM.lookup k keyHashMap == Just False)
+
 mkUniq :: Ord a => [a] -> [a] -- O(n log n)
 mkUniq = Set.toList . Set.fromList
 
@@ -608,7 +611,16 @@ isCachingDbFindEnabled :: Bool
 isCachingDbFindEnabled = fromMaybe False $ readMaybe =<< lookupEnvT @String "IS_CACHING_DB_FIND_ENABLED"
 
 shouldLogFindDBCallLogs :: Bool
-shouldLogFindDBCallLogs = fromMaybe False $ readMaybe =<< lookupEnvT @String "IS_FIND_DB_LOGS_ENABLED"
+shouldLogFindDBCallLogs = fromMaybe False $ readMaybe =<< lookupEnvT  @String "IS_FIND_DB_LOGS_ENABLED"
+
+redisCallsHardLimit :: Int
+redisCallsHardLimit = fromMaybe 5000 $ readMaybe =<< lookupEnvT @String "REDIS_CALLS_HARD_LIMIT"
+
+redisCallsSoftLimit :: Int
+redisCallsSoftLimit = fromMaybe 100 $ readMaybe =<< lookupEnvT @String "REDIS_CALLS_SOFT_LIMIT"
+
+lengthOfLists :: [[a]] -> Int
+lengthOfLists = foldl' (\acc el -> acc + length el) 0
 
 isLogsEnabledForModel :: Text -> Bool
 isLogsEnabledForModel modelName = do
