@@ -52,6 +52,7 @@ import           Sequelize (fromColumnar', columnize, sqlSelect, sqlSelect', sql
 import qualified Database.Beam as B
 import qualified Database.Beam.Postgres as BP
 import           Data.Either.Extra (mapRight, mapLeft)
+import qualified Data.Text.Encoding as TE
 import           Named (defaults, (!))
 import qualified Data.Serialize as Serialize
 import qualified EulerHS.KVConnector.Encoding as Encoding
@@ -151,6 +152,10 @@ createKV meshCfg value = do
       let qCmd = getCreateQuery (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity))
       revMappingRes <- mapM (\secIdx -> do
         let sKey = fromString . T.unpack $ secIdx
+        --  Todo : To be removed after the migration
+        when createWithoutPrefix $ let (hadPrefix, sKey') = dropPrefix sKey in
+          when hadPrefix $ let (hadPrefix, pKey') = dropPrefix pKey in when hadPrefix $ void $ L.runKVDB meshCfg.kvRedis $ L.sadd sKey' [pKey'] >> L.expire sKey' meshCfg.redisTtl
+          -- -------------------------------------
         _ <- L.runKVDB meshCfg.kvRedis $ L.sadd sKey [pKey]
         L.runKVDB meshCfg.kvRedis $ L.expire sKey meshCfg.redisTtl
         ) $ getSecondaryLookupKeys val
@@ -163,6 +168,7 @@ createKV meshCfg value = do
                   L.AutoID
                   [("command", BSL.toStrict $ A.encode qCmd)]
             L.setexTx pKey meshCfg.redisTtl (BSL.toStrict $ Encoding.encode_ meshCfg.cerealEnabled val)
+          when createWithoutPrefix $ let (hadPrefix, pKey') = dropPrefix pKey in void $ when hadPrefix $ void $ L.runKVDB meshCfg.kvRedis $ L.setex pKey' meshCfg.redisTtl (BSL.toStrict $ Encoding.encode_ meshCfg.cerealEnabled val)
           case kvRes of
             Right _ -> pure $ Right val
             Left err -> pure $ Left $ RedisError (show err <> "Primary key => " <> show pKey <> " Secondary key => " <> show (getSecondaryLookupKeys val) <> " in createKV")
@@ -185,6 +191,10 @@ createInRedis meshCfg val = do
       pKey = fromString . T.unpack $ pKeyText <> shard
   revMappingRes <- mapM (\secIdx -> do
     let sKey = fromString . T.unpack $ secIdx
+    --  Todo : To be removed after the migration
+    when createWithoutPrefix $ let (hadPrefix, sKey') = dropPrefix sKey in
+      when hadPrefix $ let (hadPrefix, pKey') = dropPrefix pKey in when hadPrefix $ void $ L.runKVDB meshCfg.kvRedis $ L.sadd sKey' [pKey'] >> L.expire sKey' meshCfg.redisTtl
+      -- -------------------------------------
     _ <- L.runKVDB meshCfg.kvRedis $ L.sadd sKey [pKey]
     L.runKVDB meshCfg.kvRedis $ L.expire sKey meshCfg.redisTtl
     ) $ getSecondaryLookupKeys val
@@ -193,6 +203,7 @@ createInRedis meshCfg val = do
     Right _ -> do
       kvRes <- L.runKVDB meshCfg.kvRedis $ L.multiExecWithHash (encodeUtf8 shard) $
         L.setexTx pKey meshCfg.redisTtl (BSL.toStrict $ Encoding.encode_ meshCfg.cerealEnabled val)
+      when createWithoutPrefix $ let (hadPrefix, pKey') = dropPrefix pKey in void $ when hadPrefix $ void $ L.runKVDB meshCfg.kvRedis $ L.setex pKey' meshCfg.redisTtl (BSL.toStrict $ Encoding.encode_ meshCfg.cerealEnabled val)
       case kvRes of
         Right _ -> pure $ Right val
         Left err -> pure $ Left (RedisError (show err <> "Primary key => " <> show pKey <> " Secondary key => " <> show (getSecondaryLookupKeys val)))
@@ -465,6 +476,7 @@ updateObjectRedis meshCfg updVals setClauses addPrimaryKeyToWhereClause whereCla
                       L.AutoID
                       [("command", BSL.toStrict $ A.encode qCmd)]
                 L.setexTx pKey meshCfg.redisTtl (BSL.toStrict $ Encoding.encode_ meshCfg.cerealEnabled value)
+              when createWithoutPrefix $ let (hadPrefix, pKey') = dropPrefix pKey in void $ when hadPrefix $ void $ L.runKVDB meshCfg.kvRedis $ L.setex pKey' meshCfg.redisTtl (BSL.toStrict $ Encoding.encode_ meshCfg.cerealEnabled value)
               case kvdbRes of
                 Right _ -> pure $ Right value
                 Left err -> pure $ Left $ RedisError (show err <> "Primary key => " <> show pKey <> " Secondary key => " <> show (getSecondaryLookupKeys value) <> " in updateObjectRedis")
@@ -492,6 +504,8 @@ updateObjectRedis meshCfg updVals setClauses addPrimaryKeyToWhereClause whereCla
     resetTTL Nothing = pure $ Right False
     resetTTL (Just key) = do
       x <- L.rExpire meshCfg.kvRedis (fromString $ T.unpack key) meshCfg.redisTtl
+      when createWithoutPrefix $ let (hadPrefix, key') = dropPrefix (fromString $ T.unpack key) in
+        when hadPrefix $ void $ L.rExpire meshCfg.kvRedis (TE.decodeUtf8 key') meshCfg.redisTtl
       pure $ mapLeft MRedisError x
 
     deletePkeyFromSkey _ Nothing = pure $ Right 0
@@ -501,6 +515,9 @@ updateObjectRedis meshCfg updVals setClauses addPrimaryKeyToWhereClause whereCla
     addPkeyToSkey _ Nothing = pure $ Right False
     addPkeyToSkey pKey (Just key) = do
       _ <- L.rSadd meshCfg.kvRedis (fromString $ T.unpack key) [pKey]
+      when createWithoutPrefix $ let (hadPrefix, key') = dropPrefix (fromString $ T.unpack key) in
+        when hadPrefix $ let (hadPrefix, pKey') = dropPrefix pKey in when hadPrefix $ void $ L.rSadd meshCfg.kvRedis key' [pKey'] >> L.rExpire meshCfg.kvRedis (TE.decodeUtf8 key') meshCfg.redisTtl
+        -- -------------------------------------
       mapLeft MRedisError <$> L.rExpireB meshCfg.kvRedis (fromString $ T.unpack key) meshCfg.redisTtl
 
     getSortedKeyAndValue :: Text -> [(Text,Text)] -> Maybe Text
@@ -1124,6 +1141,8 @@ deleteObjectRedis meshCfg addPrimaryKeyToWhereClause whereClause obj = do
           L.AutoID
           [("command", BSL.toStrict $ A.encode qCmd)]
     L.setexTx pKey meshCfg.redisTtl (BSL.toStrict $ Encoding.encodeDead $ Encoding.encode_ meshCfg.cerealEnabled obj)
+  when createWithoutPrefix $ let (hadPrefix, pKeyWithoutPrefix) = dropPrefix pKey in
+    when hadPrefix $ void $ L.runKVDB meshCfg.kvRedis $ L.setex pKeyWithoutPrefix meshCfg.redisTtl (BSL.toStrict $ Encoding.encodeDead $ Encoding.encode_ meshCfg.cerealEnabled obj)
   case kvDbRes of
     Left err -> return . Left $ RedisError (show err <> " for key " <> show pKey <> "in DeleteObjectRedis")
     Right _  -> do
@@ -1150,6 +1169,10 @@ reCacheDBRows meshCfg dbRows = do
       res <- mapM (\secIdx -> do -- Recaching Skeys in redis
           let sKey = fromString . T.unpack $ secIdx
           res1 <- L.runKVDB meshCfg.kvRedis $ L.sadd sKey [pKey]
+          -- Todo: Remove this 
+          when createWithoutPrefix $ let (hadPrefix, sKeyWithoutPrefix) = dropPrefix sKey in
+            when hadPrefix $ let (hadPrefix, pKeyWithoutPrefix) = dropPrefix pKey in
+              when hadPrefix $ void $ L.runKVDB meshCfg.kvRedis $ L.sadd sKeyWithoutPrefix [pKeyWithoutPrefix] >> L.expire sKeyWithoutPrefix meshCfg.redisTtl
           case res1 of
             Left err -> return $ Left err
             Right _  ->

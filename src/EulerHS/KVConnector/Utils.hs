@@ -56,6 +56,12 @@ import           EulerHS.KVConnector.Helper.Utils
 redisKeyPrefix :: Text
 redisKeyPrefix = fromMaybe "" $ lookupEnvT "REDIS_KEY_PREFIX"
 
+findWithoutPrefix :: Bool
+findWithoutPrefix = fromMaybe False $ readMaybe =<< lookupEnvT @String "FIND_WITHOUT_PREFIX"
+
+createWithoutPrefix :: Bool
+createWithoutPrefix = fromMaybe False $ readMaybe =<< lookupEnvT @String "CREATE_WITHOUT_PREFIX"
+
 dropPrefix :: ByteString -> (Bool, ByteString)
 dropPrefix str
   -- BSC.drop (BSC.length (fromString (T.unpack redisKeyPrefix))) 
@@ -199,13 +205,15 @@ getDataFromPKeysRedis' :: forall table m. (
     FromJSON (table Identity),
     Serialize.Serialize (table Identity),
     L.MonadFlow m, MonadIO m) => MeshConfig -> Bool -> [ByteString] -> m (MeshResult ([table Identity], [table Identity]))
-getDataFromPKeysRedis' _ _ []  = pure $ Right ([], [])
+getDataFromPKeysRedis' _ _ [] = pure $ Right ([], [])
 getDataFromPKeysRedis' meshCfg latencyLogging pKeys = do
-  -- Todo: to be removed
-  let pKeyWithoutPrefix = map dropPrefix pKeys
-  -- here we will take all the keys which are true for drop prefix and skip the false ones
-  let pKeys' = map snd $ filter fst pKeyWithoutPrefix
-  let groupedKeys = groupKeysBySlot (pKeys <> pKeys')
+  let primaryKeys = if findWithoutPrefix then
+                      let pKeyWithoutPrefix = map dropPrefix pKeys
+                          -- Here we take all the keys which are true for dropPrefix and skip the false ones
+                          pKeys' = map snd $ filter fst pKeyWithoutPrefix
+                      in pKeys <> pKeys'
+                    else pKeys
+  let groupedKeys = groupKeysBySlot primaryKeys
   getDataFromPKeysHelper meshCfg groupedKeys latencyLogging
 
 getDataFromPKeysRedis :: forall table m. (
@@ -237,8 +245,10 @@ getDataFromPKeysRedis meshCfg latencyLogging (pKey : pKeys)  = do
           return $ Right ([], [])
     Right Nothing -> do
       -- Todo: to be removed
-      let (hadPrefix, keyWithoutPrefix) = dropPrefix pKey
-      bool (getDataFromPKeysRedis meshCfg latencyLogging pKeys) (getDataFromPKeysRedis meshCfg latencyLogging (keyWithoutPrefix : pKeys)) hadPrefix
+      let pKeys' = if findWithoutPrefix then 
+            let (hadPrefix, keyWithoutPrefix) = dropPrefix pKey in if hadPrefix then (keyWithoutPrefix : pKeys) else pKeys
+          else pKeys
+      getDataFromPKeysRedis meshCfg latencyLogging pKeys'
     Left e -> return $ Left $ RedisError $ (show e <> " for key: " <> show (pKey : pKeys))
 
 ------------- KEY UTILS ------------------
@@ -543,12 +553,15 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = 
             -- Todo: To be removed after redis key prefix is implemented
             -- Right r -> pure $ Right $ Just r 
             Right r -> do
-              let (hadPrefix, keyWithoutPrefix) = dropPrefix (fromString $ T.unpack constructedKey)
-              if hadPrefix 
+              if findWithoutPrefix
                 then do
-                  result' <- L.runKVDB meshCfg.kvRedis $ L.smembers keyWithoutPrefix
-                  let withoutPrefixResult = either (const []) id result'
-                  pure $ Right $ Just $ r ++ withoutPrefixResult
+                  let (hadPrefix, keyWithoutPrefix) = dropPrefix (fromString $ T.unpack constructedKey)
+                  if hadPrefix 
+                    then do
+                      result' <- L.runKVDB meshCfg.kvRedis $ L.smembers keyWithoutPrefix
+                      let withoutPrefixResult = either (const []) id result'
+                      pure $ Right $ Just $ r ++ withoutPrefixResult
+                    else pure $ Right $ Just r
                 else pure $ Right $ Just r
             Left e -> pure $ Left $ RedisError $ (show e <> " for key: " <> show constructedKey)
         _ -> pure $ Right Nothing
