@@ -87,8 +87,6 @@ createWoReturingKVConnector dbConf meshCfg value = do
       case res of
         Right _ -> return $ Right ()
         Left e -> return $ Left $ MDBError e
-  let source = if isEnabled then KV else SQL
-      res' = mapRight (const value) res
   pure res
 
 
@@ -125,7 +123,6 @@ createWithKVConnector dbConf meshCfg value = do
     case res of
       Right obj -> pushToInMemConfigStream meshCfg ImcInsert obj
       Left _    -> pure ()
-  let source = if isEnabled then KV else SQL
   pure res
 
 createKV :: forall (table :: (Type -> Type) -> Type) m.
@@ -221,7 +218,7 @@ updateWoReturningWithKVConnector :: forall be table beM m.
   m (MeshResult ())
 updateWoReturningWithKVConnector dbConf meshCfg setClause whereClause = do
   let isDisabled = meshCfg.kvHardKilled
-  (source, res) <- if not isDisabled
+  (_, res) <- if not isDisabled
     then do
       -- Discarding object
       (\updRes -> (fst updRes, mapRight (const ()) (snd updRes))) <$> modifyOneKV dbConf meshCfg whereClause (Just setClause) True True
@@ -238,7 +235,6 @@ updateWoReturningWithKVConnector dbConf meshCfg setClause whereClause = do
               else return $ Right val
 
         Left e -> return $ Left $ MDBError e
-  diffRes   <- whereClauseDiffCheck whereClause
   pure res
 
 
@@ -262,7 +258,7 @@ updateWithKVConnector :: forall table m.
   m (MeshResult (Maybe (table Identity)))
 updateWithKVConnector dbConf meshCfg setClause whereClause = do
   let isDisabled = meshCfg.kvHardKilled
-  (source, res) <- if not isDisabled
+  (_, res) <- if not isDisabled
     then do
       modifyOneKV dbConf meshCfg whereClause (Just setClause) False True
     else do
@@ -278,7 +274,6 @@ updateWithKVConnector dbConf meshCfg setClause whereClause = do
           L.logError @Text "updateWithKVConnector" message
           return $ Left $ UnexpectedError message
         Left e -> return $ Left $ MDBError e
-  diffRes   <- whereClauseDiffCheck whereClause
   pure res
 
 modifyOneKV :: forall be table beM m.
@@ -556,11 +551,6 @@ updateAllReturningWithKVConnector dbConf meshCfg setClause whereClause = do
             mapM_ (pushToInMemConfigStream meshCfg ImcInsert ) x
           return $ Right x
         Left e -> return $ Left $ MDBError e
-  diffRes <- whereClauseDiffCheck whereClause
-  let source
-        | isDisabled = SQL
-        | isRecachingEnabled && meshCfg.meshEnabled = KV
-        | otherwise = KV_AND_SQL
   pure res
 
 updateAllWithKVConnector :: forall be table beM m.
@@ -606,11 +596,6 @@ updateAllWithKVConnector dbConf meshCfg setClause whereClause = do
               return . Right $ ()
             Left e -> return . Left . MDBError $ e
         Left e -> return $ Left $ MDBError e
-  diffRes <- whereClauseDiffCheck whereClause
-  let source
-        | isDisabled = SQL
-        | isRecachingEnabled && meshCfg.meshEnabled = KV
-        | otherwise = KV_AND_SQL
   pure res
 
 updateKVAndDBResults :: forall be table beM m.
@@ -705,13 +690,12 @@ findWithKVConnector :: forall be table beM m.
   m (MeshResult (Maybe (table Identity)))
 findWithKVConnector dbConf meshCfg whereClause = do --This function fetches all possible rows and apply where clause on it.
   let shouldSearchInMemoryCache = meshCfg.memcacheEnabled
-  (source, res) <- if shouldSearchInMemoryCache
+  (_, res) <- if shouldSearchInMemoryCache
     then do
       inMemResult <- searchInMemoryCache meshCfg dbConf whereClause
       findOneFromDBIfNotFound inMemResult
     else
       kvFetch
-  diffRes <- whereClauseDiffCheck whereClause
   pure res
   where
 
@@ -742,7 +726,7 @@ findWithKVConnector dbConf meshCfg whereClause = do --This function fetches all 
                       reCacheDBRowsRes <- createInRedis meshCfg dbRow
                       case reCacheDBRowsRes of
                         Left err -> do
-                          L.logErrorT "findWithKVConnector" ("Error while recaching row in redis for " <> tableName @(table Identity) <> "with data" <> show dbRow)
+                          L.logErrorT "findWithKVConnector" ("Error while recaching row in redis for " <> tableName @(table Identity) <> "with data" <> show dbRow <> " Error: " <> show err)
                           pure (SQL, Right (Just dbRow))
                         Right _ -> do
                           L.logDebugT "findWithKVConnector" ("Recached row in redis for " <> tableName @(table Identity) <> "with data" <> show dbRow)
@@ -903,8 +887,6 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
             ! #offset mbOffset
             ! defaults)
       mapLeft MDBError <$> runQuery dbConf findAllQuery
-  diffRes <- whereClauseDiffCheck whereClause
-  let source = if not isDisabled then KV_AND_SQL else SQL
   pure res
     where
       applyOptions :: Int -> [table Identity] -> [table Identity]
@@ -1002,8 +984,6 @@ findAllWithKVConnector dbConf meshCfg whereClause = do
         Left err -> return $ Left err
     else do
       mapLeft MDBError <$> runQuery dbConf findAllQuery
-  diffRes <- whereClauseDiffCheck whereClause
-  let source = if not isDisabled then KV_AND_SQL else SQL
   pure res
 
 findAllWithKVAndConditionalDBInternal :: forall be table beM m.
@@ -1178,7 +1158,7 @@ deleteWithKVConnector :: forall be table beM m.
   m (MeshResult ())
 deleteWithKVConnector dbConf meshCfg whereClause = do
   let isDisabled = meshCfg.kvHardKilled
-  (source, res) <- if not isDisabled
+  (_, res) <- if not isDisabled
     then do
       (\delRes -> (fst delRes, mapRight (const ()) (snd delRes))) <$> modifyOneKV dbConf meshCfg whereClause Nothing True False
     else do
@@ -1197,7 +1177,6 @@ deleteWithKVConnector dbConf meshCfg whereClause = do
             else do
                 return $ Right re
 
-  diffRes <- whereClauseDiffCheck whereClause
   pure res
 
 deleteReturningWithKVConnector :: forall be table beM m.
@@ -1220,7 +1199,7 @@ deleteReturningWithKVConnector :: forall be table beM m.
   m (MeshResult (Maybe (table Identity)))
 deleteReturningWithKVConnector dbConf meshCfg whereClause = do
   let isDisabled = meshCfg.kvHardKilled
-  (source, res) <- if not isDisabled
+  (_, res) <- if not isDisabled
     then do
       modifyOneKV dbConf meshCfg whereClause Nothing False False
     else do
@@ -1234,7 +1213,6 @@ deleteReturningWithKVConnector dbConf meshCfg whereClause = do
         Right rs   -> do
           when meshCfg.memcacheEnabled $ mapM_ (pushToInMemConfigStream meshCfg ImcDelete) rs
           return $ Left $ MUpdateFailed "SQL delete returned more than one record"
-  diffRes <- whereClauseDiffCheck whereClause
   pure res
 
 deleteAllReturningWithKVConnector :: forall be table beM m.
@@ -1269,9 +1247,4 @@ deleteAllReturningWithKVConnector dbConf meshCfg whereClause = do
         Right re -> do
           when meshCfg.memcacheEnabled $ mapM_ (pushToInMemConfigStream meshCfg ImcDelete) re
           return $ Right re
-  diffRes <- whereClauseDiffCheck whereClause
-  let source
-        | isDisabled = SQL
-        | isRecachingEnabled = KV
-        | otherwise = KV_AND_SQL
   pure res
