@@ -26,7 +26,7 @@ incrementKVMetric handle metric dblog isLeftRes = do
 
 data KVMetricHandler = KVMetricHandler
   { kvCounter :: (KVMetric, Text, Operation, Source, Text, Text, Int, Integer, Bool, Bool) -> IO (),
-    kvCalls :: (Text, Text, Text, Int, Bool, Bool) -> IO()
+    kvCalls :: (Text, Text, Text, Int, Bool, Bool,[[(Text, Text)]]) -> IO()
   }
 
 data KVMetric = KVAction
@@ -43,9 +43,9 @@ mkKVMetricHandler = do
         -- when diffFound $ inc (metrics </> #kv_diff_counter) tag action source model
         when isLeftRes $ inc (metrics </> #kv_sql_error_counter) tag action source model mid)
     (\case
-      (tag,action,model,_redisCalls,redisSoftLimitExceeded, redisHardLimitExceeded) -> do
-            when redisSoftLimitExceeded (inc (metrics </> #kvRedis_soft_db_limit_exceeded) tag action model)
-            when redisHardLimitExceeded (inc (metrics </> #kvRedis_hard_db_limit_exceeded) tag action model))
+      (tag,action,model,_redisCalls,redisSoftLimitExceeded, redisHardLimitExceeded, whereClause) -> do
+            when redisSoftLimitExceeded (inc (metrics </> #kvRedis_soft_db_limit_exceeded) tag action model whereClause)
+            when redisHardLimitExceeded (inc (metrics </> #kvRedis_hard_db_limit_exceeded) tag action model whereClause))
 
 
 kv_action_counter = counter #kv_action_counter
@@ -89,12 +89,14 @@ kvRedis_soft_db_limit_exceeded = counter #kvRedis_soft_db_limit_exceeded
       .& lbl @"tag" @Text
       .& lbl @"action" @Text
       .& lbl @"model" @Text
+      .& lbl @"whereClause" @[[(Text, Text)]]
       .& build
 
 kvRedis_hard_db_limit_exceeded = counter #kvRedis_hard_db_limit_exceeded
       .& lbl @"tag" @Text
       .& lbl @"action" @Text
       .& lbl @"model" @Text
+      .& lbl @"whereClause" @[[(Text, Text)]]
       .& build
 
 collectionLock =
@@ -127,15 +129,15 @@ incrementMetric metric dblog isLeftRes = when isKVMetricEnabled $ do
     Nothing -> pure ()
 
 
-incrementKVRedisCallsMetric :: L.MonadFlow m => KVMetricHandler -> Text -> Text -> Text -> Int ->Bool -> Bool -> m()
-incrementKVRedisCallsMetric handler tag action model redisCalls redisSoftLimitExceeded redisHardLimitExceeded = do
-      L.runIO $ kvCalls handler (tag, action, model, redisCalls, redisSoftLimitExceeded,redisHardLimitExceeded)
+incrementKVRedisCallsMetric :: L.MonadFlow m => KVMetricHandler -> Text -> Text -> Text -> Int ->Bool -> Bool -> [[(Text, Text)]] -> m ()
+incrementKVRedisCallsMetric handler tag action model redisCalls redisSoftLimitExceeded redisHardLimitExceeded whereClause = do
+      L.runIO $ kvCalls handler (tag, action, model, redisCalls, redisSoftLimitExceeded,redisHardLimitExceeded, whereClause)
 
-incrementRedisCallMetric :: (HasCallStack , L.MonadFlow m) => Text -> Text -> Int -> Bool -> Bool -> m()
-incrementRedisCallMetric action model dbCalls redisSoftLimitExceeded redisHardLimitExceeded  = do  --when isKVMetricEnabled $ do
+incrementRedisCallMetric :: (HasCallStack , L.MonadFlow m) => Text -> Text -> Int -> Bool -> Bool -> [[(Text, Text)]] -> m ()
+incrementRedisCallMetric action model dbCalls redisSoftLimitExceeded redisHardLimitExceeded whereClause  = do  --when isKVMetricEnabled $ do
       env <- L.getOption KVMetricCfg
       case env of
             Just val -> do
                    let tag = "redisCallMetrics"
-                   incrementKVRedisCallsMetric val tag action model dbCalls redisSoftLimitExceeded redisHardLimitExceeded
+                   incrementKVRedisCallsMetric val tag action model dbCalls redisSoftLimitExceeded redisHardLimitExceeded whereClause
             Nothing -> pure ()
