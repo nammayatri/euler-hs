@@ -807,7 +807,7 @@ findOneFromRedis meshCfg whereClause = do
         Right allRowsResPairList -> do
           let (allRowsResLiveListOfList, allRowsResDeadListOfList) = unzip allRowsResPairList
               total_length = secondaryKeyLength + lenKeyRes
-          Metrics.incrementRedisCallMetric "REDIS_FIND_ONE" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit )
+          Metrics.incrementRedisCallMetric "REDIS_FIND_ONE" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit ) keyAndValueCombinations
           return $ Right (concat allRowsResLiveListOfList, concat allRowsResDeadListOfList)
         Left err -> return $ Left err
     Left err -> pure $ Left err
@@ -1066,7 +1066,7 @@ redisFindAll meshCfg whereClause = do
         Right allRowsResPairList -> do
           let (allRowsResLiveListOfList, allRowsResDeadListOfList) = unzip allRowsResPairList
               total_length = secondaryKeyLength + lenKeyRes
-          Metrics.incrementRedisCallMetric "REDIS_FIND_ALL" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit )
+          Metrics.incrementRedisCallMetric "REDIS_FIND_ALL" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit ) keyAndValueCombinations
           return $ Right (concat allRowsResLiveListOfList, concat allRowsResDeadListOfList)
         Left err -> return $ Left err
     Left err -> pure $ Left err
