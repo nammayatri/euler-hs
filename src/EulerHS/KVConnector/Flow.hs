@@ -21,7 +21,8 @@ module EulerHS.KVConnector.Flow
     deleteWithKVConnector,
     deleteReturningWithKVConnector,
     deleteAllReturningWithKVConnector,
-    findAllWithKVAndConditionalDBInternal
+    findAllWithKVAndConditionalDBInternal,
+    findOneFromKvRedis,
   )
  where
 
@@ -79,7 +80,7 @@ createWoReturingKVConnector :: forall (table :: (Type -> Type) -> Type) be m beM
   m (MeshResult ())
 createWoReturingKVConnector dbConf meshCfg value = do
   let isEnabled = meshCfg.meshEnabled && not meshCfg.kvHardKilled
-  res <- if isEnabled
+  if isEnabled
     then do
       mapRight (const ()) <$> createKV meshCfg value
     else do
@@ -87,7 +88,6 @@ createWoReturingKVConnector dbConf meshCfg value = do
       case res of
         Right _ -> return $ Right ()
         Left e -> return $ Left $ MDBError e
-  pure res
 
 
 createWithKVConnector ::
@@ -536,7 +536,7 @@ updateAllReturningWithKVConnector :: forall table m.
   m (MeshResult [table Identity])
 updateAllReturningWithKVConnector dbConf meshCfg setClause whereClause = do
   let isDisabled = meshCfg.kvHardKilled
-  res <- if not isDisabled
+  if not isDisabled
     then do
       let updVals = jsonKeyValueUpdates V1 setClause
       kvRows <- redisFindAll meshCfg whereClause
@@ -551,7 +551,6 @@ updateAllReturningWithKVConnector dbConf meshCfg setClause whereClause = do
             mapM_ (pushToInMemConfigStream meshCfg ImcInsert ) x
           return $ Right x
         Left e -> return $ Left $ MDBError e
-  pure res
 
 updateAllWithKVConnector :: forall be table beM m.
   ( HasCallStack,
@@ -576,7 +575,7 @@ updateAllWithKVConnector :: forall be table beM m.
   m (MeshResult ())
 updateAllWithKVConnector dbConf meshCfg setClause whereClause = do
   let isDisabled = meshCfg.kvHardKilled
-  res <- if not isDisabled
+  if not isDisabled
     then do
       let updVals = jsonKeyValueUpdates V1 setClause
       kvRows <- redisFindAll meshCfg whereClause
@@ -596,7 +595,6 @@ updateAllWithKVConnector dbConf meshCfg setClause whereClause = do
               return . Right $ ()
             Left e -> return . Left . MDBError $ e
         Left e -> return $ Left $ MDBError e
-  pure res
 
 updateKVAndDBResults :: forall be table beM m.
   ( HasCallStack,
@@ -743,6 +741,42 @@ findWithKVConnector dbConf meshCfg whereClause = do --This function fetches all 
         else do
           (SQL,) <$> findOneFromDB dbConf whereClause
 
+findOneFromKvRedis :: forall be table beM m.
+  ( HasCallStack,
+    BeamRuntime be beM,
+    BeamRunner beM,
+    B.HasQBuilder be,
+    Model be table,
+    MeshMeta be table,
+    KVConnector (table Identity),
+    Serialize.Serialize (table Identity),
+    FromJSON (table Identity),
+    L.MonadFlow m, MonadIO m
+  ) =>
+  DBConfig beM ->
+  MeshConfig ->
+  Where be table ->
+  m (MeshResult (Maybe (table Identity)))
+findOneFromKvRedis dbConf meshCfg whereClause = do
+  let isDisabled = meshCfg.kvHardKilled
+  (_, res) <- if not isDisabled
+    then do
+      eitherKvRows <- findOneFromRedis meshCfg whereClause
+      case eitherKvRows of
+        Right ([], []) -> do
+          pure (KV, Right Nothing)
+        Right ([], _) -> do
+          L.logInfoT "findOneFromKvRedis" ("Returning nothing - Row is deleted already for " <> tableName @(table Identity))
+          pure (KV, Right Nothing)
+        Right (kvLiveRows, _) -> do
+          let matchingData = findAllMatching whereClause kvLiveRows
+          pure (KV, Right (DMaybe.listToMaybe matchingData))
+        Left err -> pure (KV, Left err)
+    else do
+      (SQL,) <$> findOneFromDB dbConf whereClause
+  pure res
+
+
 findFromDBIfMatchingFails :: forall be table beM m.
   ( HasCallStack,
     BeamRuntime be beM,
@@ -851,7 +885,7 @@ findAllWithOptionsHelper :: forall be table beM m.
   m (MeshResult [table Identity])
 findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = do
   let isDisabled = meshCfg.kvHardKilled
-  res <- if not isDisabled
+  if not isDisabled
     then do
       kvRes <- redisFindAll meshCfg whereClause
       case kvRes of
@@ -887,7 +921,6 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
             ! #offset mbOffset
             ! defaults)
       mapLeft MDBError <$> runQuery dbConf findAllQuery
-  pure res
     where
       applyOptions :: Int -> [table Identity] -> [table Identity]
       applyOptions shift rows = do
@@ -971,7 +1004,7 @@ findAllWithKVConnector :: forall be table beM m.
 findAllWithKVConnector dbConf meshCfg whereClause = do
   let findAllQuery = DB.findRows (sqlSelect ! #where_ whereClause ! defaults)
   let isDisabled = meshCfg.kvHardKilled
-  res <- if not isDisabled
+  if not isDisabled
     then do
       kvRes <- redisFindAll meshCfg whereClause
       case kvRes of
@@ -984,7 +1017,6 @@ findAllWithKVConnector dbConf meshCfg whereClause = do
         Left err -> return $ Left err
     else do
       mapLeft MDBError <$> runQuery dbConf findAllQuery
-  pure res
 
 findAllWithKVAndConditionalDBInternal :: forall be table beM m.
   ( HasCallStack,
@@ -1235,7 +1267,7 @@ deleteAllReturningWithKVConnector :: forall be table beM m.
   m (MeshResult [table Identity])
 deleteAllReturningWithKVConnector dbConf meshCfg whereClause = do
   let isDisabled = meshCfg.kvHardKilled
-  res <- if not isDisabled
+  if not isDisabled
     then do
       kvResult <- redisFindAll meshCfg whereClause
       dbRows   <- findAllSql dbConf whereClause
@@ -1247,4 +1279,3 @@ deleteAllReturningWithKVConnector dbConf meshCfg whereClause = do
         Right re -> do
           when meshCfg.memcacheEnabled $ mapM_ (pushToInMemConfigStream meshCfg ImcDelete) re
           return $ Right re
-  pure res
