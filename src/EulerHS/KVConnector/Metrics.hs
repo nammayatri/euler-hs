@@ -4,7 +4,6 @@
 
 module EulerHS.KVConnector.Metrics where
 
-import           GHC.Float (int2Double)
 import           EulerHS.Prelude
 import qualified EulerHS.Language as L
 import           EulerHS.Options  (OptionEntity)
@@ -36,7 +35,7 @@ mkKVMetricHandler = do
   metrics <- register collectionLock
   pure $ KVMetricHandler  
     (\case
-      (KVAction, tag, action, source, model , mid, latency, cpuLatency, diffFound, isLeftRes) -> do
+      (KVAction, tag, action, source, model , mid, _, _, _, isLeftRes) -> do
         -- inc (metrics </> #kv_action_counter) tag action source model  mid
         -- observe (metrics </> #kv_latency_observe) (int2Double latency) tag action source model
         -- observe (metrics </> #kv_cpu_latency_observe) (fromInteger cpuLatency) tag action source model

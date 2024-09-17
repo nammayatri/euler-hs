@@ -52,7 +52,7 @@ import           EulerHS.HttpAPI (HTTPIOException (HTTPIOException),
                                   getResponseCode, getResponseHeaders,
                                   getResponseStatus, maskHTTPRequest,maskHTTPResponse,
                                   mkHttpApiCallLogEntry, shouldBypassProxy, isART)
-import           EulerHS.KVDB.Interpreter (runKVDB)
+import           EulerHS.KVDB.Interpreter (runKVDB,runKVDBWithReplica)
 import           EulerHS.KVDB.Types (KVDBAnswer,
                                      KVDBConfig (KVDBClusterConfig, KVDBConfig),
                                      KVDBConn (Redis),
@@ -655,6 +655,9 @@ interpretFlowMethod mbFlowGuid flowRt (L.RunDB conn sqlDbMethod runInTransaction
       connPoolExceptionWrapper (Right r) = r
 
 interpretFlowMethod _ R.FlowRuntime {..} (L.RunKVDB cName act next) = next <$> runKVDB cName _kvdbConnections act
+
+interpretFlowMethod _ R.FlowRuntime {..} (L.RunKVDBWithReplica cName cReplicaName act next) = next <$> runKVDBWithReplica cName cReplicaName _kvdbConnections act
+
 
 interpretFlowMethod mbFlowGuid rt@R.FlowRuntime {_pubSubController, _pubSubConnection} (L.RunPubSub act next) =
     case _pubSubConnection of

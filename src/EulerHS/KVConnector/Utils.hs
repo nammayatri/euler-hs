@@ -44,10 +44,7 @@ import qualified EulerHS.Logger.Types as Log
 import           Sequelize.SQLObject (ToSQLObject (..))
 import           EulerHS.KVDB.Types (KVDBReply)
 import qualified Data.ByteString.Char8 as BSC
-import qualified Data.HashMap.Internal as HMI
-import           Debug.Trace as T
-import           Data.Time.Clock(getCurrentTime, NominalDiffTime, UTCTime, diffUTCTime)
-import qualified System.Environment as SE
+import           Data.Time.Clock(getCurrentTime)
 import qualified Control.Monad as CM
 import qualified Database.Redis as DR
 import qualified Data.Maybe as DM
@@ -113,7 +110,7 @@ getDataFromRedisForPKey ::forall table m. (
     Serialize.Serialize (table Identity),
     L.MonadFlow m) => MeshConfig -> Text -> m (MeshResult (Maybe (Text, Bool, table Identity)))
 getDataFromRedisForPKey meshCfg pKey = do
-  res <- L.runKVDB meshCfg.kvReplicaRedis $ L.get (fromString $ T.unpack $ pKey)
+  res <- L.runKVDBWithReplica meshCfg.kvRedis meshCfg.kvReplicaRedis $ L.get (fromString $ T.unpack $ pKey)
   case res of
     Right (Just r) ->
       let
@@ -178,14 +175,14 @@ getDataFromPKeysHelper :: forall table m. (
     FromJSON (table Identity),
     Serialize.Serialize (table Identity),
     L.MonadFlow m, MonadIO m) => MeshConfig -> [[ByteString]] -> Bool -> m (MeshResult ([table Identity], [table Identity]))
-getDataFromPKeysHelper _ [] latencyLogging = pure $ Right ([], [])
+getDataFromPKeysHelper _ [] _ = pure $ Right ([], [])
 getDataFromPKeysHelper meshCfg (pKey : pKeys) latencyLogging = do
   currentTime <- liftIO getCurrentTime
-  res <- L.runKVDB meshCfg.kvReplicaRedis $ L.mget (fromString . T.unpack . decodeUtf8 <$> pKey)
+  res <- L.runKVDBWithReplica meshCfg.kvRedis meshCfg.kvReplicaRedis $ L.mget (fromString . T.unpack . decodeUtf8 <$> pKey)
   result <- liftIO $ latency currentTime
   CM.when latencyLogging $ L.logInfo ("Latency for redisFindAll"::Text)  (show result)
-  result <- getDataFromPKeysRedisHelper res
-  case result of
+  result' <- getDataFromPKeysRedisHelper res
+  case result' of
     Left e -> return $ Left e
     Right (a, b) -> do
       remainingPKeysResult <- getDataFromPKeysHelper meshCfg pKeys latencyLogging
@@ -216,7 +213,7 @@ getDataFromPKeysRedis :: forall table m. (
 getDataFromPKeysRedis _ _ [] = pure $ Right ([], [])
 getDataFromPKeysRedis meshCfg latencyLogging (pKey : pKeys)  = do
   currentTime <- liftIO getCurrentTime
-  res <- L.runKVDB meshCfg.kvReplicaRedis $ L.get (fromString $ T.unpack $ decodeUtf8 pKey)
+  res <- L.runKVDBWithReplica meshCfg.kvRedis meshCfg.kvReplicaRedis $ L.get (fromString $ T.unpack $ decodeUtf8 pKey)
   result <- liftIO $ latency currentTime
   CM.when latencyLogging $ L.logInfo ("Latency for redisFindAll"::Text)  (show result)
   case res of
@@ -536,7 +533,7 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = 
       case HM.lookup k keyHashMap of
         Just True -> pure $ Right $ Just [fromString $ T.unpack (constructedKey <> getShardedHashTag constructedKey)]
         Just False -> do
-          res <- L.runKVDB meshCfg.kvReplicaRedis $ L.smembers (fromString $ T.unpack constructedKey)
+          res <- L.runKVDBWithReplica meshCfg.kvRedis meshCfg.kvReplicaRedis $ L.smembers (fromString $ T.unpack constructedKey)
           case res of
             -- Todo: To be removed after redis key prefix is implemented
             -- Right r -> pure $ Right $ Just r 
@@ -544,7 +541,7 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = 
               let (hadPrefix, keyWithoutPrefix) = dropPrefix (fromString $ T.unpack constructedKey)
               if hadPrefix 
                 then do
-                  result' <- L.runKVDB meshCfg.kvReplicaRedis $ L.smembers keyWithoutPrefix
+                  result' <- L.runKVDBWithReplica meshCfg.kvRedis meshCfg.kvReplicaRedis $ L.smembers keyWithoutPrefix
                   let withoutPrefixResult = either (const []) id result'
                   pure $ Right $ Just $ r ++ withoutPrefixResult
                 else pure $ Right $ Just r
@@ -655,8 +652,8 @@ logAndIncrementKVMetric shouldLogData action operation res latency model cpuLate
   incrementMetric KVAction dblog (isLeft res)
 
 logDb :: (L.MonadFlow m, ToJSON val) => Log.LogLevel -> Text -> Source -> Log.Action -> Log.Entity -> Int -> val -> m ()
-logDb logLevel tag source action entity latency message =
-  L.evalLogger' $ L.masterLogger logLevel tag category (Just action) (Just entity) Nothing (Just $ toInteger latency) Nothing $ Log.Message Nothing (Just $ A.toJSON message)
+logDb logLevel tag source action entity latency' message =
+  L.evalLogger' $ L.masterLogger logLevel tag category (Just action) (Just entity) Nothing (Just $ toInteger latency') Nothing $ Log.Message Nothing (Just $ A.toJSON message)
   where
     category
       | source == KV = "REDIS"
