@@ -113,7 +113,7 @@ getDataFromRedisForPKey ::forall table m. (
     Serialize.Serialize (table Identity),
     L.MonadFlow m) => MeshConfig -> Text -> m (MeshResult (Maybe (Text, Bool, table Identity)))
 getDataFromRedisForPKey meshCfg pKey = do
-  res <- L.runKVDB meshCfg.kvRedis $ L.get (fromString $ T.unpack $ pKey)
+  res <- L.runKVDB meshCfg.kvReplicaRedis $ L.get (fromString $ T.unpack $ pKey)
   case res of
     Right (Just r) ->
       let
@@ -181,7 +181,7 @@ getDataFromPKeysHelper :: forall table m. (
 getDataFromPKeysHelper _ [] latencyLogging = pure $ Right ([], [])
 getDataFromPKeysHelper meshCfg (pKey : pKeys) latencyLogging = do
   currentTime <- liftIO getCurrentTime
-  res <- L.runKVDB meshCfg.kvRedis $ L.mget (fromString . T.unpack . decodeUtf8 <$> pKey)
+  res <- L.runKVDB meshCfg.kvReplicaRedis $ L.mget (fromString . T.unpack . decodeUtf8 <$> pKey)
   result <- liftIO $ latency currentTime
   CM.when latencyLogging $ L.logInfo ("Latency for redisFindAll"::Text)  (show result)
   result <- getDataFromPKeysRedisHelper res
@@ -216,7 +216,7 @@ getDataFromPKeysRedis :: forall table m. (
 getDataFromPKeysRedis _ _ [] = pure $ Right ([], [])
 getDataFromPKeysRedis meshCfg latencyLogging (pKey : pKeys)  = do
   currentTime <- liftIO getCurrentTime
-  res <- L.runKVDB meshCfg.kvRedis $ L.get (fromString $ T.unpack $ decodeUtf8 pKey)
+  res <- L.runKVDB meshCfg.kvReplicaRedis $ L.get (fromString $ T.unpack $ decodeUtf8 pKey)
   result <- liftIO $ latency currentTime
   CM.when latencyLogging $ L.logInfo ("Latency for redisFindAll"::Text)  (show result)
   case res of
@@ -536,7 +536,7 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = 
       case HM.lookup k keyHashMap of
         Just True -> pure $ Right $ Just [fromString $ T.unpack (constructedKey <> getShardedHashTag constructedKey)]
         Just False -> do
-          res <- L.runKVDB meshCfg.kvRedis $ L.smembers (fromString $ T.unpack constructedKey)
+          res <- L.runKVDB meshCfg.kvReplicaRedis $ L.smembers (fromString $ T.unpack constructedKey)
           case res of
             -- Todo: To be removed after redis key prefix is implemented
             -- Right r -> pure $ Right $ Just r 
@@ -544,7 +544,7 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = 
               let (hadPrefix, keyWithoutPrefix) = dropPrefix (fromString $ T.unpack constructedKey)
               if hadPrefix 
                 then do
-                  result' <- L.runKVDB meshCfg.kvRedis $ L.smembers keyWithoutPrefix
+                  result' <- L.runKVDB meshCfg.kvReplicaRedis $ L.smembers keyWithoutPrefix
                   let withoutPrefixResult = either (const []) id result'
                   pure $ Right $ Just $ r ++ withoutPrefixResult
                 else pure $ Right $ Just r

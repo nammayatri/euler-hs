@@ -654,12 +654,7 @@ interpretFlowMethod mbFlowGuid flowRt (L.RunDB conn sqlDbMethod runInTransaction
       connPoolExceptionWrapper (Left e) = (Left $ DBError ConnectionFailed $ show e, [])
       connPoolExceptionWrapper (Right r) = r
 
-interpretFlowMethod _ flowRt@(R.FlowRuntime {..}) (L.RunKVDB cName act next) = do
-    tick <- EEMF.getCurrentDateInMillisIO
-    val <- next <$> runKVDB cName _kvdbConnections act
-    tock <- EEMF.getCurrentDateInMillisIO
-    void $ EEMF.incrementRedisLatencyMetric flowRt (tock-tick)
-    pure val
+interpretFlowMethod _ R.FlowRuntime {..} (L.RunKVDB cName act next) = next <$> runKVDB cName _kvdbConnections act
 
 interpretFlowMethod mbFlowGuid rt@R.FlowRuntime {_pubSubController, _pubSubConnection} (L.RunPubSub act next) =
     case _pubSubConnection of

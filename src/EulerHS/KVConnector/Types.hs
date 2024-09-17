@@ -101,6 +101,7 @@ data MeshConfig = MeshConfig
   , meshDBName      :: Text
   , ecRedisDBStream :: Text
   , kvRedis         :: Text
+  , kvReplicaRedis  :: Text
   , redisTtl        :: L.KVDBDuration
   , kvHardKilled    :: Bool
   }
