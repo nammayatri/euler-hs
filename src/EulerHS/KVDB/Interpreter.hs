@@ -4,13 +4,15 @@
 module EulerHS.KVDB.Interpreter
   (
     -- * KVDB Interpreter
-    runKVDB
+    runKVDB,
+    runKVDBWithReplica
   ) where
 
 import qualified Data.Map as Map
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TE
+import qualified Debug.Trace as Debug
 import qualified Database.Redis as R
 import qualified EulerHS.KVDB.Language as L
 import           EulerHS.KVDB.Types (KVDBError (KVDBConnectionDoesNotExist),
@@ -374,6 +376,29 @@ runKVDB cName kvdbConnMapMVar =
         Nothing -> pure $ Left $ KVDBError KVDBConnectionDoesNotExist
           $ "Can't find redis connection: " <> T.unpack cName
         Just (NativeKVDB c) -> first hedisReplyToKVDBReply <$> R.runRedis c redisDsl
+
+runKVDBWithReplica :: Text -> Text -> MVar (Map Text NativeKVDBConn) -> L.KVDB a -> IO (Either KVDBReply a)
+runKVDBWithReplica cName cNameReplica kvdbConnMapMVar =
+  fmap (join . first exceptionToKVDBReply) . try @_ @SomeException .
+    foldF (interpretDbF runRedis) . runExceptT
+  where
+    runRedis :: R.Redis (Either R.Reply a) -> IO (Either KVDBReply a)
+    runRedis redisDsl = do
+      connections <- readMVar kvdbConnMapMVar
+      case Map.lookup cNameReplica connections of
+        Nothing -> pure $ Left $ KVDBError KVDBConnectionDoesNotExist
+          $ "Can't find redis connection: " <> T.unpack cNameReplica
+        Just (NativeKVDB cReplica) -> do
+          result <- first hedisReplyToKVDBReply <$> R.runRedis cReplica redisDsl
+          case result of
+            Left _ -> do
+              Debug.traceM "Replica failed, trying primary"
+              case Map.lookup cName connections of
+                Nothing -> pure $ Left $ KVDBError KVDBConnectionDoesNotExist
+                  $ "Can't find redis connection: " <> T.unpack cName
+                Just (NativeKVDB c) -> first hedisReplyToKVDBReply <$> R.runRedis c redisDsl
+            success -> pure success
+
 
 makeSetOpts :: L.KVDBSetTTLOption -> L.KVDBSetConditionOption -> R.SetOpts
 makeSetOpts ttl cond =

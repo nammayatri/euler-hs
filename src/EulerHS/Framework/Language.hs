@@ -393,6 +393,15 @@ data FlowMethod (next :: Type) where
     -> (KVDBAnswer a -> next)
     -> FlowMethod next
 
+  -- runKVDBWithReplica
+  RunKVDBWithReplica
+    :: HasCallStack
+    => Text
+    -> Text
+    -> KVDB a
+    -> (KVDBAnswer a -> next)
+    -> FlowMethod next
+  
   RunPubSub
     :: HasCallStack
     => PubSub a
@@ -454,6 +463,7 @@ instance Functor FlowMethod where
     GetKVDBConnection conf cont -> GetKVDBConnection conf (f . cont)
     RunDB conn db b cont -> RunDB conn db b (f . cont)
     RunKVDB t db cont -> RunKVDB t db (f . cont)
+    RunKVDBWithReplica t r db cont -> RunKVDBWithReplica t r db (f . cont)
     RunPubSub pubSub cont -> RunPubSub pubSub (f . cont)
     WithModifiedRuntime g innerFlow cont ->
       WithModifiedRuntime g innerFlow (f . cont)
@@ -812,6 +822,13 @@ class (MonadMask m) => MonadFlow m where
     -> KVDB a -- ^ KVDB action
     -> m (KVDBAnswer a)
 
+  runKVDBWithReplica
+    :: HasCallStack
+    => Text
+    -> Text
+    -> KVDB a
+    -> m (KVDBAnswer a)
+
   ---- Experimental Pub Sub implementation using Redis Pub Sub.
 
   runPubSub
@@ -953,11 +970,9 @@ instance MonadFlow Flow where
     safeFlowGUID <- generateGUID
     liftFC $ RunSafeFlow safeFlowGUID flow id
   {-# INLINEABLE runKVDB #-}
-  runKVDB cName act = do
-    res <- liftFC $ RunKVDB cName act id
-    case res of
-      Left err -> incrementRedisMetric err cName *> pure res
-      Right _ -> pure res
+  runKVDB cName act = liftFC $ RunKVDB cName act id
+  {-# INLINEABLE runKVDBWithReplica #-}
+  runKVDBWithReplica cName rName act = liftFC $ RunKVDBWithReplica cName rName act id
   {-# INLINEABLE runPubSub #-}
   runPubSub act = liftFC $ RunPubSub act id
   {-# INLINEABLE publish #-}
@@ -1049,6 +1064,8 @@ instance MonadFlow m => MonadFlow (ReaderT r m) where
   runSafeFlow = lift . runSafeFlow
   {-# INLINEABLE runKVDB #-}
   runKVDB cName = lift . runKVDB cName
+  {-# INLINEABLE runKVDBWithReplica #-}
+  runKVDBWithReplica cName rName = lift . runKVDBWithReplica cName rName
   {-# INLINEABLE runPubSub #-}
   runPubSub = lift . runPubSub
   {-# INLINEABLE publish #-}
@@ -1139,6 +1156,8 @@ instance MonadFlow m => MonadFlow (StateT s m) where
   runSafeFlow = lift . runSafeFlow
   {-# INLINEABLE runKVDB #-}
   runKVDB cName = lift . runKVDB cName
+  {-# INLINEABLE runKVDBWithReplica #-}
+  runKVDBWithReplica cName rName = lift . runKVDBWithReplica cName rName
   {-# INLINEABLE runPubSub #-}
   runPubSub = lift . runPubSub
   {-# INLINEABLE publish #-}
@@ -1229,6 +1248,8 @@ instance (MonadFlow m, Monoid w) => MonadFlow (WriterT w m) where
   runSafeFlow = lift . runSafeFlow
   {-# INLINEABLE runKVDB #-}
   runKVDB cName = lift . runKVDB cName
+  {-# INLINEABLE runKVDBWithReplica #-}
+  runKVDBWithReplica cName rName = lift . runKVDBWithReplica cName rName
   {-# INLINEABLE runPubSub #-}
   runPubSub = lift . runPubSub
   {-# INLINEABLE publish #-}
@@ -1317,6 +1338,8 @@ instance MonadFlow m => MonadFlow (ExceptT e m) where
   runSafeFlow = lift . runSafeFlow
   {-# INLINEABLE runKVDB #-}
   runKVDB cName = lift . runKVDB cName
+  {-# INLINEABLE runKVDBWithReplica #-}
+  runKVDBWithReplica cName rName = lift . runKVDBWithReplica cName rName
   {-# INLINEABLE runPubSub #-}
   runPubSub = lift . runPubSub
   {-# INLINEABLE publish #-}
@@ -1405,6 +1428,8 @@ instance (MonadFlow m, Monoid w) => MonadFlow (RWST r w s m) where
   runSafeFlow = lift . runSafeFlow
   {-# INLINEABLE runKVDB #-}
   runKVDB cName = lift . runKVDB cName
+  {-# INLINEABLE runKVDBWithReplica #-}
+  runKVDBWithReplica cName rName = lift . runKVDBWithReplica cName rName
   {-# INLINEABLE runPubSub #-}
   runPubSub = lift . runPubSub
   {-# INLINEABLE publish #-}
