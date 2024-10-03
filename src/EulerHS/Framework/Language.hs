@@ -858,6 +858,10 @@ class (MonadMask m) => MonadFlow m where
     :: HasCallStack
     => m a -> m ()
 
+  awaitableFork
+    :: HasCallStack
+    => m a -> m (Awaitable (Either Text a)) 
+
 instance MonadFlow Flow where
   {-# INLINEABLE callServantAPI #-}
   callServantAPI mgrSel url cl = do
@@ -973,6 +977,9 @@ instance MonadFlow Flow where
   {-# INLINEABLE fork #-}
   fork flow = do
     forkFlow "test" flow
+  {-# INLINEABLE awaitableFork #-}
+  awaitableFork flow = do
+    forkFlow' "test" flow
 
 instance MonadFlow m => MonadFlow (ReaderT r m) where
   {-# INLINEABLE callServantAPI #-}
@@ -1063,6 +1070,10 @@ instance MonadFlow m => MonadFlow (ReaderT r m) where
   fork flow = do
     env <- ask
     lift . fork $ runReaderT flow env
+  {-# INLINEABLE awaitableFork #-}
+  awaitableFork flow = do
+    env <- ask
+    lift . awaitableFork $ runReaderT flow env
 
 instance MonadFlow m => MonadFlow (StateT s m) where
   {-# INLINEABLE callServantAPI #-}
@@ -1153,6 +1164,10 @@ instance MonadFlow m => MonadFlow (StateT s m) where
   fork flow = do
     s <- get
     lift . fork $ evalStateT flow s
+  {-# INLINEABLE awaitableFork #-}
+  awaitableFork flow = do
+    s <- get
+    lift . awaitableFork $ evalStateT flow s
 
 instance (MonadFlow m, Monoid w) => MonadFlow (WriterT w m) where
   {-# INLINEABLE callServantAPI #-}
@@ -1241,6 +1256,8 @@ instance (MonadFlow m, Monoid w) => MonadFlow (WriterT w m) where
   withModifiedRuntime f = lift . withModifiedRuntime f
   {-# INLINEABLE fork #-}
   fork = error "Not implemented"
+  {-# INLINEABLE awaitableFork #-}
+  awaitableFork = error "Not implemented"
 
 instance MonadFlow m => MonadFlow (ExceptT e m) where
   {-# INLINEABLE callServantAPI #-}
@@ -1329,6 +1346,8 @@ instance MonadFlow m => MonadFlow (ExceptT e m) where
   withModifiedRuntime f = lift . withModifiedRuntime f
   {-# INLINEABLE fork #-}
   fork = error "Not implemented"
+  {-# INLINEABLE awaitableFork #-}
+  awaitableFork = error "Not implemented"
 
 instance (MonadFlow m, Monoid w) => MonadFlow (RWST r w s m) where
   {-# INLINEABLE callServantAPI #-}
@@ -1417,6 +1436,8 @@ instance (MonadFlow m, Monoid w) => MonadFlow (RWST r w s m) where
   withModifiedRuntime f = lift . withModifiedRuntime f
   {-# INLINEABLE fork #-}
   fork = error "Not implemented"
+  {-# INLINEABLE awaitableFork #-}
+  awaitableFork = error "Not implemented"
 
 
 
