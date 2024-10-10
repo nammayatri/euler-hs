@@ -20,7 +20,7 @@ jobs:
 
       - uses: cachix/cachix-action@v15
         with:
-          name: nammayatri
+          name: nammayatri-euler
           authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
           skipPush: true
 
