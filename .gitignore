@@ -52,3 +52,4 @@ init/id_rsa
 # Nix
 result
 .direnv
+.DS_Store
