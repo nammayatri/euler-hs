@@ -69,7 +69,8 @@ library
     EulerHS.Runtime
     EulerHS.Types
     EulerHS.SqlDB.Language
-    EulerHS.KVConnector.DBSync 
+    EulerHS.KVConnector.DBSync
+    EulerHS.KVConnector.Compression 
     EulerHS.KVConnector.Encoding
     EulerHS.KVConnector.Flow
     EulerHS.KVConnector.Metrics
@@ -113,6 +114,7 @@ library
     , QuickCheck
     , aeson
     , aeson-pretty
+    , zstd
     , base64-bytestring
     , beam-core             
     , beam-mysql            
@@ -230,6 +232,7 @@ if flag(enable-tests)
     build-depends:
       , aeson
       , aeson-pretty
+      , zstd
       , async
       , beam-core
       , beam-sqlite
