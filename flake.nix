@@ -41,7 +41,10 @@
       perSystem = { self', pkgs, lib, config, ... }: {
         packages.default = self'.packages.euler-hs;
         haskellProjects.default = {
-          devShell.tools = _: lib.mkForce { haskell-language-server = null; };
+          devShell.tools = _: lib.mkForce {
+          haskell-language-server = null;
+          ormolu = pkgs.haskellPackages.ormolu;
+        };
           projectFlakeName = "euler-hs";
           imports = [
             inputs.euler-events-hs.haskellFlakeProjectModules.output
