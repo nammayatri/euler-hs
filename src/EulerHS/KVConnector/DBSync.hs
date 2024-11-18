@@ -25,8 +25,27 @@ type Tag = Text
 
 type DBName = Text
 
-getCreateQuery :: (KVConnector (table Identity),ToJSON(table Identity)) => Text -> Tag -> Double -> DBName -> table Identity -> [(String, String)] -> A.Value
-getCreateQuery model tag timestamp dbName dbObject mappings = do
+getCreateQuery :: (KVConnector (table Identity),ToJSON(table Identity)) => Text -> Tag -> Double -> DBName -> table Identity -> [(String, String)] -> Maybe Text -> A.Value
+getCreateQuery model tag timestamp dbName dbObject mappings compressedObj = do
+  A.object
+    ([ "contents_v2" .= A.object
+        [  "cmdVersion" .= V2
+        ,  "tag" .= tag
+        ,  "timestamp" .= timestamp
+        ,  "dbName" .= dbName
+        ,  "command" .= A.object
+            [ "contents" .= mkSQLObject dbObject,
+              "tag" .= ((T.pack . pascal . T.unpack) model <> "Object")
+            ]
+        ]
+    , "mappings" .= A.toJSON (AKM.fromList $ (\(k, v) -> (AKey.fromText $ T.pack k, v)) <$> mappings)
+    , "modelObject" .= dbObject
+    , "tag" .= ("Create" :: Text)
+    ] <> [ "compressedObj" .= compressedObj | isJust compressedObj])
+
+
+getCreateQueryForCompression :: (KVConnector (table Identity),ToJSON(table Identity)) => Text -> Tag -> Double -> DBName -> table Identity -> [(String, String)] -> A.Value
+getCreateQueryForCompression model tag timestamp dbName dbObject mappings = do
   A.object
     [ "contents_v2" .= A.object
         [  "cmdVersion" .= V2
