@@ -35,7 +35,7 @@ import EulerHS.CachedSqlDBQuery
       updateOneSqlWoReturning,
       SqlReturning(..) )
 import           EulerHS.KVConnector.Types (DBCommandVersion (..), KVConnector(..), MeshConfig, MeshResult, MeshError(..), MeshMeta(..), SecondaryKey(..), tableName, keyMap, Source(..), TableMappings(..))
-import           EulerHS.KVConnector.DBSync (getCreateQuery, getUpdateQuery, getDeleteQuery, getDbDeleteCommandJson, getDbUpdateCommandJson, getDbUpdateCommandJsonWithPrimaryKey, getDbDeleteCommandJsonWithPrimaryKey)
+import           EulerHS.KVConnector.DBSync (getCreateQuery, getUpdateQuery, getDeleteQuery, getDbDeleteCommandJson, getDbUpdateCommandJson, getDbUpdateCommandJsonWithPrimaryKey, getDbDeleteCommandJsonWithPrimaryKey,getCreateQueryForCompression)
 import           EulerHS.KVConnector.InMemConfig.Flow (searchInMemoryCache, pushToInMemConfigStream, fetchRowFromDBAndAlterImc)
 import           EulerHS.KVConnector.InMemConfig.Types (ImcStreamCommand(..))
 import           EulerHS.KVConnector.Utils
@@ -46,6 +46,7 @@ import qualified Data.ByteString.Lazy as BSL
 import           Data.List (maximum)
 import qualified Data.Text as T
 import qualified EulerHS.Language as L
+import           Data.Time.Clock(getCurrentTime)
 import qualified Data.HashMap.Strict as HM
 import           EulerHS.SqlDB.Types (BeamRunner, BeamRuntime, DBConfig, DBError)
 import qualified EulerHS.SqlDB.Language as DB
@@ -59,6 +60,8 @@ import qualified EulerHS.KVConnector.Encoding as Encoding
 import qualified Data.Maybe as DMaybe
 import qualified System.Environment as SE
 import qualified EulerHS.KVConnector.Metrics as Metrics
+import EulerHS.KVConnector.Helper.Utils 
+import EulerHS.KVConnector.Compression 
 
 createWoReturingKVConnector :: forall (table :: (Type -> Type) -> Type) be m beM.
   ( HasCallStack,
@@ -73,6 +76,7 @@ createWoReturingKVConnector :: forall (table :: (Type -> Type) -> Type) be m beM
     Serialize.Serialize (table Identity),
     Show (table Identity),
     KVConnector (table Identity),
+    MonadIO m,
     L.MonadFlow m) =>
   DBConfig beM ->
   MeshConfig ->
@@ -104,6 +108,7 @@ createWithKVConnector ::
     Serialize.Serialize (table Identity),
     Show (table Identity),
     KVConnector (table Identity),
+    MonadIO m,
     L.MonadFlow m) =>
   DBConfig beM ->
   MeshConfig ->
@@ -132,6 +137,7 @@ createKV :: forall (table :: (Type -> Type) -> Type) m.
     Serialize.Serialize (table Identity),
     Show (table Identity),
     KVConnector (table Identity),
+    MonadIO m,
     L.MonadFlow m) =>
   MeshConfig ->
   table Identity ->
@@ -144,7 +150,25 @@ createKV meshCfg value = do
           shard = getShardedHashTag pKeyText
           pKey = fromString . T.unpack $ pKeyText <> shard
       time <- fromIntegral <$> L.getCurrentDateInMillis
-      let qCmd = getCreateQuery (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity))
+      compressionAllowed <- liftIO $ fromMaybe False . (>>= readMaybe) <$> SE.lookupEnv "COMPRESSION_ALLOWED"
+      qCmd <- if compressionAllowed
+        then do
+          now <- liftIO getCurrentTime
+          let compressedCmd = getCreateQueryForCompression (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity))
+          compressObject' <- compressObject compressedCmd
+          let qCmd2 = getCreateQuery (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity)) (Just compressObject')
+          latency' <- liftIO $ latency now
+          L.logDebug @Text "Command with Compression latency" ("Latency => " <> show latency' <> " for " <> getTableName @(table Identity))
+          pure qCmd2
+        else do 
+          now <- liftIO getCurrentTime
+          let qCmd2 = getCreateQuery (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity)) Nothing
+          latency' <- liftIO $ latency now
+          L.logDebug @Text "Without Compression latency" ("Latency => " <> show latency' <> " for " <> getTableName @(table Identity))
+          pure qCmd2
+      -- let compressedCmd = getCreateQueryForCompression (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity))
+      -- compressedObj <- compressObject compressedCmd
+      -- let qCmd = getCreateQuery (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity)) (Just compressedObj)
       revMappingRes <- mapM (\secIdx -> do
         let sKey = fromString . T.unpack $ secIdx
         _ <- L.runKVDB meshCfg.kvRedis $ L.sadd sKey [pKey]
