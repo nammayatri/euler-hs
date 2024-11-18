@@ -50,6 +50,14 @@ compress compressionLevel' input = do
     Left err -> pure $ Left (CompressionError ("Compression error: " <> show err) input)
     Right output -> pure $ Right output
 
+compressWithoutError :: Maybe Int -> BS.ByteString -> IO BS.ByteString
+compressWithoutError compressionLevel' input = do
+  let compressionLevel'' = fromMaybe 2 compressionLevel'
+  result <- try (pure $ Zstd.compress compressionLevel'' input) :: IO (Either SomeException BS.ByteString)
+  case result of
+    Left _ -> pure input
+    Right output -> pure output
+
 -- | Decompress the input ByteString
 decompress :: BS.ByteString -> IO (Either DecompressionError BS.ByteString)
 decompress input = do
@@ -59,6 +67,15 @@ decompress input = do
     Right Zstd.Skip -> pure $ Right input
     Right (Zstd.Error err) -> pure $ Left (DecompressionError ("Decompression error: " <> err) input)
     Right (Zstd.Decompress output) -> pure $ Right output
+
+decompressWithoutError :: BS.ByteString -> IO BS.ByteString
+decompressWithoutError input = do
+  result <- try (pure $ Zstd.decompress input) :: IO (Either SomeException Zstd.Decompress)
+  case result of
+    Left _ -> pure input
+    Right Zstd.Skip -> pure input
+    Right (Zstd.Error _) -> pure input
+    Right (Zstd.Decompress output) -> pure output
 
 -------------------------------------------------
 -- Compression and Decompression of Objects
@@ -125,6 +142,17 @@ decompressObjectIO compressedObj = do
           print $ "Error while decompressing object: " ++ err
           return $ A.decode (BL.fromStrict strictByteString) -- Return original if decompression fails
         Right decompressed -> return $ A.decode (BL.fromStrict decompressed)
+
+decompressIO :: String -> IO ()
+decompressIO compressedObj = do
+  let decodedResult = B64.decode (TE.encodeUtf8 $ T.pack compressedObj) -- Decode Base64
+  case decodedResult of
+    Left err -> print $ "Error while decoding Base64: " ++ err
+    Right strictByteString -> do
+      decompressResult <- decompress strictByteString -- Decompress the object
+      case decompressResult of
+        Left (DecompressionError err _) -> print $ "Error while decompressing object: " ++ err
+        Right decompressed -> print decompressed
 
 -------------------------------------------------
 -- Test Cases
