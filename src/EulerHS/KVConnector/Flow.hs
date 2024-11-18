@@ -61,7 +61,6 @@ import qualified Data.Maybe as DMaybe
 import qualified System.Environment as SE
 import qualified EulerHS.KVConnector.Metrics as Metrics
 import EulerHS.KVConnector.Helper.Utils 
-import EulerHS.KVConnector.Compression 
 
 createWoReturingKVConnector :: forall (table :: (Type -> Type) -> Type) be m beM.
   ( HasCallStack,
@@ -155,20 +154,15 @@ createKV meshCfg value = do
         then do
           now <- liftIO getCurrentTime
           let compressedCmd = getCreateQueryForCompression (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity))
-          compressObject' <- compressObject compressedCmd
-          let qCmd2 = getCreateQuery (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity)) (Just compressObject')
           latency' <- liftIO $ latency now
           L.logDebug @Text "Command with Compression latency" ("Latency => " <> show latency' <> " for " <> getTableName @(table Identity))
-          pure qCmd2
+          compressedCmd
         else do 
           now <- liftIO getCurrentTime
-          let qCmd2 = getCreateQuery (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity)) Nothing
+          let qCmd2 = getCreateQuery (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity))
           latency' <- liftIO $ latency now
           L.logDebug @Text "Without Compression latency" ("Latency => " <> show latency' <> " for " <> getTableName @(table Identity))
-          pure qCmd2
-      -- let compressedCmd = getCreateQueryForCompression (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity))
-      -- compressedObj <- compressObject compressedCmd
-      -- let qCmd = getCreateQuery (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity)) (Just compressedObj)
+          pure $ BSL.toStrict $ A.encode qCmd2
       revMappingRes <- mapM (\secIdx -> do
         let sKey = fromString . T.unpack $ secIdx
         _ <- L.runKVDB meshCfg.kvRedis $ L.sadd sKey [pKey]
@@ -181,7 +175,7 @@ createKV meshCfg value = do
             _ <- L.xaddTx
                   (encodeUtf8 (meshCfg.ecRedisDBStream <> shard))
                   L.AutoID
-                  [("command", BSL.toStrict $ A.encode qCmd)]
+                  [("command", qCmd)]
             L.setexTx pKey meshCfg.redisTtl (BSL.toStrict $ Encoding.encode_ meshCfg.cerealEnabled val)
           case kvRes of
             Right _ -> pure $ Right val
