@@ -1,26 +1,25 @@
-
-{-# LANGUAGE RankNTypes        #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module EulerHS.KVConnector.DBSync where
 
-import           EulerHS.Prelude
-import           EulerHS.KVConnector.Types (DBCommandVersion (..),  KVConnector (mkSQLObject), MeshMeta(..))
-import           EulerHS.KVConnector.Utils (jsonKeyValueUpdates, getPKeyAndValueList, meshModelTableEntityDescriptor, toPSJSON)
+import Data.Aeson ((.=))
 import qualified Data.Aeson as A
-import           Data.Aeson ((.=))
 import qualified Data.Aeson.Key as AKey
 import qualified Data.Aeson.KeyMap as AKM
+import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Text as T
 import qualified Database.Beam as B
 import qualified Database.Beam.Schema.Tables as B
-import           Sequelize (Model, Set, Where, Clause(..), Term(..), Column, fromColumnar', columnize)
-import           Sequelize.SQLObject (ToSQLObject (convertToSQLObject))
-import           Text.Casing (pascal)
-import EulerHS.KVConnector.Compression 
+import EulerHS.KVConnector.Compression
+import EulerHS.KVConnector.Types (DBCommandVersion (..), KVConnector (mkSQLObject), MeshMeta (..))
+import EulerHS.KVConnector.Utils (getPKeyAndValueList, jsonKeyValueUpdates, meshModelTableEntityDescriptor, toPSJSON)
 import qualified EulerHS.Language as L
-import qualified Data.ByteString.Lazy as BSL
+import EulerHS.Prelude
+import Sequelize (Clause (..), Column, Model, Set, Term (..), Where, columnize, fromColumnar')
+import Sequelize.SQLObject (ToSQLObject (convertToSQLObject))
+import Text.Casing (pascal)
 
 -- For storing DBCommands in stream
 
@@ -28,144 +27,172 @@ type Tag = Text
 
 type DBName = Text
 
-getCreateQuery :: (KVConnector (table Identity),ToJSON(table Identity)) => Text -> Tag -> Double -> DBName -> table Identity -> [(String, String)] -> A.Value
+getCreateQuery :: (KVConnector (table Identity), ToJSON (table Identity)) => Text -> Tag -> Double -> DBName -> table Identity -> [(String, String)] -> A.Value
 getCreateQuery model tag timestamp dbName dbObject mappings = do
   A.object
-    [ "contents_v2" .= A.object
-        [  "cmdVersion" .= V2
-        ,  "tag" .= tag
-        ,  "timestamp" .= timestamp
-        ,  "dbName" .= dbName
-        ,  "command" .= A.object
-            [ "contents" .= mkSQLObject dbObject,
-              "tag" .= ((T.pack . pascal . T.unpack) model <> "Object")
-            ]
-        ]
-    , "mappings" .= A.toJSON (AKM.fromList $ (\(k, v) -> (AKey.fromText $ T.pack k, v)) <$> mappings)
-    , "modelObject" .= dbObject
-    , "tag" .= ("Create" :: Text)
+    [ "contents_v2"
+        .= A.object
+          [ "cmdVersion" .= V2,
+            "tag" .= tag,
+            "timestamp" .= timestamp,
+            "dbName" .= dbName,
+            "command"
+              .= A.object
+                [ "contents" .= mkSQLObject dbObject,
+                  "tag" .= ((T.pack . pascal . T.unpack) model <> "Object")
+                ]
+          ],
+      "mappings" .= A.toJSON (AKM.fromList $ (\(k, v) -> (AKey.fromText $ T.pack k, v)) <$> mappings),
+      "modelObject" .= dbObject,
+      "tag" .= ("Create" :: Text)
     ]
 
-
-getCreateQueryForCompression 
-  :: (KVConnector (table Identity), ToJSON (table Identity), L.MonadFlow m)
-  => Text 
-  -> Tag 
-  -> Double 
-  -> DBName 
-  -> table Identity 
-  -> [(String, String)] 
-  -> m ByteString
-getCreateQueryForCompression model tag timestamp dbName dbObject mappings = do
-  res <- L.runIO $ compressWithoutError Nothing $ BSL.toStrict $ A.encode (
-          A.object
-            [ "contents_v2" .= A.object
-                [ "cmdVersion" .= V2
-                , "tag" .= tag
-                , "timestamp" .= timestamp
-                , "dbName" .= dbName
-                , "command" .= A.object
-                    [ "contents" .= mkSQLObject dbObject
-                    , "tag" .= ((T.pack . pascal . T.unpack) model <> "Object")
-                    ]
-                ]
-            , "mappings" .= A.toJSON (AKM.fromList $ fmap (\(k, v) -> (AKey.fromText $ T.pack k, v)) mappings)
-            , "modelObject" .= dbObject
-            , "tag" .= ("Create" :: Text)
-            ])
-  pure res
-  
+getCreateQueryWithCompression ::
+  (KVConnector (table Identity), ToJSON (table Identity), L.MonadFlow m) =>
+  Text ->
+  Tag ->
+  Double ->
+  DBName ->
+  table Identity ->
+  [(String, String)] ->
+  m ByteString
+getCreateQueryWithCompression model tag timestamp dbName dbObject mappings =
+  compressWithoutError (Just model) $
+    BSL.toStrict $
+      A.encode $
+        getCreateQuery model tag timestamp dbName dbObject mappings
 
 -- | This will take updateCommand from getDbUpdateCommandJson and returns Aeson value of Update DBCommand
 getUpdateQuery :: Tag -> Double -> DBName -> A.Value -> [(String, String)] -> A.Value -> A.Value
-getUpdateQuery tag timestamp dbName updateCommandV2 mappings updatedModel = A.object
-    [ "contents_v2" .= A.object
-        [  "cmdVersion" .= V2
-        ,  "tag" .= tag
-        ,  "timestamp" .= timestamp
-        ,  "dbName" .= dbName
-        ,  "command" .= updateCommandV2
-        ]
-    , "mappings" .= A.toJSON (AKM.fromList $ (\(k, v) -> (AKey.fromText $ T.pack k, v)) <$> mappings)
-    , "updatedModel" .= A.toJSON updatedModel
-    , "tag" .= ("Update" :: Text)
+getUpdateQuery tag timestamp dbName updateCommandV2 mappings updatedModel =
+  A.object
+    [ "contents_v2"
+        .= A.object
+          [ "cmdVersion" .= V2,
+            "tag" .= tag,
+            "timestamp" .= timestamp,
+            "dbName" .= dbName,
+            "command" .= updateCommandV2
+          ],
+      "mappings" .= A.toJSON (AKM.fromList $ (\(k, v) -> (AKey.fromText $ T.pack k, v)) <$> mappings),
+      "updatedModel" .= A.toJSON updatedModel,
+      "tag" .= ("Update" :: Text)
     ]
 
+getUpdateQueryWithCompression ::
+  (L.MonadFlow m) =>
+  Tag ->
+  Double ->
+  DBName ->
+  A.Value ->
+  [(String, String)] ->
+  A.Value ->
+  Text ->
+  m ByteString
+getUpdateQueryWithCompression tag timestamp dbName updateCommandV2 mappings updatedModel modelName =
+  compressWithoutError (Just modelName) $
+    BSL.toStrict $
+      A.encode $
+        getUpdateQuery tag timestamp dbName updateCommandV2 mappings updatedModel
+
 getDbUpdateCommandJson :: forall be table. (Model be table, MeshMeta be table) => Text -> [Set be table] -> Where be table -> A.Value
-getDbUpdateCommandJson model setClauses whereClause = A.object
-  [ "contents" .= A.toJSON
-      [ updValToJSON . (toPSJSON @be @table) <$> upd
-      , [whereClauseToJson whereClause]
-      ]
-  , "tag" .= ((T.pack . pascal . T.unpack) model <> "Options")
-  ]
+getDbUpdateCommandJson model setClauses whereClause =
+  A.object
+    [ "contents"
+        .= A.toJSON
+          [ updValToJSON . (toPSJSON @be @table) <$> upd,
+            [whereClauseToJson whereClause]
+          ],
+      "tag" .= ((T.pack . pascal . T.unpack) model <> "Options")
+    ]
   where
-      upd = jsonKeyValueUpdates V2 setClauses
+    upd = jsonKeyValueUpdates V2 setClauses
 
 getDbUpdateCommandJsonWithPrimaryKey :: forall be table. (KVConnector (table Identity), Model be table, MeshMeta be table, A.ToJSON (table Identity)) => Text -> [Set be table] -> table Identity -> Where be table -> A.Value
-getDbUpdateCommandJsonWithPrimaryKey model setClauses table whereClause = A.object
-  [ "contents" .= A.toJSON
-      [ updValToJSON  . (toPSJSON @be @table) <$> upd
-      , [(whereClauseJsonWithPrimaryKey @be) table $ whereClauseToJson  whereClause]
-      ]
-  , "tag" .= ((T.pack . pascal . T.unpack) model <> "Options")
-  ]
+getDbUpdateCommandJsonWithPrimaryKey model setClauses table whereClause =
+  A.object
+    [ "contents"
+        .= A.toJSON
+          [ updValToJSON . (toPSJSON @be @table) <$> upd,
+            [(whereClauseJsonWithPrimaryKey @be) table $ whereClauseToJson whereClause]
+          ],
+      "tag" .= ((T.pack . pascal . T.unpack) model <> "Options")
+    ]
   where
-      upd = jsonKeyValueUpdates V2 setClauses
+    upd = jsonKeyValueUpdates V2 setClauses
 
-whereClauseJsonWithPrimaryKey :: forall be table. (HasCallStack, KVConnector (table Identity), A.ToJSON (table Identity), MeshMeta be table) =>  table Identity -> A.Value -> A.Value
+whereClauseJsonWithPrimaryKey :: forall be table. (HasCallStack, KVConnector (table Identity), A.ToJSON (table Identity), MeshMeta be table) => table Identity -> A.Value -> A.Value
 whereClauseJsonWithPrimaryKey table whereClause = do
-  let clauseContentsField =  "clauseContents"
+  let clauseContentsField = "clauseContents"
   case whereClause of
     A.Object o ->
       let mbClause = AKM.lookup clauseContentsField o
-      in case mbClause of
-          Just clause ->
-            let pKeyValueList = getPKeyAndValueList  table
-                modifiedKeyValueList = modifyKeyValue <$> pKeyValueList
-                andOfKeyValueList = A.toJSON $ AKM.singleton "$and" $ A.toJSON modifiedKeyValueList
-                modifiedClause = A.toJSON $ AKM.singleton "$and" $ A.toJSON [clause, andOfKeyValueList]
-                modifiedObject = AKM.insert clauseContentsField modifiedClause o
-            in A.toJSON modifiedObject
-          Nothing -> error $ "Invalid whereClause, contains no item " <> AKey.toText clauseContentsField
+       in case mbClause of
+            Just clause ->
+              let pKeyValueList = getPKeyAndValueList table
+                  modifiedKeyValueList = modifyKeyValue <$> pKeyValueList
+                  andOfKeyValueList = A.toJSON $ AKM.singleton "$and" $ A.toJSON modifiedKeyValueList
+                  modifiedClause = A.toJSON $ AKM.singleton "$and" $ A.toJSON [clause, andOfKeyValueList]
+                  modifiedObject = AKM.insert clauseContentsField modifiedClause o
+               in A.toJSON modifiedObject
+            Nothing -> error $ "Invalid whereClause, contains no item " <> AKey.toText clauseContentsField
     _ -> error "Cannot modify whereClause that is not an Object"
-
   where
     modifyKeyValue :: (Text, A.Value) -> A.Value
     modifyKeyValue (key, value) = A.toJSON $ AKM.singleton (AKey.fromText key) (snd $ (toPSJSON @be @table) (key, value))
 
-getDeleteQuery :: Tag -> Double -> DBName -> A.Value -> [(String, String)]  -> A.Value
-getDeleteQuery tag timestamp dbName deleteCommandV2 mappings = A.object
-  [ "contents_v2" .= A.object
-      [  "cmdVersion" .= V2
-      ,  "tag" .= tag
-      ,  "timestamp" .= timestamp
-      ,  "dbName" .= dbName
-      ,  "command" .= deleteCommandV2
-      ]
-  , "mappings" .= A.toJSON (AKM.fromList $ (\(k, v) -> (AKey.fromText $ T.pack k, v)) <$> mappings)
-  , "tag" .= ("Delete" :: Text)
-  ]
+getDeleteQuery :: Tag -> Double -> DBName -> A.Value -> [(String, String)] -> A.Value
+getDeleteQuery tag timestamp dbName deleteCommandV2 mappings =
+  A.object
+    [ "contents_v2"
+        .= A.object
+          [ "cmdVersion" .= V2,
+            "tag" .= tag,
+            "timestamp" .= timestamp,
+            "dbName" .= dbName,
+            "command" .= deleteCommandV2
+          ],
+      "mappings" .= A.toJSON (AKM.fromList $ (\(k, v) -> (AKey.fromText $ T.pack k, v)) <$> mappings),
+      "tag" .= ("Delete" :: Text)
+    ]
+
+getDeleteQueryWithCompression ::
+  (L.MonadFlow m) =>
+  Tag ->
+  Double ->
+  DBName ->
+  A.Value ->
+  [(String, String)] ->
+  Text ->
+  m ByteString
+getDeleteQueryWithCompression tag timestamp dbName deleteCommandV2 mappings modelName =
+  compressWithoutError (Just modelName) $
+    BSL.toStrict $
+      A.encode $
+        getDeleteQuery tag timestamp dbName deleteCommandV2 mappings
 
 getDbDeleteCommandJson :: forall be table. (Model be table, MeshMeta be table) => Text -> Where be table -> A.Value
-getDbDeleteCommandJson model whereClause = A.object
-  [ "contents" .= whereClauseToJson whereClause
-  , "tag" .= ((T.pack . pascal . T.unpack) model <> "Options")
-  ]
+getDbDeleteCommandJson model whereClause =
+  A.object
+    [ "contents" .= whereClauseToJson whereClause,
+      "tag" .= ((T.pack . pascal . T.unpack) model <> "Options")
+    ]
 
 getDbDeleteCommandJsonWithPrimaryKey :: forall be table. (HasCallStack, KVConnector (table Identity), Model be table, MeshMeta be table, A.ToJSON (table Identity)) => Text -> table Identity -> Where be table -> A.Value
-getDbDeleteCommandJsonWithPrimaryKey model table whereClause = A.object
-  [ "contents" .= (whereClauseJsonWithPrimaryKey @be)  table (whereClauseToJson  whereClause)
-  , "tag" .= ((T.pack . pascal . T.unpack) model <> "Options")
-  ]
+getDbDeleteCommandJsonWithPrimaryKey model table whereClause =
+  A.object
+    [ "contents" .= (whereClauseJsonWithPrimaryKey @be) table (whereClauseToJson whereClause),
+      "tag" .= ((T.pack . pascal . T.unpack) model <> "Options")
+    ]
 
 updValToJSON :: (Text, A.Value) -> A.Value
-updValToJSON (k, v) = A.object [ "key" .= k, "value" .= v ]
+updValToJSON (k, v) = A.object ["key" .= k, "value" .= v]
 
 whereClauseToJson :: (Model be table, MeshMeta be table) => Where be table -> A.Value
-whereClauseToJson whereClause = A.object
-    [ "clauseTag" .= ("where" :: Text)
-    , "clauseContents" .= modelEncodeWhere whereClause
+whereClauseToJson whereClause =
+  A.object
+    [ "clauseTag" .= ("where" :: Text),
+      "clauseContents" .= modelEncodeWhere whereClause
     ]
 
 modelEncodeWhere ::
@@ -211,7 +238,7 @@ encodeClause dt w =
    in foldWhere' w
 
 encodeTerm :: forall table be value. (A.ToJSON value, MeshMeta be table, ToSQLObject value) => Text -> Term be value -> A.Value
-encodeTerm  key = \case
+encodeTerm key = \case
   In vals -> array "$in" (modifyToPsFormat <$> vals)
   Eq val -> modifyToPsFormat val
   Null -> A.Null
@@ -226,7 +253,6 @@ encodeTerm  key = \case
   Not Null -> single "$ne" A.Null
   Not term -> single "$not" ((encodeTerm @table) key term)
   _ -> error "Error while encoding - Term not supported"
-
   where
     modifyToPsFormat val = snd $ (toPSJSON @be @table) (key, A.toJSON $ convertToSQLObject val)
 
