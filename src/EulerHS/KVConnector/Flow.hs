@@ -4,6 +4,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE DerivingStrategies  #-}
 {-# OPTIONS_GHC -Wno-redundant-constraints #-}
+{-# LANGUAGE BangPatterns #-}
 
 module EulerHS.KVConnector.Flow
   (
@@ -153,14 +154,14 @@ createKV meshCfg value = do
       qCmd <- if isCompressionAllowed
         then do
           now <- liftIO getCurrentTime
-          let compressedCmd = getCreateQueryWithCompression (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity))
+          compressedCmd <- getCreateQueryWithCompression (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity))
           latency' <- liftIO $ latency now
           L.logDebug @Text "Create Command with Compression latency" ("Latency => " <> show latency' <> " for " <> getTableName @(table Identity))
-          compressedCmd
+          pure $ compressedCmd
         else do 
           now <- liftIO getCurrentTime
           let qCmd2 = getCreateQuery (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity))
-          let res = BSL.toStrict $ A.encode qCmd2
+          let !res = (BSL.toStrict $ A.encode qCmd2)
           latency' <- liftIO $ latency now
           L.logDebug @Text "Create Command Without Compression latency" ("Latency => " <> show latency' <> " for " <> getTableName @(table Identity))
           pure res
@@ -470,14 +471,14 @@ updateObjectRedis meshCfg updVals setClauses addPrimaryKeyToWhereClause whereCla
       qCmd <- if isCompressionAllowed
         then do
           now <- liftIO getCurrentTime
-          let compressedCmd = getUpdateQueryWithCompression (pKeyText <> shard) time meshCfg.meshDBName updateCmd (getTableMappings @(table Identity)) updatedModel (getTableName @(table Identity))
+          compressedCmd <- getUpdateQueryWithCompression (pKeyText <> shard) time meshCfg.meshDBName updateCmd (getTableMappings @(table Identity)) updatedModel (getTableName @(table Identity))
           latency' <- liftIO $ latency now
           L.logDebug @Text "Update Command with Compression latency" ("Latency => " <> show latency' <> " for " <> getTableName @(table Identity))
-          compressedCmd
+          pure $ compressedCmd
         else do 
           now <- liftIO getCurrentTime
           let qCmd2 = getUpdateQuery (pKeyText <> shard) time meshCfg.meshDBName updateCmd (getTableMappings @(table Identity)) updatedModel
-          let res = BSL.toStrict $ A.encode qCmd2
+          let !res = BSL.toStrict $ A.encode qCmd2
           latency' <- liftIO $ latency now
           L.logDebug @Text "Update Command Without Compression latency" ("Latency => " <> show latency' <> " for " <> getTableName @(table Identity))
           pure res
@@ -1174,7 +1175,7 @@ deleteObjectRedis meshCfg addPrimaryKeyToWhereClause whereClause obj = do
           else do 
             now <- liftIO getCurrentTime
             let qCmd2 = getDeleteQuery (pKeyText <> shard) time meshCfg.meshDBName deleteCmd (getTableMappings @(table Identity)) 
-            let res = BSL.toStrict $ A.encode qCmd2
+            let !res = BSL.toStrict $ A.encode qCmd2
             latency' <- liftIO $ latency now
             L.logDebug @Text "Delete Command Without Compression latency" ("Latency => " <> show latency' <> " for " <> getTableName @(table Identity))
             pure res
