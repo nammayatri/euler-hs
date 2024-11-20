@@ -42,7 +42,7 @@ getValueFromSecondaryKeys secKeys = do
 
 deleteTableEntryValueFromKV :: (KVConnector (table Identity)) => table Identity -> L.Flow ()
 deleteTableEntryValueFromKV sc = do
-  let pKey = getPKeyWithShard sc
+  let pKey = getPKeyWithShard 128 sc
   let secKeys = getSecondaryLookupKeys sc
   void $ fromEitherToMaybe <$> (L.runKVDB kvRedis $ L.del ([encodeUtf8 pKey]))
   void $ fromEitherToMaybe <$> (L.runKVDB kvRedis $ L.del (encodeUtf8 <$> secKeys))

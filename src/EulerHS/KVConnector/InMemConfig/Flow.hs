@@ -48,15 +48,15 @@ checkAndStartLooper meshCfg decodeTable = do
                 streamName <- getRandomStream 
                 when shouldLogFindDBCallLogs $ L.logDebug @Text "checkAndStartLooper" $ "Connecting with Stream <" <> streamName <> "> for table " <> tableName @(table Identity)
                 L.setOption (LooperStarted (tableName @(table Identity))) True
-                L.fork $ looperForRedisStream  decodeTable meshCfg.kvRedis streamName
+                L.fork $ looperForRedisStream decodeTable meshCfg.kvRedis streamName meshCfg
 
 looperForRedisStream :: forall table m.(
     HasCallStack,
     KVConnector (table Identity),
     L.MonadFlow m
     ) => 
-    (ByteString -> Maybe (ImcStreamValue (table Identity))) -> Text -> Text -> m ()
-looperForRedisStream decodeTable redisName streamName = bracket 
+    (ByteString -> Maybe (ImcStreamValue (table Identity))) -> Text -> Text -> MeshConfig -> m ()
+looperForRedisStream decodeTable redisName streamName meshCfg = bracket 
     (pure ())
     (\ _ -> do
       L.logInfoT "looperForRedisStream failed" ("Setting LooperStarted option as False for table " <> tableName @(table Identity))
@@ -74,14 +74,14 @@ looperForRedisStream decodeTable redisName streamName = bracket
                       return ()
                   Just (latestId, rs) -> do
                       L.setOption (RecordId tName) latestId
-                      mapM_ (setInMemCache tName decodeTable) rs
+                      mapM_ (setInMemCache meshCfg tName decodeTable) rs
           Just rId -> do
               newRecords <- getRecordsFromStream redisName streamName rId tName
               case newRecords of
                   Nothing -> return ()
                   Just (latestId, rs) -> do
                       L.setOption (RecordId tName) latestId
-                      mapM_ (setInMemCache tName decodeTable) rs
+                      mapM_ (setInMemCache meshCfg tName decodeTable) rs
       void $ looperDelayInSec)
 
 
@@ -93,10 +93,11 @@ setInMemCache :: forall table m.(
     KVConnector(table Identity),
     L.MonadFlow m
     ) => 
+    MeshConfig ->
     Text ->
     (ByteString -> Maybe (ImcStreamValue (table Identity))) ->
     RecordKeyValues -> m ()
-setInMemCache tName decodeTable (key,value) = do
+setInMemCache meshCfg tName decodeTable (key,value) = do
   when (tName == key) $                             -- decode only when entry is for the looper's table
     case decodeTable value of
         Nothing -> do
@@ -107,13 +108,13 @@ setInMemCache tName decodeTable (key,value) = do
             ImcInsert -> strmVal & \x -> do
               let
                 pKeyText = getLookupKeyByPKey x.tableRow
-                pKey = pKeyText  <> getShardedHashTag pKeyText
+                pKey = pKeyText  <> getShardedHashTag meshCfg.shardModValue pKeyText
               updateAllKeysInIMC pKey x.tableRow
             
             ImcDelete -> strmVal.tableRow & \x -> do
               let
                 pKeyText = getLookupKeyByPKey x
-                pKey = pKeyText  <> getShardedHashTag pKeyText
+                pKey = pKeyText  <> getShardedHashTag meshCfg.shardModValue pKeyText
               deletePrimaryAndSecondaryKeysFromIMC pKey x
 
 extractRecordsFromStreamResponse :: [L.KVDBStreamReadResponseRecord] -> [RecordKeyValues]
@@ -285,7 +286,7 @@ searchInMemoryCache meshCfg dbConf whereClause = do
     getPKeyFromPKeyText row = 
       let
         pKeyText = getLookupKeyByPKey row
-      in pKeyText  <> getShardedHashTag pKeyText
+      in pKeyText  <> getShardedHashTag meshCfg.shardModValue pKeyText
     getPrimaryKeys :: Bool -> m (MeshResult [[ByteString]])
     getPrimaryKeys fetchFromRedis = do
       let 
@@ -307,7 +308,7 @@ searchInMemoryCache meshCfg dbConf whereClause = do
         getPrimaryKeyFromFieldAndValueHelper (k, v) = do
           let constructedKey = redisKeyPrefix <> modelName <> "_" <> k <> "_" <> v
           case HM.lookup k keyHashMap of
-            Just True -> pure $ Right $ Just [fromString $ T.unpack (constructedKey <> getShardedHashTag constructedKey)]
+            Just True -> pure $ Right $ Just [fromString $ T.unpack (constructedKey <> getShardedHashTag meshCfg.shardModValue constructedKey)]
             Just False -> do
               L.getConfig constructedKey >>= \case
                 Nothing -> pure $ Right Nothing
@@ -367,7 +368,7 @@ pushToInMemConfigStream :: forall table m.
 pushToInMemConfigStream meshCfg imcCommand alteredModel = do
   let 
     -- pKeyText = getLookupKeyByPKey alteredModel
-    -- shard = getShardedHashTag pKeyText
+    -- shard = getShardedHashTag meshCfg.shardModValue pKeyText
     -- pKey =  pKeyText <> shard
     strmValue = ImcStreamValue {
       command = imcCommand,
