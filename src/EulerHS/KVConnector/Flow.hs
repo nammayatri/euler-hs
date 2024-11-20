@@ -47,7 +47,6 @@ import qualified Data.ByteString.Lazy as BSL
 import           Data.List (maximum)
 import qualified Data.Text as T
 import qualified EulerHS.Language as L
-import           Data.Time.Clock(getCurrentTime)
 import qualified Data.HashMap.Strict as HM
 import           EulerHS.SqlDB.Types (BeamRunner, BeamRuntime, DBConfig, DBError)
 import qualified EulerHS.SqlDB.Language as DB
@@ -61,7 +60,6 @@ import qualified EulerHS.KVConnector.Encoding as Encoding
 import qualified Data.Maybe as DMaybe
 import qualified System.Environment as SE
 import qualified EulerHS.KVConnector.Metrics as Metrics
-import EulerHS.KVConnector.Helper.Utils 
 import EulerHS.KVConnector.Compression
 
 createWoReturingKVConnector :: forall (table :: (Type -> Type) -> Type) be m beM.
@@ -151,20 +149,11 @@ createKV meshCfg value = do
           shard = getShardedHashTag pKeyText
           pKey = fromString . T.unpack $ pKeyText <> shard
       time <- fromIntegral <$> L.getCurrentDateInMillis
+
       qCmd <- if isCompressionAllowed
-        then do
-          now <- liftIO getCurrentTime
-          compressedCmd <- getCreateQueryWithCompression (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity))
-          latency' <- liftIO $ latency now
-          L.logDebug @Text "Create Command with Compression latency" ("Latency => " <> show latency' <> " for " <> getTableName @(table Identity))
-          pure $ compressedCmd
-        else do 
-          now <- liftIO getCurrentTime
-          let qCmd2 = getCreateQuery (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity))
-          let !res = (BSL.toStrict $ A.encode qCmd2)
-          latency' <- liftIO $ latency now
-          L.logDebug @Text "Create Command Without Compression latency" ("Latency => " <> show latency' <> " for " <> getTableName @(table Identity))
-          pure res
+        then do getCreateQueryWithCompression (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity))
+        else do pure $ BSL.toStrict $ A.encode $ getCreateQuery (getTableName @(table Identity)) (pKeyText <> shard) time meshCfg.meshDBName val (getTableMappings @(table Identity))
+
       revMappingRes <- mapM (\secIdx -> do
         let sKey = fromString . T.unpack $ secIdx
         _ <- L.runKVDB meshCfg.kvRedis $ L.sadd sKey [pKey]
@@ -467,21 +456,11 @@ updateObjectRedis meshCfg updVals setClauses addPrimaryKeyToWhereClause whereCla
           updateCmd = if addPrimaryKeyToWhereClause
                         then getDbUpdateCommandJsonWithPrimaryKey (getTableName @(table Identity)) setClauses obj whereClause
                         else getDbUpdateCommandJson (getTableName @(table Identity)) setClauses whereClause
-          -- qCmd      = getUpdateQuery (pKeyText <> shard) time meshCfg.meshDBName updateCmd (getTableMappings @(table Identity)) updatedModel
+
       qCmd <- if isCompressionAllowed
-        then do
-          now <- liftIO getCurrentTime
-          compressedCmd <- getUpdateQueryWithCompression (pKeyText <> shard) time meshCfg.meshDBName updateCmd (getTableMappings @(table Identity)) updatedModel (getTableName @(table Identity))
-          latency' <- liftIO $ latency now
-          L.logDebug @Text "Update Command with Compression latency" ("Latency => " <> show latency' <> " for " <> getTableName @(table Identity))
-          pure $ compressedCmd
-        else do 
-          now <- liftIO getCurrentTime
-          let qCmd2 = getUpdateQuery (pKeyText <> shard) time meshCfg.meshDBName updateCmd (getTableMappings @(table Identity)) updatedModel
-          let !res = BSL.toStrict $ A.encode qCmd2
-          latency' <- liftIO $ latency now
-          L.logDebug @Text "Update Command Without Compression latency" ("Latency => " <> show latency' <> " for " <> getTableName @(table Identity))
-          pure res
+        then do getUpdateQueryWithCompression (pKeyText <> shard) time meshCfg.meshDBName updateCmd (getTableMappings @(table Identity)) updatedModel (getTableName @(table Identity))
+        else do pure $ BSL.toStrict $ A.encode $ getUpdateQuery (pKeyText <> shard) time meshCfg.meshDBName updateCmd (getTableMappings @(table Identity)) updatedModel
+ 
       case resultToEither $ A.fromJSON updatedModel of
         Right value -> do
           let olderSkeys = map (\(SKey s) -> s) (secondaryKeysFiltered obj)
@@ -1166,19 +1145,8 @@ deleteObjectRedis meshCfg addPrimaryKeyToWhereClause whereClause obj = do
                     else getDbDeleteCommandJson  (getTableName @(table Identity)) whereClause
 
   qCmd <- if isCompressionAllowed 
-          then do
-            now <- liftIO getCurrentTime
-            compressedCmd <- getDeleteQueryWithCompression (pKeyText <> shard) time meshCfg.meshDBName deleteCmd (getTableMappings @(table Identity)) (getTableName @(table Identity))
-            latency' <- liftIO $ latency now
-            L.logDebug @Text "Delete Command with Compression latency" ("Latency => " <> show latency' <> " for " <> getTableName @(table Identity))
-            pure compressedCmd
-          else do 
-            now <- liftIO getCurrentTime
-            let qCmd2 = getDeleteQuery (pKeyText <> shard) time meshCfg.meshDBName deleteCmd (getTableMappings @(table Identity)) 
-            let !res = BSL.toStrict $ A.encode qCmd2
-            latency' <- liftIO $ latency now
-            L.logDebug @Text "Delete Command Without Compression latency" ("Latency => " <> show latency' <> " for " <> getTableName @(table Identity))
-            pure res
+          then do getDeleteQueryWithCompression (pKeyText <> shard) time meshCfg.meshDBName deleteCmd (getTableMappings @(table Identity)) (getTableName @(table Identity))
+          else do pure $ BSL.toStrict $ A.encode $ getDeleteQuery (pKeyText <> shard) time meshCfg.meshDBName deleteCmd (getTableMappings @(table Identity)) 
 
   kvDbRes <- L.runKVDB meshCfg.kvRedis $ L.multiExecWithHash (encodeUtf8 shard) $ do
     _ <- L.xaddTx
