@@ -47,7 +47,7 @@ spec = flowSpec $ do
     itFlow "Should add primary key and secondary keys to redis on insert command" $ do
         sc <- dummyServiceConfig
         withTableEntry sc $ (\serviceConfig _dbConf -> do
-            let pKey = getPKeyWithShard serviceConfig
+            let pKey = getPKeyWithShard 128 serviceConfig
             let secKeys = getSecondaryLookupKeys serviceConfig
             (valueFromPrimaryKey :: Maybe ServiceConfiguration) <- getValueFromPrimaryKey pKey
             valueFromSecondaryKeys <- (snd . partialHead) <$> getValueFromSecondaryKeys secKeys

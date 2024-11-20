@@ -56,8 +56,8 @@ import           EulerHS.KVConnector.Helper.Utils
 redisKeyPrefix :: Text
 redisKeyPrefix = fromMaybe "" $ lookupEnvT "REDIS_KEY_PREFIX"
 
-dropPrefix :: ByteString -> (Bool, ByteString)
-dropPrefix str
+dropPrefix :: Int -> ByteString -> (Bool, ByteString)
+dropPrefix shardModValue str
   -- BSC.drop (BSC.length (fromString (T.unpack redisKeyPrefix))) 
   | not (null redisKeyPrefix) && fromString (T.unpack redisKeyPrefix) `BSC.isPrefixOf` str = do 
     -- (True, BSC.drop (BSC.length (fromString (T.unpack redisKeyPrefix))) str)
@@ -66,7 +66,7 @@ dropPrefix str
     if "{shard-" `BSC.isInfixOf` droppedKey
       then do 
         let pkeyText = decodeUtf8 $ BSC.takeWhile (/= '{') droppedKey
-        (True, encodeUtf8 (pkeyText <> getShardedHashTag pkeyText))
+        (True, encodeUtf8 (pkeyText <> getShardedHashTag shardModValue pkeyText))
       else (True, droppedKey)
   | otherwise = (False,str)
 
@@ -202,7 +202,7 @@ getDataFromPKeysRedis' :: forall table m. (
 getDataFromPKeysRedis' _ _ []  = pure $ Right ([], [])
 getDataFromPKeysRedis' meshCfg latencyLogging pKeys = do
   -- Todo: to be removed
-  let pKeyWithoutPrefix = map dropPrefix pKeys
+  let pKeyWithoutPrefix = map (dropPrefix meshCfg.shardModValue) pKeys
   -- here we will take all the keys which are true for drop prefix and skip the false ones
   let pKeys' = map snd $ filter fst pKeyWithoutPrefix
   let groupedKeys = groupKeysBySlot (pKeys <> pKeys')
@@ -237,7 +237,7 @@ getDataFromPKeysRedis meshCfg latencyLogging (pKey : pKeys)  = do
           return $ Right ([], [])
     Right Nothing -> do
       -- Todo: to be removed
-      let (hadPrefix, keyWithoutPrefix) = dropPrefix pKey
+      let (hadPrefix, keyWithoutPrefix) = dropPrefix meshCfg.shardModValue pKey
       bool (getDataFromPKeysRedis meshCfg latencyLogging pKeys) (getDataFromPKeysRedis meshCfg latencyLogging (keyWithoutPrefix : pKeys)) hadPrefix
     Left e -> return $ Left $ RedisError $ (show e <> " for key: " <> show (pKey : pKeys))
 
@@ -246,10 +246,10 @@ getDataFromPKeysRedis meshCfg latencyLogging (pKey : pKeys)  = do
 keyDelim:: Text
 keyDelim = "_"
 
-getPKeyWithShard :: forall table. (KVConnector (table Identity)) => table Identity -> Text
-getPKeyWithShard table =
+getPKeyWithShard :: forall table. (KVConnector (table Identity)) => table Identity -> Int -> Text
+getPKeyWithShard table shardModValue =
   let pKey = getLookupKeyByPKey table
-  in pKey <> getShardedHashTag pKey
+  in pKey <> getShardedHashTag shardModValue pKey
 
 getLookupKeyByPKey :: forall table. (KVConnector (table Identity)) => table Identity -> Text
 getLookupKeyByPKey table = do
@@ -295,10 +295,10 @@ getSortedKey kvTup = do
   let (appendedKeys, appendedValues) = applyFPair (T.intercalate "_") $ unzip sortArr
   appendedKeys <> "_" <> appendedValues
 
-getShardedHashTag :: Text -> Text
-getShardedHashTag key = do
+getShardedHashTag :: Int -> Text -> Text
+getShardedHashTag modVal key = do
   let slot = unsafeCoerce @_ @Word16 $ L.keyToSlot $ encodeUtf8 key
-      streamShard = slot `mod` 128
+      streamShard = slot `mod` (fromIntegral modVal)
   "{shard-" <> show streamShard <> "}"
 
 ------------------------------------------
@@ -534,14 +534,14 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = 
     getPrimaryKeyFromFieldAndValueHelper (k, v) = do
       let constructedKey = redisKeyPrefix <> modelName <> "_" <> k <> "_" <> v
       case HM.lookup k keyHashMap of
-        Just True -> pure $ Right $ Just [fromString $ T.unpack (constructedKey <> getShardedHashTag constructedKey)]
+        Just True -> pure $ Right $ Just [fromString $ T.unpack (constructedKey <> getShardedHashTag meshCfg.shardModValue constructedKey)]
         Just False -> do
           res <- L.runKVDB meshCfg.kvRedis $ L.smembers (fromString $ T.unpack constructedKey)
           case res of
             -- Todo: To be removed after redis key prefix is implemented
             -- Right r -> pure $ Right $ Just r 
             Right r -> do
-              let (hadPrefix, keyWithoutPrefix) = dropPrefix (fromString $ T.unpack constructedKey)
+              let (hadPrefix, keyWithoutPrefix) = dropPrefix meshCfg.shardModValue (fromString $ T.unpack constructedKey)
               if hadPrefix 
                 then do
                   result' <- L.runKVDB meshCfg.kvRedis $ L.smembers keyWithoutPrefix
