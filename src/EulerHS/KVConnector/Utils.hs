@@ -201,11 +201,7 @@ getDataFromPKeysRedis' :: forall table m. (
     L.MonadFlow m, MonadIO m) => MeshConfig -> Bool -> [ByteString] -> m (MeshResult ([table Identity], [table Identity]))
 getDataFromPKeysRedis' _ _ []  = pure $ Right ([], [])
 getDataFromPKeysRedis' meshCfg latencyLogging pKeys = do
-  -- Todo: to be removed
-  let pKeyWithoutPrefix = map dropPrefix pKeys
-  -- here we will take all the keys which are true for drop prefix and skip the false ones
-  let pKeys' = map snd $ filter fst pKeyWithoutPrefix
-  let groupedKeys = groupKeysBySlot (pKeys <> pKeys')
+  let groupedKeys = groupKeysBySlot pKeys
   getDataFromPKeysHelper meshCfg groupedKeys latencyLogging
 
 getDataFromPKeysRedis :: forall table m. (
@@ -235,10 +231,7 @@ getDataFromPKeysRedis meshCfg latencyLogging (pKey : pKeys)  = do
           -- to handle the case where the key is not found in the redis and log the error
           L.logErrorT "getDataFromPKeysRedis" $ "Error while decoding: " <> show e
           return $ Right ([], [])
-    Right Nothing -> do
-      -- Todo: to be removed
-      let (hadPrefix, keyWithoutPrefix) = dropPrefix pKey
-      bool (getDataFromPKeysRedis meshCfg latencyLogging pKeys) (getDataFromPKeysRedis meshCfg latencyLogging (keyWithoutPrefix : pKeys)) hadPrefix
+    Right Nothing -> getDataFromPKeysRedis meshCfg latencyLogging pKeys
     Left e -> return $ Left $ RedisError $ (show e <> " for key: " <> show (pKey : pKeys))
 
 ------------- KEY UTILS ------------------
@@ -538,16 +531,7 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = 
         Just False -> do
           res <- L.runKVDB meshCfg.kvRedis $ L.smembers (fromString $ T.unpack constructedKey)
           case res of
-            -- Todo: To be removed after redis key prefix is implemented
-            -- Right r -> pure $ Right $ Just r 
-            Right r -> do
-              let (hadPrefix, keyWithoutPrefix) = dropPrefix (fromString $ T.unpack constructedKey)
-              if hadPrefix 
-                then do
-                  result' <- L.runKVDB meshCfg.kvRedis $ L.smembers keyWithoutPrefix
-                  let withoutPrefixResult = either (const []) id result'
-                  pure $ Right $ Just $ r ++ withoutPrefixResult
-                else pure $ Right $ Just r
+            Right r -> pure $ Right $ Just r
             Left e -> pure $ Left $ RedisError $ (show e <> " for key: " <> show constructedKey)
         _ -> pure $ Right Nothing
 
