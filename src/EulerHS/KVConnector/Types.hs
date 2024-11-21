@@ -104,6 +104,7 @@ data MeshConfig = MeshConfig
   , redisTtl        :: L.KVDBDuration
   , kvHardKilled    :: Bool
   , shardModValue   :: Int
+  , redisKeyPrefix  :: Text
   }
   deriving (Generic, Eq, Show, A.ToJSON)
 
