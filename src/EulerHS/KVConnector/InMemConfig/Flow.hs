@@ -107,15 +107,15 @@ setInMemCache meshCfg tName decodeTable (key,value) = do
           case strmVal.command of
             ImcInsert -> strmVal & \x -> do
               let
-                pKeyText = getLookupKeyByPKey x.tableRow
+                pKeyText = getLookupKeyByPKey meshCfg.redisKeyPrefix x.tableRow
                 pKey = pKeyText  <> getShardedHashTag meshCfg.shardModValue pKeyText
-              updateAllKeysInIMC pKey x.tableRow
+              updateAllKeysInIMC meshCfg.redisKeyPrefix pKey x.tableRow
             
             ImcDelete -> strmVal.tableRow & \x -> do
               let
-                pKeyText = getLookupKeyByPKey x
+                pKeyText = getLookupKeyByPKey meshCfg.redisKeyPrefix x
                 pKey = pKeyText  <> getShardedHashTag meshCfg.shardModValue pKeyText
-              deletePrimaryAndSecondaryKeysFromIMC pKey x
+              deletePrimaryAndSecondaryKeysFromIMC meshCfg.redisKeyPrefix pKey x
 
 extractRecordsFromStreamResponse :: [L.KVDBStreamReadResponseRecord] -> [RecordKeyValues]
 extractRecordsFromStreamResponse  = foldMap (fmap (bimap decodeUtf8 id) . L.records) 
@@ -261,7 +261,7 @@ searchInMemoryCache meshCfg dbConf whereClause = do
             then (SQL,) <$> doDbFetchAndUpdateIMC
             else do
               let liveTups = filter (\(_, isLive, _) -> isLive) tups
-              mapM_ (\(k, _, row) ->  updateAllKeysInIMC k row) liveTups
+              mapM_ (\(k, _, row) ->  updateAllKeysInIMC meshCfg.redisKeyPrefix k row) liveTups
               return . (KV,) . Right $ (\(_, _, row) -> row) <$> liveTups
 
     doDbFetchAndUpdateIMC :: m (MeshResult [(table Identity)])
@@ -271,7 +271,7 @@ searchInMemoryCache meshCfg dbConf whereClause = do
       case eDbTups of
         (Left e) -> pure .Left $ e
         Right dbTups -> do
-          mapM_ (uncurry updateAllKeysInIMC) dbTups
+          mapM_ (uncurry (updateAllKeysInIMC meshCfg.redisKeyPrefix)) dbTups
           return . Right $ snd <$> dbTups
 
     dbFetch :: m (MeshResult [(Text, table Identity)])
@@ -285,7 +285,7 @@ searchInMemoryCache meshCfg dbConf whereClause = do
     getPKeyFromPKeyText :: table Identity -> Text
     getPKeyFromPKeyText row = 
       let
-        pKeyText = getLookupKeyByPKey row
+        pKeyText = getLookupKeyByPKey meshCfg.redisKeyPrefix row
       in pKeyText  <> getShardedHashTag meshCfg.shardModValue pKeyText
     getPrimaryKeys :: Bool -> m (MeshResult [[ByteString]])
     getPrimaryKeys fetchFromRedis = do
@@ -306,7 +306,7 @@ searchInMemoryCache meshCfg dbConf whereClause = do
       where
 
         getPrimaryKeyFromFieldAndValueHelper (k, v) = do
-          let constructedKey = redisKeyPrefix <> modelName <> "_" <> k <> "_" <> v
+          let constructedKey = meshCfg.redisKeyPrefix <> modelName <> "_" <> k <> "_" <> v
           case HM.lookup k keyHashMap of
             Just True -> pure $ Right $ Just [fromString $ T.unpack (constructedKey <> getShardedHashTag meshCfg.shardModValue constructedKey)]
             Just False -> do
@@ -319,12 +319,12 @@ searchInMemoryCache meshCfg dbConf whereClause = do
         intersectList (x : [])     = x
         intersectList []           = []
 
-updateAllKeysInIMC :: forall table m. (KVConnector (table Identity), L.MonadFlow m) => Text -> table Identity -> m ()
-updateAllKeysInIMC pKey val = do
+updateAllKeysInIMC :: forall table m. (KVConnector (table Identity), L.MonadFlow m) => Text -> Text -> table Identity -> m ()
+updateAllKeysInIMC redisKeyPrefix pKey val = do
   newTtl <- getConfigEntryNewTtl
   L.setConfig pKey $ mkConfigEntry newTtl val
   let
-    sKeys = getSecondaryLookupKeys val
+    sKeys = getSecondaryLookupKeys redisKeyPrefix val
   mapM_ (updateSecondaryKeyInIMC pKey newTtl) sKeys
 
 updateSecondaryKeyInIMC :: L.MonadFlow m => Text -> LocalTime -> Text -> m ()
@@ -334,13 +334,13 @@ updateSecondaryKeyInIMC pKey newttl sKey = do
     Just ls -> return $ unsafeCoerce ls.entry
   L.setConfig sKey $ mkConfigEntry newttl (Set.toList . Set.fromList $ pKey:pkeyList)
 
-deletePrimaryAndSecondaryKeysFromIMC :: forall table m. (KVConnector (table Identity), L.MonadFlow m) => Text -> table Identity -> m ()
-deletePrimaryAndSecondaryKeysFromIMC pKey val = do
+deletePrimaryAndSecondaryKeysFromIMC :: forall table m. (KVConnector (table Identity), L.MonadFlow m) => Text -> Text -> table Identity -> m ()
+deletePrimaryAndSecondaryKeysFromIMC redisKeyPrefix pKey val = do
   -- expiredTime <- getExpiredTime
   -- L.modifyConfig pKey (\cEntry -> cEntry {ttl = expiredTime})
   L.delConfig pKey
   let
-    sKeys = getSecondaryLookupKeys val
+    sKeys = getSecondaryLookupKeys redisKeyPrefix val
   mapM_ ((flip L.modifyConfig) (modifySecondaryKeysFromIMC)) sKeys
 
   where

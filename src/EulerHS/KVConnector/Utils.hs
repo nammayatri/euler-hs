@@ -53,22 +53,6 @@ import qualified Database.Redis as DR
 import qualified Data.Maybe as DM
 import           EulerHS.KVConnector.Helper.Utils
 
-redisKeyPrefix :: Text
-redisKeyPrefix = fromMaybe "" $ lookupEnvT "REDIS_KEY_PREFIX"
-
-dropPrefix :: Int -> ByteString -> (Bool, ByteString)
-dropPrefix shardModValue str
-  -- BSC.drop (BSC.length (fromString (T.unpack redisKeyPrefix))) 
-  | not (null redisKeyPrefix) && fromString (T.unpack redisKeyPrefix) `BSC.isPrefixOf` str = do 
-    -- (True, BSC.drop (BSC.length (fromString (T.unpack redisKeyPrefix))) str)
-    let droppedKey = BSC.drop (BSC.length (fromString (T.unpack redisKeyPrefix))) str
-    -- now we will check if "{shard-" is present in the key if present then don't take anything after {
-    if "{shard-" `BSC.isInfixOf` droppedKey
-      then do 
-        let pkeyText = decodeUtf8 $ BSC.takeWhile (/= '{') droppedKey
-        (True, encodeUtf8 (pkeyText <> getShardedHashTag shardModValue pkeyText))
-      else (True, droppedKey)
-  | otherwise = (False,str)
 
 jsonKeyValueUpdates ::
   forall be table. (HasCallStack, Model be table, MeshMeta be table)
@@ -239,20 +223,20 @@ getDataFromPKeysRedis meshCfg latencyLogging (pKey : pKeys)  = do
 keyDelim:: Text
 keyDelim = "_"
 
-getPKeyWithShard :: forall table. (KVConnector (table Identity)) => table Identity -> Int -> Text
-getPKeyWithShard table shardModValue =
-  let pKey = getLookupKeyByPKey table
+getPKeyWithShard :: forall table. (KVConnector (table Identity)) => table Identity -> Text -> Int -> Text
+getPKeyWithShard table redisKeyPrefix shardModValue =
+  let pKey = getLookupKeyByPKey redisKeyPrefix table
   in pKey <> getShardedHashTag shardModValue pKey
 
-getLookupKeyByPKey :: forall table. (KVConnector (table Identity)) => table Identity -> Text
-getLookupKeyByPKey table = do
+getLookupKeyByPKey :: forall table. (KVConnector (table Identity)) => Text -> table Identity -> Text
+getLookupKeyByPKey redisKeyPrefix table = do
   let tName = tableName @(table Identity)
   let (PKey k) = primaryKey table
   let lookupKey = getSortedKey k
   redisKeyPrefix <> tName <> keyDelim <> lookupKey
 
-getSecondaryLookupKeys :: forall table. (KVConnector (table Identity)) => table Identity -> [Text]
-getSecondaryLookupKeys table = do
+getSecondaryLookupKeys :: forall table. (KVConnector (table Identity)) => Text -> table Identity -> [Text]
+getSecondaryLookupKeys redisKeyPrefix table = do
   let tName = tableName @(table Identity)
   let skeys = secondaryKeysFiltered table
   let tupList = map (\(SKey s) -> s) skeys
@@ -336,21 +320,21 @@ resultToEither :: A.Result a -> Either Text a
 resultToEither (A.Success res) = Right res
 resultToEither (A.Error e)     = Left $ T.pack e
 
-mergeKVAndDBResults :: KVConnector (table Identity) => [table Identity] -> [table Identity] -> [table Identity]
-mergeKVAndDBResults dbRows kvRows = do
-  let kvPkeys = map getLookupKeyByPKey kvRows
-      uniqueDbRes = filter (\r -> getLookupKeyByPKey r `notElem` kvPkeys) dbRows
+mergeKVAndDBResults :: KVConnector (table Identity) => Text -> [table Identity] -> [table Identity] -> [table Identity]
+mergeKVAndDBResults redisKeyPrefix dbRows kvRows = do
+  let kvPkeys = map (getLookupKeyByPKey redisKeyPrefix) kvRows
+      uniqueDbRes = filter (\r -> (getLookupKeyByPKey redisKeyPrefix r) `notElem` kvPkeys) dbRows
   kvRows ++ uniqueDbRes
 
-getUniqueDBRes :: KVConnector (table Identity) => [table Identity] -> [table Identity] -> [table Identity]
-getUniqueDBRes dbRows kvRows = do
-  let kvPkeys = map getLookupKeyByPKey kvRows
-  filter (\r -> getLookupKeyByPKey r `notElem` kvPkeys) dbRows
+getUniqueDBRes :: KVConnector (table Identity) => Text -> [table Identity] -> [table Identity] -> [table Identity]
+getUniqueDBRes redisKeyPrefix dbRows kvRows = do
+  let kvPkeys = map (getLookupKeyByPKey redisKeyPrefix) kvRows
+  filter (\r -> (getLookupKeyByPKey redisKeyPrefix r) `notElem` kvPkeys) dbRows
 
-removeDeleteResults :: KVConnector (table Identity) => [table Identity] -> [table Identity] -> [table Identity]
-removeDeleteResults delRows rows = do
-  let delPKeys = map getLookupKeyByPKey delRows
-      nonDelRows = filter (\r -> getLookupKeyByPKey r `notElem` delPKeys) rows
+removeDeleteResults :: KVConnector (table Identity) => Text -> [table Identity] -> [table Identity] -> [table Identity]
+removeDeleteResults redisKeyPrefix delRows rows = do
+  let delPKeys = map (getLookupKeyByPKey redisKeyPrefix) delRows
+      nonDelRows = filter (\r -> (getLookupKeyByPKey redisKeyPrefix r) `notElem` delPKeys) rows
   nonDelRows
 
 getLatencyInMicroSeconds :: Integer -> Integer
@@ -525,7 +509,7 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = 
   where
 
     getPrimaryKeyFromFieldAndValueHelper (k, v) = do
-      let constructedKey = redisKeyPrefix <> modelName <> "_" <> k <> "_" <> v
+      let constructedKey = meshCfg.redisKeyPrefix <> modelName <> "_" <> k <> "_" <> v
       case HM.lookup k keyHashMap of
         Just True -> pure $ Right $ Just [fromString $ T.unpack (constructedKey <> getShardedHashTag meshCfg.shardModValue constructedKey)]
         Just False -> do
