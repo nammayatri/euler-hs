@@ -56,7 +56,7 @@ class TableMappings a where
 
 --------------- EXISTING DB MESH ---------------
 class MeshState a where
-  getShardedHashTag :: Int -> a -> Maybe Text
+  getShardedHashTag :: Text -> Int -> a -> Maybe Text
   getKVKey          :: a -> Maybe Text
   getKVDirtyKey     :: a -> Maybe Text
   isDBMeshEnabled   :: a -> Bool

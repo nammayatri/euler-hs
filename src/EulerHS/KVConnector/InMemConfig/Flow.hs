@@ -108,13 +108,13 @@ setInMemCache meshCfg tName decodeTable (key,value) = do
             ImcInsert -> strmVal & \x -> do
               let
                 pKeyText = getLookupKeyByPKey meshCfg.redisKeyPrefix x.tableRow
-                pKey = pKeyText  <> getShardedHashTag meshCfg.shardModValue pKeyText
+                pKey = pKeyText  <> getShardedHashTag meshCfg.redisKeyPrefix meshCfg.shardModValue pKeyText
               updateAllKeysInIMC meshCfg.redisKeyPrefix pKey x.tableRow
             
             ImcDelete -> strmVal.tableRow & \x -> do
               let
                 pKeyText = getLookupKeyByPKey meshCfg.redisKeyPrefix x
-                pKey = pKeyText  <> getShardedHashTag meshCfg.shardModValue pKeyText
+                pKey = pKeyText  <> getShardedHashTag meshCfg.redisKeyPrefix meshCfg.shardModValue pKeyText
               deletePrimaryAndSecondaryKeysFromIMC meshCfg.redisKeyPrefix pKey x
 
 extractRecordsFromStreamResponse :: [L.KVDBStreamReadResponseRecord] -> [RecordKeyValues]
@@ -286,7 +286,7 @@ searchInMemoryCache meshCfg dbConf whereClause = do
     getPKeyFromPKeyText row = 
       let
         pKeyText = getLookupKeyByPKey meshCfg.redisKeyPrefix row
-      in pKeyText  <> getShardedHashTag meshCfg.shardModValue pKeyText
+      in pKeyText  <> getShardedHashTag meshCfg.redisKeyPrefix meshCfg.shardModValue pKeyText
     getPrimaryKeys :: Bool -> m (MeshResult [[ByteString]])
     getPrimaryKeys fetchFromRedis = do
       let 
@@ -308,7 +308,7 @@ searchInMemoryCache meshCfg dbConf whereClause = do
         getPrimaryKeyFromFieldAndValueHelper (k, v) = do
           let constructedKey = meshCfg.redisKeyPrefix <> modelName <> "_" <> k <> "_" <> v
           case HM.lookup k keyHashMap of
-            Just True -> pure $ Right $ Just [fromString $ T.unpack (constructedKey <> getShardedHashTag meshCfg.shardModValue constructedKey)]
+            Just True -> pure $ Right $ Just [fromString $ T.unpack (constructedKey <> getShardedHashTag meshCfg.redisKeyPrefix meshCfg.shardModValue constructedKey)]
             Just False -> do
               L.getConfig constructedKey >>= \case
                 Nothing -> pure $ Right Nothing
@@ -368,7 +368,7 @@ pushToInMemConfigStream :: forall table m.
 pushToInMemConfigStream meshCfg imcCommand alteredModel = do
   let 
     -- pKeyText = getLookupKeyByPKey alteredModel
-    -- shard = getShardedHashTag meshCfg.shardModValue pKeyText
+    -- shard = getShardedHashTag meshCfg.redisKeyPrefix meshCfg.shardModValue pKeyText
     -- pKey =  pKeyText <> shard
     strmValue = ImcStreamValue {
       command = imcCommand,
