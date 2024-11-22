@@ -43,11 +43,7 @@ import           Safe (atMay)
 import qualified EulerHS.Logger.Types as Log
 import           Sequelize.SQLObject (ToSQLObject (..))
 import           EulerHS.KVDB.Types (KVDBReply)
-import qualified Data.ByteString.Char8 as BSC
-import qualified Data.HashMap.Internal as HMI
-import           Debug.Trace as T
-import           Data.Time.Clock(getCurrentTime, NominalDiffTime, UTCTime, diffUTCTime)
-import qualified System.Environment as SE
+import           Data.Time.Clock(getCurrentTime)
 import qualified Control.Monad as CM
 import qualified Database.Redis as DR
 import qualified Data.Maybe as DM
@@ -131,7 +127,7 @@ groupKeysBySlot keys' =
       in slotMap''
       where
         keyExists = SMap.member
-        valuesForKey slot acc = DM.fromJust $ SMap.lookup slot acc 
+        valuesForKey slot acc' = DM.fromJust $ SMap.lookup slot acc' 
         insertedMap  = SMap.insert 
 
 
@@ -162,12 +158,11 @@ getDataFromPKeysHelper :: forall table m. (
     FromJSON (table Identity),
     Serialize.Serialize (table Identity),
     L.MonadFlow m, MonadIO m) => MeshConfig -> [[ByteString]] -> Bool -> m (MeshResult ([table Identity], [table Identity]))
-getDataFromPKeysHelper _ [] latencyLogging = pure $ Right ([], [])
+getDataFromPKeysHelper _ [] _ = pure $ Right ([], [])
 getDataFromPKeysHelper meshCfg (pKey : pKeys) latencyLogging = do
   currentTime <- liftIO getCurrentTime
   res <- L.runKVDB meshCfg.kvRedis $ L.mget (fromString . T.unpack . decodeUtf8 <$> pKey)
-  result <- liftIO $ latency currentTime
-  CM.when latencyLogging $ L.logInfo ("Latency for redisFindAll"::Text)  (show result)
+  CM.when latencyLogging $ L.logInfo ("Latency for redisFindAll" :: Text) . show =<< liftIO (measureLatency currentTime)
   result <- getDataFromPKeysRedisHelper res
   case result of
     Left e -> return $ Left e
@@ -197,8 +192,7 @@ getDataFromPKeysRedis _ _ [] = pure $ Right ([], [])
 getDataFromPKeysRedis meshCfg latencyLogging (pKey : pKeys)  = do
   currentTime <- liftIO getCurrentTime
   res <- L.runKVDB meshCfg.kvRedis $ L.get (fromString $ T.unpack $ decodeUtf8 pKey)
-  result <- liftIO $ latency currentTime
-  CM.when latencyLogging $ L.logInfo ("Latency for redisFindAll"::Text)  (show result)
+  CM.when latencyLogging $ L.logInfo ("Latency for redisFindAll"::Text) . show =<< liftIO (measureLatency currentTime)
   case res of
     Right (Just r) -> do
       let (decodeResult, isLive) = decodeToField $ BSL.fromChunks [r]

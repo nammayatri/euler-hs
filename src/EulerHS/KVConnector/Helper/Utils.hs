@@ -3,7 +3,7 @@ module EulerHS.KVConnector.Helper.Utils where
 import           Data.Time.Clock(getCurrentTime, NominalDiffTime, UTCTime, diffUTCTime)
 import EulerHS.Prelude
 
-latency :: UTCTime -> IO NominalDiffTime
-latency time = do
+measureLatency :: UTCTime -> IO NominalDiffTime
+measureLatency time = do
   currentTime <- getCurrentTime
   return $ diffUTCTime currentTime time

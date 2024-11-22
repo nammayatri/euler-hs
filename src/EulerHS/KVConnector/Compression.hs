@@ -7,11 +7,11 @@ import qualified Codec.Compression.Zstd as Zstd
 import qualified Data.Aeson as A
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as B64
+import qualified Data.ByteString.Char8 as CBS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.HashMap.Strict as HM
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import qualified Data.ByteString.Char8 as CBS
 import qualified EulerHS.Language as L
 import EulerHS.Prelude
 import EulerHS.Types
@@ -19,6 +19,9 @@ import qualified Juspay.Extra.Config as Conf
 
 isCompressionAllowed :: Bool
 isCompressionAllowed = fromMaybe False $ readMaybe =<< Conf.lookupEnvT @String "COMPRESSION_ALLOWED"
+
+isCompressionMetricsEnabled :: Bool
+isCompressionMetricsEnabled = fromMaybe False $ readMaybe =<< Conf.lookupEnvT @String "COMPRESSION_METRICS_ENABLED"
 
 -- Data structure to hold compression parameters
 data CompressionParams = CompressionParams
@@ -102,58 +105,23 @@ decompressWithoutError input = do
     Right (Zstd.Decompress output) -> pure output
 
 -------------------------------------------------
--- Compression and Decompression of Objects
--------------------------------------------------
-
-compressObject :: (ToJSON a, L.MonadFlow m) => Maybe Text -> a -> m T.Text
-compressObject tble obj = do
-  compressionParams <- getCompressionParamsForTable tble
-  let strictByteString = BL.toStrict (A.encode obj)
-  if BS.length strictByteString < sizeThreshold compressionParams
-    then return (TE.decodeUtf8 strictByteString)
-    else do
-      compressResult <- L.runIO $ compress (Just $ compressionLevel compressionParams) strictByteString
-      case compressResult of
-        Left (CompressionError err _) -> do
-          L.logError @T.Text "Error while compressing object: " $ T.pack err
-          return $ TE.decodeUtf8 strictByteString
-        Right compressed -> return $ TE.decodeUtf8 $ B64.encode compressed
-
-decompressObject :: (FromJSON a, L.MonadFlow m) => T.Text -> m (Maybe a)
-decompressObject compressedObj = do
-  case B64.decode (TE.encodeUtf8 compressedObj) of
-    Left err -> do
-      L.logError @T.Text "Error while decoding Base64: " $ T.pack err
-      return Nothing
-    Right strictByteString -> do
-      decompressResult <- L.runIO $ decompress strictByteString
-      case decompressResult of
-        Left (DecompressionError err _) -> do
-          L.logError @T.Text "Error while decompressing object: " $ T.pack err
-          return $ A.decode (BL.fromStrict strictByteString)
-        Right decompressed -> return $ A.decode (BL.fromStrict decompressed)
-
--------------------------------------------------
 -- Compression and Decompression with IO monad
 -------------------------------------------------
 
-compressIO :: Maybe Int -> BS.ByteString -> IO ()
+compressIO :: Maybe Int -> String -> IO BS.ByteString
 compressIO compressionLevel' input = do
-  result <- compress compressionLevel' input
+  let inputBS = CBS.pack input
+  result <- compress compressionLevel' inputBS
   case result of
-    Left (CompressionError err _) -> 
+    Left (CompressionError err _) -> do
       putStrLn $ "Error while compressing object: " ++ err
-    Right compressed -> do 
-      -- Convert the Base64-encoded ByteString into a String and print
-      let encodedString = CBS.unpack (B64.encode compressed)
-      putStrLn $ "Compressed Object: " ++ encodedString
+      return inputBS
+    Right compressed -> return compressed
 
-decompressIO :: String -> IO ()
+decompressIO :: BS.ByteString -> IO String
 decompressIO compressedObj = do
-  let strictByteString = CBS.pack compressedObj -- Correctly handles String to ByteString
-  decompressResult <- decompressWithoutError (B64.decodeLenient strictByteString)
-  print decompressResult
-
+  decompressResult <- decompressWithoutError compressedObj
+  return $ CBS.unpack decompressResult
 
 -------------------------------------------------
 -- Test Cases
