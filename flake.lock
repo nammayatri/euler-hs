@@ -1153,15 +1153,16 @@
       "locked": {
         "lastModified": 1669960992,
         "narHash": "sha256-o0WEbygbbfIYPonyY6ui1HcbaJcFdngjBhnjWbe65zs=",
+        "owner": "arjunkathuria",
+        "repo": "tinylog",
         "rev": "08d3b6066cd2f883e183b7cd01809d1711092d33",
-        "revCount": 78,
-        "type": "git",
-        "url": "https://gitlab.com/arjunkathuria/tinylog.git"
+        "type": "gitlab"
       },
       "original": {
+        "owner": "arjunkathuria",
+        "repo": "tinylog",
         "rev": "08d3b6066cd2f883e183b7cd01809d1711092d33",
-        "type": "git",
-        "url": "https://gitlab.com/arjunkathuria/tinylog.git"
+        "type": "gitlab"
       }
     },
     "treefmt-nix": {

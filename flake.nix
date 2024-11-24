@@ -27,7 +27,7 @@
     servant-mock.url = "github:arjunkathuria/servant-mock?rev=17e90cb831820a30b3215d4f164cf8268607891e";
     servant-mock.flake = false;
 
-    tinylog.url = "git+https://gitlab.com/arjunkathuria/tinylog.git?rev=08d3b6066cd2f883e183b7cd01809d1711092d33";
+    tinylog.url = "gitlab:arjunkathuria/tinylog/08d3b6066cd2f883e183b7cd01809d1711092d33";
     tinylog.flake = false;
   };
 
