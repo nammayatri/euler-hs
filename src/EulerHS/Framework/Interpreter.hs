@@ -70,10 +70,11 @@ import           EulerHS.SqlDB.Interpreter (runSqlDB)
 import           EulerHS.SqlDB.Types (ConnTag,
                                       DBConfig (MySQLPoolConf, PostgresPoolConf, SQLitePoolConf),
                                       DBError (DBError),
-                                      DBErrorType (ConnectionAlreadyExists, ConnectionDoesNotExist, ConnectionFailed, UnrecognizedError),
+                                      DBErrorType (ConnectionAlreadyExists, ConnectionDoesNotExist, ConnectionFailed, UnrecognizedError, SQLError),
                                       DBResult,
                                       NativeSqlConn (NativeMySQLConn, NativePGConn, NativeSQLiteConn),
                                       SqlConn (MySQLPool, PostgresPool, SQLitePool),
+                                      SQLError (PostgresError), PostgresSqlError (PostgresSqlError), PostgresExecStatus (PostgresFatalError),
                                       bemToNative, mkSqlConn,
                                       mysqlErrorToDbError, nativeToBem,
                                       postgresErrorToDbError,
@@ -616,9 +617,20 @@ interpretFlowMethod mbFlowGuid flowRt (L.RunDB conn sqlDbMethod runInTransaction
       else do
         eRes <- try @_ @SomeException $
           case conn of
-            PostgresPool _ pool ->
-              DP.withResource pool $ \conn' ->
-                runSqlDB (NativePGConn conn') dbgLogAction $ sqlDbMethod
+            PostgresPool _ pool -> do
+              res <- try @_ @SomeException $ 
+                DP.withResource pool $ \conn' ->
+                  runSqlDB (NativePGConn conn') dbgLogAction $ sqlDbMethod
+              case res of
+                Right x -> pure x
+                Left e -> do
+                  (DBError errorType _errorMsg) <- wrapException e
+                  case errorType of
+                    SQLError (PostgresError (PostgresSqlError "" PostgresFatalError "" "" "")) -> do
+                      DP.destroyAllResources pool
+                      DP.withResource pool $ \conn' ->
+                        runSqlDB (NativePGConn conn') dbgLogAction $ sqlDbMethod
+                    _ -> throwIO e
             MySQLPool _ pool ->
               DP.withResource pool $ \conn' ->
                 runSqlDB (NativeMySQLConn conn') dbgLogAction $ sqlDbMethod
