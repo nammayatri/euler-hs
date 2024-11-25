@@ -56,7 +56,7 @@ class TableMappings a where
 
 --------------- EXISTING DB MESH ---------------
 class MeshState a where
-  getShardedHashTag :: Text -> Int -> a -> Maybe Text
+  getShardedHashTag :: (Int,Int) -> a -> Maybe Text
   getKVKey          :: a -> Maybe Text
   getKVDirtyKey     :: a -> Maybe Text
   isDBMeshEnabled   :: a -> Bool
@@ -103,7 +103,7 @@ data MeshConfig = MeshConfig
   , kvRedis         :: Text
   , redisTtl        :: L.KVDBDuration
   , kvHardKilled    :: Bool
-  , shardModValue   :: Int
+  , tableShardModRange :: (Int, Int)
   , redisKeyPrefix  :: Text
   }
   deriving (Generic, Eq, Show, A.ToJSON)

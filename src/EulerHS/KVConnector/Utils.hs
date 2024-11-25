@@ -217,10 +217,10 @@ getDataFromPKeysRedis meshCfg latencyLogging (pKey : pKeys)  = do
 keyDelim:: Text
 keyDelim = "_"
 
-getPKeyWithShard :: forall table. (KVConnector (table Identity)) => table Identity -> Text -> Int -> Text
-getPKeyWithShard table redisKeyPrefix shardModValue =
+getPKeyWithShard :: forall table. (KVConnector (table Identity)) => table Identity -> Text -> (Int,Int) -> Text
+getPKeyWithShard table redisKeyPrefix tableShardModRange =
   let pKey = getLookupKeyByPKey redisKeyPrefix table
-  in pKey <> getShardedHashTag redisKeyPrefix shardModValue pKey
+  in pKey <> getShardedHashTag tableShardModRange pKey
 
 getLookupKeyByPKey :: forall table. (KVConnector (table Identity)) => Text -> table Identity -> Text
 getLookupKeyByPKey redisKeyPrefix table = do
@@ -266,12 +266,11 @@ getSortedKey kvTup = do
   let (appendedKeys, appendedValues) = applyFPair (T.intercalate "_") $ unzip sortArr
   appendedKeys <> "_" <> appendedValues
 
-getShardedHashTag :: Text -> Int -> Text -> Text
-getShardedHashTag redisKeyPrefix modVal key = do
+getShardedHashTag :: (Int,Int) -> Text -> Text
+getShardedHashTag (start,modVal) key = do
   let slot = unsafeCoerce @_ @Word16 $ L.keyToSlot $ encodeUtf8 key
-      streamShard = slot `mod` (fromIntegral modVal)
-      -- "{shard-" <> show streamShard <> "}"
-  "{" <> redisKeyPrefix <> "shard-" <> show streamShard <> "}"
+      streamShard = (fromIntegral start) + (slot `mod` (fromIntegral $ abs (modVal - start)))
+  "{shard-" <> show streamShard <> "}"
 
 
 ------------------------------------------
@@ -507,7 +506,7 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = 
     getPrimaryKeyFromFieldAndValueHelper (k, v) = do
       let constructedKey = meshCfg.redisKeyPrefix <> modelName <> "_" <> k <> "_" <> v
       case HM.lookup k keyHashMap of
-        Just True -> pure $ Right $ Just [fromString $ T.unpack (constructedKey <> getShardedHashTag meshCfg.redisKeyPrefix meshCfg.shardModValue constructedKey)]
+        Just True -> pure $ Right $ Just [fromString $ T.unpack (constructedKey <> getShardedHashTag meshCfg.tableShardModRange constructedKey)]
         Just False -> do
           res <- L.runKVDB meshCfg.kvRedis $ L.smembers (fromString $ T.unpack constructedKey)
           case res of

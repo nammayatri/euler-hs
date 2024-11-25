@@ -148,7 +148,7 @@ createKV meshCfg value = do
   case autoIncIdRes of
     Right val -> do
       let pKeyText = getLookupKeyByPKey meshCfg.redisKeyPrefix val
-          shard = getShardedHashTag meshCfg.redisKeyPrefix meshCfg.shardModValue pKeyText
+          shard = getShardedHashTag meshCfg.tableShardModRange pKeyText
           pKey = fromString . T.unpack $ pKeyText <> shard
       time <- fromIntegral <$> L.getCurrentDateInMillis
 
@@ -200,7 +200,7 @@ createInRedis :: forall (table :: (Type -> Type) -> Type) m.
   m (MeshResult (table Identity))
 createInRedis meshCfg val = do
   let pKeyText = getLookupKeyByPKey meshCfg.redisKeyPrefix val
-      shard = getShardedHashTag meshCfg.redisKeyPrefix meshCfg.shardModValue pKeyText
+      shard = getShardedHashTag meshCfg.tableShardModRange pKeyText
       pKey = fromString . T.unpack $ pKeyText <> shard
   revMappingRes <- mapM (\secIdx -> do
     let sKey = fromString . T.unpack $ secIdx
@@ -465,7 +465,7 @@ updateObjectRedis meshCfg updVals setClauses addPrimaryKeyToWhereClause whereCla
     Right updatedModel -> do
       time <- fromIntegral <$> L.getCurrentDateInMillis
       let pKeyText  = getLookupKeyByPKey meshCfg.redisKeyPrefix obj
-          shard     = getShardedHashTag meshCfg.redisKeyPrefix meshCfg.shardModValue pKeyText
+          shard     = getShardedHashTag meshCfg.tableShardModRange pKeyText
           pKey      = fromString . T.unpack $ pKeyText <> shard
           updateCmd = if addPrimaryKeyToWhereClause
                         then getDbUpdateCommandJsonWithPrimaryKey (getTableName @(table Identity)) setClauses obj whereClause
@@ -509,7 +509,7 @@ updateObjectRedis meshCfg updVals setClauses addPrimaryKeyToWhereClause whereCla
     modifySKeysRedis :: [[(Text, Text)]] -> table Identity -> m (MeshResult (table Identity)) -- TODO: Optimise this logic
     modifySKeysRedis olderSkeys table = do
       let pKeyText = getLookupKeyByPKey meshCfg.redisKeyPrefix table
-          shard = getShardedHashTag meshCfg.redisKeyPrefix meshCfg.shardModValue pKeyText
+          shard = getShardedHashTag meshCfg.tableShardModRange pKeyText
           pKey = fromString . T.unpack $ pKeyText <> shard
       let tName = tableName @(table Identity)
           updValsMap = HM.fromList (map (\p -> (fst p, True)) updVals)
@@ -1165,7 +1165,7 @@ deleteObjectRedis :: forall table be beM m.
 deleteObjectRedis meshCfg addPrimaryKeyToWhereClause whereClause obj = do
   time <- fromIntegral <$> L.getCurrentDateInMillis
   let pKeyText  = getLookupKeyByPKey meshCfg.redisKeyPrefix obj
-      shard     = getShardedHashTag meshCfg.redisKeyPrefix meshCfg.shardModValue pKeyText
+      shard     = getShardedHashTag meshCfg.tableShardModRange pKeyText
       pKey      = fromString . T.unpack $ pKeyText <> shard
       deleteCmd = if addPrimaryKeyToWhereClause
                     then getDbDeleteCommandJsonWithPrimaryKey  (getTableName @(table Identity)) obj whereClause
@@ -1214,7 +1214,7 @@ reCacheDBRows :: forall table m.
 reCacheDBRows meshCfg dbRows = do
   reCacheRes <- mapM (\obj -> do
       let pKeyText = getLookupKeyByPKey meshCfg.redisKeyPrefix obj
-          shard = getShardedHashTag meshCfg.redisKeyPrefix meshCfg.shardModValue pKeyText
+          shard = getShardedHashTag meshCfg.tableShardModRange pKeyText
           pKey = fromString . T.unpack $ pKeyText <> shard
       res <- mapM (\secIdx -> do -- Recaching Skeys in redis
           let sKey = fromString . T.unpack $ secIdx
