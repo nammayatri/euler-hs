@@ -82,6 +82,7 @@ data MeshError
   | MUpdateFailed Text
   | MMultipleKeysFound Text
   | UnexpectedError Text
+  | RedisPipelineError Text
   deriving (Show, Generic, Exception, Data)
 
 instance ToJSON MeshError where
