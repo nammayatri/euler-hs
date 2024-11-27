@@ -173,6 +173,50 @@ getDataFromPKeysHelper meshCfg (pKey : pKeys) latencyLogging = do
           return $ Right (a ++ fst remainingResult, b ++ snd remainingResult)
         Left err -> return $ Left err
 
+getDataFromPKeysHelperAsync ::
+  forall table m.
+  ( KVConnector (table Identity),
+    FromJSON (table Identity),
+    Serialize.Serialize (table Identity),
+    L.MonadFlow m,
+    MonadIO m
+  ) =>
+  MeshConfig ->
+  [[ByteString]] ->
+  Bool ->
+  m (MeshResult ([table Identity], [table Identity]))
+getDataFromPKeysHelperAsync _ [] _ = pure $ Right ([], [])
+getDataFromPKeysHelperAsync meshCfg pKeysList latencyLogging = do
+  startTime <- liftIO getCurrentTime
+  resList <- mapM callAsyncMget pKeysList
+  when latencyLogging $ logLatency startTime
+  results <- awaitAll resList
+  processResults results
+
+  where
+    callAsyncMget pKeys =
+      L.awaitableFork $
+        L.runKVDB meshCfg.kvRedis $
+          L.mget (fromString . T.unpack . decodeUtf8 <$> pKeys)
+
+    logLatency startTime =
+      L.logInfo ("Latency for redisFindAll" :: Text) . show =<< liftIO (measureLatency startTime)
+
+    awaitAll = mapM (L.await Nothing)
+
+    processResults [] = pure $ Right ([], [])
+    processResults (res : rest) = case res of
+      Left e -> pure $ Left (RedisPipelineError (show e))
+      Right redisRes -> do
+        result <- getDataFromPKeysRedisHelper redisRes
+        case result of
+          Left e -> pure $ Left e
+          Right (a, b) -> do
+            remainingResult <- processResults rest
+            case remainingResult of
+              Left e -> pure $ Left e
+              Right (ra, rb) -> pure $ Right (a ++ ra, b ++ rb)
+
 getDataFromPKeysRedis' :: forall table m. (
     KVConnector (table Identity),
     FromJSON (table Identity),
@@ -181,7 +225,7 @@ getDataFromPKeysRedis' :: forall table m. (
 getDataFromPKeysRedis' _ _ []  = pure $ Right ([], [])
 getDataFromPKeysRedis' meshCfg latencyLogging pKeys = do
   let groupedKeys = groupKeysBySlot pKeys
-  getDataFromPKeysHelper meshCfg groupedKeys latencyLogging
+  getDataFromPKeysHelperAsync meshCfg groupedKeys latencyLogging
 
 getDataFromPKeysRedis :: forall table m. (
     KVConnector (table Identity),
