@@ -24,6 +24,7 @@ module EulerHS.KVConnector.Flow
     deleteAllReturningWithKVConnector,
     findAllWithKVAndConditionalDBInternal,
     findOneFromKvRedis,
+    findAllFromKvRedis,
   )
  where
 
@@ -959,6 +960,46 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
             let dbMx = maximum $ map (fromColumnar' . col . columnize) dbRows
             length $ filter (\r -> dbMx < fromColumnar' (col $ columnize r)) kvRows
           Nothing -> 0
+
+
+findAllFromKvRedis :: forall be table beM m.
+  ( HasCallStack,
+    BeamRuntime be beM,
+    BeamRunner beM,
+    B.HasQBuilder be,
+    Model be table,
+    MeshMeta be table,
+    KVConnector (table Identity),
+    Serialize.Serialize (table Identity),
+    FromJSON (table Identity),
+    L.MonadFlow m, MonadIO m
+  ) =>
+  DBConfig beM ->
+  MeshConfig ->
+  Where be table ->
+  Maybe (OrderBy table) ->
+  m (MeshResult [table Identity])
+findAllFromKvRedis dbConf meshCfg whereClause orderBy = do
+  let isDisabled = meshCfg.kvHardKilled
+  if not isDisabled
+    then do
+      kvRes <- redisFindAll meshCfg whereClause
+      case kvRes of
+        Right kvRows -> do
+          let matchedKVLiveRows = findAllMatching whereClause (fst kvRows)
+          pure $ Right $ applyOptions matchedKVLiveRows
+        Left err -> pure $ Left err
+    else do
+      let findAllQuery = DB.findRows (sqlSelect'
+            ! #where_ whereClause
+            ! #orderBy (if isJust orderBy then Just [DMaybe.fromJust orderBy] else Nothing)
+            ! defaults)
+      mapLeft MDBError <$> runQuery dbConf findAllQuery
+    where 
+      applyOptions = case orderBy of
+        Just (Asc col) -> sortBy (compareCols (fromColumnar' . col . columnize) True)
+        Just (Desc col) -> sortBy (compareCols (fromColumnar' . col . columnize) False)
+        Nothing -> id
 
 -- Need to recheck offset implementation
 findAllWithOptionsKVConnector :: forall be table beM m.
