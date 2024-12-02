@@ -183,13 +183,10 @@ getDataFromPKeysHelperAsync ::
   ) =>
   MeshConfig ->
   [[ByteString]] ->
-  Bool ->
   m (MeshResult ([table Identity], [table Identity]))
-getDataFromPKeysHelperAsync _ [] _ = pure $ Right ([], [])
-getDataFromPKeysHelperAsync meshCfg pKeysList latencyLogging = do
-  startTime <- liftIO getCurrentTime
+getDataFromPKeysHelperAsync _ [] = pure $ Right ([], [])
+getDataFromPKeysHelperAsync meshCfg pKeysList = do
   resList <- mapM callAsyncMget pKeysList
-  when latencyLogging $ logLatency startTime
   results <- awaitAll resList
   processResults results
 
@@ -198,9 +195,6 @@ getDataFromPKeysHelperAsync meshCfg pKeysList latencyLogging = do
       L.awaitableFork $
         L.runKVDB meshCfg.kvRedis $
           L.mget (fromString . T.unpack . decodeUtf8 <$> pKeys)
-
-    logLatency startTime =
-      L.logInfo ("Latency for redisFindAll" :: Text) . show =<< liftIO (measureLatency startTime)
 
     awaitAll = mapM (L.await Nothing)
 
@@ -225,7 +219,10 @@ getDataFromPKeysRedis' :: forall table m. (
 getDataFromPKeysRedis' _ _ []  = pure $ Right ([], [])
 getDataFromPKeysRedis' meshCfg latencyLogging pKeys = do
   let groupedKeys = groupKeysBySlot pKeys
-  getDataFromPKeysHelperAsync meshCfg groupedKeys latencyLogging
+      (startShard, endShard) = meshCfg.tableShardModRange
+  if abs (endShard - startShard ) <= 20 -- to avoid the parallelism overhead
+    then getDataFromPKeysHelperAsync meshCfg groupedKeys
+    else getDataFromPKeysHelper meshCfg groupedKeys latencyLogging
 
 getDataFromPKeysRedis :: forall table m. (
     KVConnector (table Identity),
@@ -418,6 +415,23 @@ termQueryMatch columnVal = \case
           case (toJSON c1, toJSON c2) of
             (A.String s1, A.String s2) -> T.toLower s1 == T.toLower s2
             _ -> c1 == c2
+
+-- || Helper function to filter out rows based on where clause
+-- || Do not use this as this is not efficient 
+getFilteredWhereClause :: forall be table. (B.Beamable table) => [table Identity] -> [Clause be table] -> [Clause be table]
+getFilteredWhereClause rows = map matchClauseQuery
+  where
+    matchClauseQuery :: Clause be table -> Clause be table
+    matchClauseQuery = \case
+      And queries -> And $ map matchClauseQuery queries
+      Or queries  -> Or $ map matchClauseQuery queries
+      Is column' term -> 
+        case term of
+          In literals ->
+            let colHashMap = SMap.fromList $ map (\row -> (fromColumnar' . column' . columnize $ row, True)) rows
+                filteredLiterals = filter (`SMap.notMember` colHashMap) literals
+             in Is column' (In filteredLiterals)
+          _ -> Is column' term
 
 toPico :: Int -> Fixed.Pico
 toPico value = Fixed.MkFixed $ ((toInteger value) * 1000000000000)
@@ -622,7 +636,7 @@ redisCallsHardLimit :: Int
 redisCallsHardLimit = fromMaybe 5000 $ readMaybe =<< lookupEnvT @String "REDIS_CALLS_HARD_LIMIT"
 
 redisCallsSoftLimit :: Int
-redisCallsSoftLimit = fromMaybe 100 $ readMaybe =<< lookupEnvT @String "REDIS_CALLS_SOFT_LIMIT"
+redisCallsSoftLimit = fromMaybe 500 $ readMaybe =<< lookupEnvT @String "REDIS_CALLS_SOFT_LIMIT"
 
 lengthOfLists :: [[a]] -> Int
 lengthOfLists = foldl' (\acc el -> acc + length el) 0
