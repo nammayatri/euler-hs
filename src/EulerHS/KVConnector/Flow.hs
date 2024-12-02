@@ -61,7 +61,7 @@ import qualified EulerHS.KVConnector.Encoding as Encoding
 import qualified Data.Maybe as DMaybe
 import qualified System.Environment as SE
 import qualified EulerHS.KVConnector.Metrics as Metrics
-import EulerHS.KVConnector.Compression
+import           EulerHS.KVConnector.Compression
 
 createWoReturingKVConnector :: forall (table :: (Type -> Type) -> Type) be m beM.
   ( HasCallStack,
@@ -850,15 +850,15 @@ findOneFromRedis meshCfg whereClause = do
   eitherKeyRes <- mapM (getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap) andCombinationsFiltered
   case foldEither eitherKeyRes of
     Right keyRes -> do
-      L.logDebugT "findOneFromRedis" ("KeyRes: " <> show keyRes)
       let lenKeyRes = lengthOfLists keyRes
-      latencyLogging <- liftIO $ fromMaybe False . (>>= readMaybe) <$> SE.lookupEnv "EULER_LOG_REDIS_LANTECY"
+      -- latencyLogging <- liftIO $ fromMaybe False . (>>= readMaybe) <$> SE.lookupEnv "EULER_LOG_REDIS_LANTECY" -- uncomment this line to enable redis latency logging
+      latencyLogging <- pure False
       allRowsRes <- foldEither <$> mapM (getDataFromPKeysRedis meshCfg latencyLogging) (mkUniq keyRes)
       case allRowsRes of
         Right allRowsResPairList -> do
           let (allRowsResLiveListOfList, allRowsResDeadListOfList) = unzip allRowsResPairList
               total_length = secondaryKeyLength + lenKeyRes
-          Metrics.incrementRedisCallMetric "REDIS_FIND_ONE" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit ) keyAndValueCombinations
+          Metrics.incrementRedisCallMetric "REDIS_FIND_ONE" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit )
           return $ Right (concat allRowsResLiveListOfList, concat allRowsResDeadListOfList)
         Left err -> return $ Left err
     Left err -> pure $ Left err
@@ -1155,7 +1155,7 @@ redisFindAll meshCfg whereClause = do
         Right allRowsResPairList -> do
           let (allRowsResLiveListOfList, allRowsResDeadListOfList) = unzip allRowsResPairList
               total_length = secondaryKeyLength + lenKeyRes
-          Metrics.incrementRedisCallMetric "REDIS_FIND_ALL" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit ) keyAndValueCombinations
+          Metrics.incrementRedisCallMetric "REDIS_FIND_ALL" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit ) 
           return $ Right (concat allRowsResLiveListOfList, concat allRowsResDeadListOfList)
         Left err -> return $ Left err
     Left err -> pure $ Left err
