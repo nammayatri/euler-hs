@@ -616,9 +616,17 @@ interpretFlowMethod mbFlowGuid flowRt (L.RunDB conn sqlDbMethod runInTransaction
       else do
         eRes <- try @_ @SomeException $
           case conn of
-            PostgresPool _ pool ->
-              DP.withResource pool $ \conn' ->
-                runSqlDB (NativePGConn conn') dbgLogAction $ sqlDbMethod
+            PostgresPool _ pool -> do
+              res <- try @_ @SomeException $ 
+                DP.withResource pool $ \conn' ->
+                  runSqlDB (NativePGConn conn') dbgLogAction $ sqlDbMethod
+              case res of
+                Right x -> pure x
+                Left e -> do
+                  (DBError _errorType _errorMsg) <- wrapException e
+                  DP.destroyAllResources pool
+                  DP.withResource pool $ \conn' ->
+                    runSqlDB (NativePGConn conn') dbgLogAction $ sqlDbMethod
             MySQLPool _ pool ->
               DP.withResource pool $ \conn' ->
                 runSqlDB (NativeMySQLConn conn') dbgLogAction $ sqlDbMethod
