@@ -23,6 +23,7 @@ module EulerHS.KVConnector.Flow
     deleteReturningWithKVConnector,
     deleteAllReturningWithKVConnector,
     findAllWithKVAndConditionalDBInternal,
+    findAllWithKVAndConditionalDBWithOptionsInternal,
     findOneFromKvRedis,
     findAllFromKvRedis,
   )
@@ -1124,6 +1125,61 @@ findAllWithKVAndConditionalDBInternal dbConf meshCfg whereClause orderBy = do
               ! defaults)
       mapLeft MDBError <$> runQuery dbConf findAllQuery
 
+--- The whole idea to put limit and offset here is if going to db then only apply these.
+findAllWithKVAndConditionalDBWithOptionsInternal :: forall be table beM m.
+  ( HasCallStack,
+    BeamRuntime be beM,
+    Model be table,
+    MeshMeta be table,
+    KVConnector (table Identity),
+    ToJSON (table Identity),
+    FromJSON (table Identity),
+    Serialize.Serialize (table Identity),
+    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM, MonadIO m) =>
+  DBConfig beM ->
+  MeshConfig ->
+  Where be table ->
+  Maybe (OrderBy table) ->
+  Maybe Int ->
+  Maybe Int ->
+  m (MeshResult [table Identity])
+findAllWithKVAndConditionalDBWithOptionsInternal dbConf meshCfg whereClause orderBy mbLimit mbOffset = do
+  let isDisabled = meshCfg.kvHardKilled
+  if not isDisabled
+    then do
+      kvRes <- redisFindAll meshCfg whereClause
+      case kvRes of
+        Right kvRows -> do
+          let matchedKVLiveRows = findAllMatching whereClause (fst kvRows)
+          if not (null matchedKVLiveRows)
+            then do
+              case orderBy of
+                  Nothing -> pure $ Right matchedKVLiveRows
+                  Just res -> do
+                    let cmp = case res of
+                          Asc col -> compareCols (fromColumnar' . col . columnize) True
+                          Desc col -> compareCols (fromColumnar' . col . columnize) False
+                    pure $ Right (sortBy cmp matchedKVLiveRows)
+            else do
+              let findAllQueryUpdated = DB.findRows (sqlSelect'
+                                              ! #where_ whereClause
+                                              ! #orderBy (if isJust orderBy then Just [DMaybe.fromJust orderBy] else Nothing)
+                                              ! #limit mbLimit
+                                              ! #offset mbOffset
+                                              ! defaults)
+              dbRes <- runQuery dbConf findAllQueryUpdated
+              case dbRes of
+                Right dbRows -> pure $ Right $ getUniqueDBRes meshCfg.redisKeyPrefix dbRows (snd kvRows)
+                Left err     -> return $ Left $ MDBError err
+        Left err -> return $ Left err
+    else do
+      let findAllQueryUpdated = DB.findRows (sqlSelect'
+                                              ! #where_ whereClause
+                                              ! #orderBy (if isJust orderBy then Just [DMaybe.fromJust orderBy] else Nothing)
+                                              ! #limit mbLimit
+                                              ! #offset mbOffset
+                                              ! defaults)
+      mapLeft MDBError <$> runQuery dbConf findAllQueryUpdated
 
 redisFindAll :: forall be table beM m.
   ( HasCallStack,
