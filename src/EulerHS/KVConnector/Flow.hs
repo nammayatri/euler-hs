@@ -637,7 +637,7 @@ updateKVAndDBResults meshCfg whereClause eitherDbRows eitherKvRows mbUpdateVals 
           kvDeadRows = snd allKVRows
           kvLiveAndDeadRows = kvLiveRows ++ kvDeadRows
           matchedKVLiveRows = findAllMatching whereClause kvLiveRows
-      if isRecachingEnabled && meshCfg.meshEnabled
+      if isRecachingEnabled && meshCfg.meshEnabled && isLive
         then do
           let uniqueDbRows =  getUniqueDBRes meshCfg.redisKeyPrefix allDBRows kvLiveAndDeadRows
           reCacheDBRowsRes <- reCacheDBRows meshCfg uniqueDbRows
@@ -645,9 +645,7 @@ updateKVAndDBResults meshCfg whereClause eitherDbRows eitherKvRows mbUpdateVals 
             Left err -> return $ Left $ RedisError (show err <> "Primary key => " <> show (getLookupKeyByPKey meshCfg.redisKeyPrefix <$> uniqueDbRows) <> " Secondary key => " <> show (getSecondaryLookupKeys meshCfg.redisKeyPrefix <$> uniqueDbRows) <> " in updateKVAndDBResults")
             Right _  -> do
               let allRows = matchedKVLiveRows ++ uniqueDbRows
-              sequence <$> if isLive
-                  then mapM (updateObjectRedis meshCfg updVals setClause True whereClause) allRows
-                  else mapM (deleteObjectRedis meshCfg True whereClause) allRows
+              sequence <$> mapM (updateObjectRedis meshCfg updVals setClause True whereClause) allRows
         else do
           updateOrDelKVRowRes <- if isLive
             then mapM (updateObjectRedis meshCfg updVals setClause True whereClause) matchedKVLiveRows
