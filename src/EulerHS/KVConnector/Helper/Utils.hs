@@ -15,18 +15,15 @@ shouldLogLocalLatency :: Bool
 shouldLogLocalLatency = fromMaybe False $ readMaybe =<< lookupEnvT @String "LOG_LOCAL_LATENCY"
 
 measureFunctionLatencyAndReturn :: (L.MonadFlow m) => m a -> Text -> Text -> m a
-measureFunctionLatencyAndReturn action actionName tableName =
-  if shouldLogLocalLatency
-    then do
+measureFunctionLatencyAndReturn action actionName tableName
+  | not shouldLogLocalLatency = action
+  | otherwise = do
       localLatencyId <- L.getOptionLocal LocalLatencyId
       case localLatencyId of
-        Nothing -> do
-          action
-        Just localId -> do
+        Just (Just localId) -> do
           startTime <- L.runIO getCurrentTime
           result <- action
           latency <- L.runIO $ measureLatency startTime
-          L.logInfo localId ("Latency for " <> actionName <> " in " <> tableName <> " is " <> show latency)
+          L.logInfo (localId :: Text) ("Latency for " <> actionName <> " in " <> tableName <> " is " <> show latency)
           return result
-    else do
-      action
+        _ -> action
