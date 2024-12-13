@@ -40,6 +40,11 @@ data DBMetricInfoKey = DBMetricInfoKey
   deriving stock (Eq, Show, Generic, Ord)
   deriving anyclass (FromJSON, ToJSON)
 
+data LocalLatencyId = LocalLatencyId
+  deriving stock (Eq, Show, Generic, Ord)
+  deriving anyclass (FromJSON, ToJSON)
+
+instance OptionEntity LocalLatencyId (Maybe Text)
 
 data RedisMetricInfoKey = RedisMetricInfoKey
   deriving stock (Eq, Show, Generic, Ord)
