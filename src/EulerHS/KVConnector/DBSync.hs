@@ -27,8 +27,8 @@ type Tag = Text
 
 type DBName = Text
 
-getCreateQuery :: (KVConnector (table Identity), ToJSON (table Identity)) => Text -> Tag -> Double -> DBName -> table Identity -> [(String, String)] -> A.Value
-getCreateQuery model tag timestamp dbName dbObject mappings = do
+getCreateQuery :: (KVConnector (table Identity), ToJSON (table Identity)) => Text -> Tag -> Double -> DBName -> table Identity -> [(String, String)] -> Bool -> A.Value
+getCreateQuery model tag timestamp dbName dbObject mappings forceDrainToDB = do
   A.object
     [ "contents_v2"
         .= A.object
@@ -44,7 +44,8 @@ getCreateQuery model tag timestamp dbName dbObject mappings = do
           ],
       "mappings" .= A.toJSON (AKM.fromList $ (\(k, v) -> (AKey.fromText $ T.pack k, v)) <$> mappings),
       "modelObject" .= dbObject,
-      "tag" .= ("Create" :: Text)
+      "tag" .= ("Create" :: Text),
+      "forceDrainToDB" .= forceDrainToDB
     ]
 
 getCreateQueryWithCompression ::
@@ -55,16 +56,17 @@ getCreateQueryWithCompression ::
   DBName ->
   table Identity ->
   [(String, String)] ->
+  Bool ->
   m ByteString
-getCreateQueryWithCompression model tag timestamp dbName dbObject mappings =
+getCreateQueryWithCompression model tag timestamp dbName dbObject mappings forceDrainToDB =
   compressWithoutError (Just model) $
     BSL.toStrict $
       A.encode $
-        getCreateQuery model tag timestamp dbName dbObject mappings
+        getCreateQuery model tag timestamp dbName dbObject mappings forceDrainToDB
 
 -- | This will take updateCommand from getDbUpdateCommandJson and returns Aeson value of Update DBCommand
-getUpdateQuery :: Tag -> Double -> DBName -> A.Value -> [(String, String)] -> A.Value -> A.Value
-getUpdateQuery tag timestamp dbName updateCommandV2 mappings updatedModel =
+getUpdateQuery :: Tag -> Double -> DBName -> A.Value -> [(String, String)] -> A.Value -> Bool -> A.Value
+getUpdateQuery tag timestamp dbName updateCommandV2 mappings updatedModel forceDrainToDB =
   A.object
     [ "contents_v2"
         .= A.object
@@ -76,7 +78,8 @@ getUpdateQuery tag timestamp dbName updateCommandV2 mappings updatedModel =
           ],
       "mappings" .= A.toJSON (AKM.fromList $ (\(k, v) -> (AKey.fromText $ T.pack k, v)) <$> mappings),
       "updatedModel" .= A.toJSON updatedModel,
-      "tag" .= ("Update" :: Text)
+      "tag" .= ("Update" :: Text),
+      "forceDrainToDB" .= forceDrainToDB
     ]
 
 getUpdateQueryWithCompression ::
@@ -88,12 +91,13 @@ getUpdateQueryWithCompression ::
   [(String, String)] ->
   A.Value ->
   Text ->
+  Bool ->
   m ByteString
-getUpdateQueryWithCompression tag timestamp dbName updateCommandV2 mappings updatedModel modelName =
+getUpdateQueryWithCompression tag timestamp dbName updateCommandV2 mappings updatedModel modelName forceDrainToDB =
   compressWithoutError (Just modelName) $
     BSL.toStrict $
       A.encode $
-        getUpdateQuery tag timestamp dbName updateCommandV2 mappings updatedModel
+        getUpdateQuery tag timestamp dbName updateCommandV2 mappings updatedModel forceDrainToDB
 
 getDbUpdateCommandJson :: forall be table. (Model be table, MeshMeta be table) => Text -> [Set be table] -> Where be table -> A.Value
 getDbUpdateCommandJson model setClauses whereClause =
