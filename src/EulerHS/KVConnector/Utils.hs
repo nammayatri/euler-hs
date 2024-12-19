@@ -186,9 +186,11 @@ getDataFromPKeysHelperAsync ::
   m (MeshResult ([table Identity], [table Identity]))
 getDataFromPKeysHelperAsync _ [] = pure $ Right ([], [])
 getDataFromPKeysHelperAsync meshCfg pKeysList = do
-  resList <- mapM callAsyncMget pKeysList
-  results <- awaitAll resList
-  processResults results
+  let resListFn = mapM callAsyncMget pKeysList
+  resList <- measureFunctionLatencyAndReturn resListFn "callAsyncMget" (tableName @(table Identity))
+  let resAwait = awaitAll resList
+  results <- measureFunctionLatencyAndReturn resAwait "callAsyncMgetAwait" (tableName @(table Identity))
+  measureFunctionLatencyAndReturn (processResults results) "processMgetResult" (tableName @(table Identity))
 
   where
     callAsyncMget pKeys =
@@ -221,8 +223,13 @@ getDataFromPKeysRedis' meshCfg latencyLogging pKeys = do
   let groupedKeys = groupKeysBySlot pKeys
       (startShard, endShard) = meshCfg.tableShardModRange
   if abs (endShard - startShard ) <= 20 -- to avoid the parallelism overhead
-    then getDataFromPKeysHelperAsync meshCfg groupedKeys
-    else getDataFromPKeysHelper meshCfg groupedKeys latencyLogging
+    then do
+      let asyncFn = getDataFromPKeysHelperAsync meshCfg groupedKeys
+      res <- measureFunctionLatencyAndReturn asyncFn "getDataFromPKeysHelperAsync" (tableName @(table Identity))
+      return res
+    else do 
+      let fn = getDataFromPKeysHelper meshCfg groupedKeys latencyLogging
+      measureFunctionLatencyAndReturn fn "getDataFromPKeysHelper" (tableName @(table Identity))
 
 getDataFromPKeysRedis :: forall table m. (
     KVConnector (table Identity),
