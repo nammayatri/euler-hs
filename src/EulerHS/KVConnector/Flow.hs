@@ -62,6 +62,7 @@ import qualified Data.Maybe as DMaybe
 import qualified System.Environment as SE
 import qualified EulerHS.KVConnector.Metrics as Metrics
 import           EulerHS.KVConnector.Compression
+import           EulerHS.KVConnector.Helper.Utils
 
 createWoReturingKVConnector :: forall (table :: (Type -> Type) -> Type) be m beM.
   ( HasCallStack,
@@ -902,7 +903,8 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
   let isDisabled = meshCfg.kvHardKilled
   if not isDisabled
     then do
-      kvRes <- redisFindAll meshCfg whereClause
+      let redisFindAllFn = redisFindAll meshCfg whereClause
+      kvRes <- measureFunctionLatencyAndReturn redisFindAllFn "REDIS_FIND_ALL_findAllWithOptionsHelper" (tableName @(table Identity))
       case kvRes of
         Right kvRows -> do
           let matchedKVLiveRows = findAllMatching whereClause (fst kvRows)
@@ -1061,7 +1063,8 @@ findAllWithKVConnector dbConf meshCfg whereClause = do
   let isDisabled = meshCfg.kvHardKilled
   if not isDisabled
     then do
-      kvRes <- redisFindAll meshCfg whereClause
+      let redisFindAllFn = redisFindAll meshCfg whereClause
+      kvRes <- measureFunctionLatencyAndReturn redisFindAllFn "REDIS_FIND_ALL_findAllWithKVConnector" (tableName @(table Identity))
       case kvRes of
         Right kvRows -> do
           let matchedKVLiveRows = findAllMatching whereClause (fst kvRows)
@@ -1136,6 +1139,7 @@ redisFindAll :: forall be table beM m.
   Where be table ->
   m (MeshResult ([table Identity], [table Identity]))
 redisFindAll meshCfg whereClause = do
+  latencyLogging <- liftIO $ fromMaybe False . (>>= readMaybe) <$> SE.lookupEnv "EULER_LOG_REDIS_LANTECY" -- Just for Testing
   let keyAndValueCombinations = getFieldsAndValuesFromClause meshModelTableEntityDescriptor (And whereClause)
       andCombinations = map (uncurry zip . applyFPair (map (T.intercalate "_") . sortOn (Down . length) . nonEmptySubsequences) . unzip . sort) keyAndValueCombinations
       modelName = tableName @(table Identity)
@@ -1144,7 +1148,6 @@ redisFindAll meshCfg whereClause = do
       secondaryKeyLength = sum $ getSecondaryKeyLength keyHashMap <$> andCombinationsFiltered
   eitherKeyRes <- mapM (getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap) andCombinationsFiltered
   flagPipe <- liftIO $ fromMaybe False . (>>= readMaybe) <$> SE.lookupEnv "enablePipelining" -- Just for Testing
-  latencyLogging <- liftIO $ fromMaybe False . (>>= readMaybe) <$> SE.lookupEnv "EULER_LOG_REDIS_LANTECY" -- Just for Testing
   case foldEither eitherKeyRes of
     Right keyRes -> do
       let allKeys = concat keyRes
