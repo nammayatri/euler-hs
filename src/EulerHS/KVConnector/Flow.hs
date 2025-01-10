@@ -1147,8 +1147,9 @@ redisFindAll meshCfg whereClause = do
   latencyLogging <- liftIO $ fromMaybe False . (>>= readMaybe) <$> SE.lookupEnv "EULER_LOG_REDIS_LANTECY" -- Just for Testing
   case foldEither eitherKeyRes of
     Right keyRes -> do
-      let lenKeyRes = lengthOfLists keyRes
-      allRowsRes <- (if flagPipe then foldEither <$> mapM (getDataFromPKeysRedis' meshCfg latencyLogging) (mkUniq keyRes) else foldEither <$> mapM (getDataFromPKeysRedis meshCfg latencyLogging) (mkUniq keyRes))
+      let allKeys = concat keyRes
+      let lenKeyRes = length allKeys
+      allRowsRes <- (if flagPipe then foldEither <$> mapM (getDataFromPKeysRedis' meshCfg latencyLogging) [(mkUniq allKeys)] else foldEither <$> mapM (getDataFromPKeysRedis meshCfg latencyLogging) (mkUniq keyRes))
       case allRowsRes of
         Right allRowsResPairList -> do
           let (allRowsResLiveListOfList, allRowsResDeadListOfList) = unzip allRowsResPairList
