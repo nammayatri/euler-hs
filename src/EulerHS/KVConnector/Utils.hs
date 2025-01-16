@@ -43,11 +43,8 @@ import           Safe (atMay)
 import qualified EulerHS.Logger.Types as Log
 import           Sequelize.SQLObject (ToSQLObject (..))
 import           EulerHS.KVDB.Types (KVDBReply)
-import           Data.Time.Clock(getCurrentTime)
-import qualified Control.Monad as CM
 import qualified Database.Redis as DR
 import qualified Data.Maybe as DM
-import           EulerHS.KVConnector.Helper.Utils
 
 
 jsonKeyValueUpdates ::
@@ -157,17 +154,15 @@ getDataFromPKeysHelper :: forall table m. (
     KVConnector (table Identity),
     FromJSON (table Identity),
     Serialize.Serialize (table Identity),
-    L.MonadFlow m, MonadIO m) => MeshConfig -> [[ByteString]] -> Bool -> m (MeshResult ([table Identity], [table Identity]))
-getDataFromPKeysHelper _ [] _ = pure $ Right ([], [])
-getDataFromPKeysHelper meshCfg (pKey : pKeys) latencyLogging = do
-  currentTime <- liftIO getCurrentTime
+    L.MonadFlow m) => MeshConfig -> [[ByteString]] -> m (MeshResult ([table Identity], [table Identity]))
+getDataFromPKeysHelper _ [] = pure $ Right ([], [])
+getDataFromPKeysHelper meshCfg (pKey : pKeys) = do
   res <- L.runKVDB meshCfg.kvRedis $ L.mget (fromString . T.unpack . decodeUtf8 <$> pKey)
-  CM.when latencyLogging $ L.logInfo ("Latency for redisFindAll" :: Text) . show =<< liftIO (measureLatency currentTime)
   result <- getDataFromPKeysRedisHelper res
   case result of
     Left e -> return $ Left e
     Right (a, b) -> do
-      remainingPKeysResult <- getDataFromPKeysHelper meshCfg pKeys latencyLogging
+      remainingPKeysResult <- getDataFromPKeysHelper meshCfg pKeys
       case remainingPKeysResult of
         Right remainingResult -> do
           return $ Right (a ++ fst remainingResult, b ++ snd remainingResult)
@@ -178,8 +173,7 @@ getDataFromPKeysHelperAsync ::
   ( KVConnector (table Identity),
     FromJSON (table Identity),
     Serialize.Serialize (table Identity),
-    L.MonadFlow m,
-    MonadIO m
+    L.MonadFlow m
   ) =>
   MeshConfig ->
   [[ByteString]] ->
@@ -215,31 +209,29 @@ getDataFromPKeysRedis' :: forall table m. (
     KVConnector (table Identity),
     FromJSON (table Identity),
     Serialize.Serialize (table Identity),
-    L.MonadFlow m, MonadIO m) => MeshConfig -> Bool -> [ByteString] -> m (MeshResult ([table Identity], [table Identity]))
-getDataFromPKeysRedis' _ _ []  = pure $ Right ([], [])
-getDataFromPKeysRedis' meshCfg latencyLogging pKeys = do
+    L.MonadFlow m) => MeshConfig -> [ByteString] -> m (MeshResult ([table Identity], [table Identity]))
+getDataFromPKeysRedis' _  []  = pure $ Right ([], [])
+getDataFromPKeysRedis' meshCfg pKeys = do
   let groupedKeys = groupKeysBySlot pKeys
       (startShard, endShard) = meshCfg.tableShardModRange
   if abs (endShard - startShard ) <= 20 -- to avoid the parallelism overhead
     then getDataFromPKeysHelperAsync meshCfg groupedKeys
-    else getDataFromPKeysHelper meshCfg groupedKeys latencyLogging
+    else getDataFromPKeysHelper meshCfg groupedKeys 
 
 getDataFromPKeysRedis :: forall table m. (
     KVConnector (table Identity),
     FromJSON (table Identity),
     Serialize.Serialize (table Identity),
-    L.MonadFlow m, MonadIO m) => MeshConfig -> Bool -> [ByteString] -> m (MeshResult ([table Identity], [table Identity]))
-getDataFromPKeysRedis _ _ [] = pure $ Right ([], [])
-getDataFromPKeysRedis meshCfg latencyLogging (pKey : pKeys)  = do
-  currentTime <- liftIO getCurrentTime
+    L.MonadFlow m) => MeshConfig -> [ByteString] -> m (MeshResult ([table Identity], [table Identity]))
+getDataFromPKeysRedis _  [] = pure $ Right ([], [])
+getDataFromPKeysRedis meshCfg (pKey : pKeys)  = do
   res <- L.runKVDB meshCfg.kvRedis $ L.get (fromString $ T.unpack $ decodeUtf8 pKey)
-  CM.when latencyLogging $ L.logInfo ("Latency for redisFindAll"::Text) . show =<< liftIO (measureLatency currentTime)
   case res of
     Right (Just r) -> do
       let (decodeResult, isLive) = decodeToField $ BSL.fromChunks [r]
       case decodeResult of
         Right decodeRes -> do
-          remainingPKeysResult <- getDataFromPKeysRedis meshCfg latencyLogging pKeys
+          remainingPKeysResult <- getDataFromPKeysRedis meshCfg pKeys
           case remainingPKeysResult of
             Right remainingResult -> do
               if isLive
@@ -250,7 +242,7 @@ getDataFromPKeysRedis meshCfg latencyLogging (pKey : pKeys)  = do
           -- to handle the case where the key is not found in the redis and log the error
           L.logErrorT "getDataFromPKeysRedis" $ "Error while decoding: " <> show e
           return $ Right ([], [])
-    Right Nothing -> getDataFromPKeysRedis meshCfg latencyLogging pKeys
+    Right Nothing -> getDataFromPKeysRedis meshCfg pKeys
     Left e -> return $ Left $ RedisError $ (show e <> " for key: " <> show (pKey : pKeys))
 
 ------------- KEY UTILS ------------------
