@@ -425,6 +425,7 @@ data DBErrorType
   | SQLError SQLError
   | UnexpectedResult
   | UnrecognizedError
+  | AsyncDBCallFailed
   deriving stock (Show, Eq, Ord, Generic, Data)
   deriving anyclass (ToJSON, FromJSON)
 

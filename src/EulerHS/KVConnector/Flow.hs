@@ -62,6 +62,7 @@ import qualified Data.Maybe as DMaybe
 import qualified System.Environment as SE
 import qualified EulerHS.KVConnector.Metrics as Metrics
 import           EulerHS.KVConnector.Compression
+import           EulerHS.KVConnector.Helper.Utils
 
 createWoReturingKVConnector :: forall (table :: (Type -> Type) -> Type) be m beM.
   ( HasCallStack,
@@ -554,8 +555,7 @@ updateAllReturningWithKVConnector dbConf meshCfg setClause whereClause = do
   if not isDisabled
     then do
       let updVals = jsonKeyValueUpdates V1 setClause
-      kvRows <- redisFindAll meshCfg whereClause
-      dbRows <- findAllSql dbConf whereClause
+      (kvRows, dbRows) <- callKVDBAsync (redisFindAll meshCfg whereClause) (findAllSql dbConf whereClause)
       updateKVAndDBResults meshCfg whereClause dbRows kvRows (Just updVals) False dbConf (Just setClause) True
     else do
       let updateQuery = DB.updateRowsReturningList $ sqlUpdate ! #set setClause ! #where_ whereClause
@@ -593,8 +593,7 @@ updateAllWithKVConnector dbConf meshCfg setClause whereClause = do
   if not isDisabled
     then do
       let updVals = jsonKeyValueUpdates V1 setClause
-      kvRows <- redisFindAll meshCfg whereClause
-      dbRows <- findAllSql dbConf whereClause
+      (kvRows, dbRows) <- callKVDBAsync (redisFindAll meshCfg whereClause) (findAllSql dbConf whereClause)
       mapRight (const ()) <$> updateKVAndDBResults meshCfg whereClause dbRows kvRows (Just updVals) True dbConf (Just setClause) True
     else do
       let updateQuery = DB.updateRows $ sqlUpdate ! #set setClause ! #where_ whereClause
@@ -1061,15 +1060,14 @@ findAllWithKVConnector dbConf meshCfg whereClause = do
   let isDisabled = meshCfg.kvHardKilled
   if not isDisabled
     then do
-      kvRes <- redisFindAll meshCfg whereClause
-      case kvRes of
-        Right kvRows -> do
-          let matchedKVLiveRows = findAllMatching whereClause (fst kvRows)
-          dbRes <- runQuery dbConf findAllQuery
-          case dbRes of
-            Right dbRows -> pure $ Right $ matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRows (uncurry (++) kvRows)
-            Left err     -> return $ Left $ MDBError err
-        Left err -> return $ Left err
+
+      (kvRows, dbRows) <- callKVDBAsync (redisFindAll meshCfg whereClause) (findAllSql dbConf whereClause)
+      case (kvRows, dbRows) of
+        (Right kvRes, Right dbRes) -> do
+          let matchedKVLiveRows = findAllMatching whereClause (fst kvRes)
+          pure $ Right $ matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRes (snd kvRes ++ fst kvRes)
+        (Left err, _) -> return $ Left err
+        (_, Left err) -> return $ Left $ MDBError err
     else do
       mapLeft MDBError <$> runQuery dbConf findAllQuery
 
@@ -1329,8 +1327,7 @@ deleteAllReturningWithKVConnector dbConf meshCfg whereClause = do
   let isDisabled = meshCfg.kvHardKilled
   if not isDisabled
     then do
-      kvResult <- redisFindAll meshCfg whereClause
-      dbRows   <- findAllSql dbConf whereClause
+      (kvResult,dbRows) <- callKVDBAsync (redisFindAll meshCfg whereClause) (findAllSql dbConf whereClause) 
       updateKVAndDBResults meshCfg whereClause dbRows kvResult Nothing False dbConf Nothing False
     else do
       res <- deleteAllReturning dbConf whereClause
