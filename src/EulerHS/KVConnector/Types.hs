@@ -83,6 +83,7 @@ data MeshError
   | MMultipleKeysFound Text
   | UnexpectedError Text
   | RedisPipelineError Text
+  | AsyncKVCallFailed Text
   deriving (Show, Generic, Exception, Data)
 
 instance ToJSON MeshError where
