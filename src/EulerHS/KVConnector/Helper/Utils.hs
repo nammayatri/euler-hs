@@ -26,7 +26,7 @@ measureFunctionLatencyAndReturn action actionName tableName'
           startTime <- L.runIO getCurrentTime
           result <- action
           latency <- L.runIO $ measureLatency startTime
-          L.logInfo (localId :: Text) ("Latency for " <> actionName <> " in " <> tableName' <> " is " <> show latency)
+          L.logError (localId :: Text) ("Latency for " <> actionName <> " in " <> tableName' <> " is " <> show latency)
           return result
         _ -> action
 

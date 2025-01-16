@@ -24,7 +24,7 @@ module EulerHS.KVConnector.Flow
     deleteAllReturningWithKVConnector,
     findAllWithKVAndConditionalDBInternal,
     findOneFromKvRedis,
-    findAllFromKvRedis,
+    findAllFromKvRedis
   )
  where
 
@@ -77,7 +77,6 @@ createWoReturingKVConnector :: forall (table :: (Type -> Type) -> Type) be m beM
     Serialize.Serialize (table Identity),
     Show (table Identity),
     KVConnector (table Identity),
-    MonadIO m,
     L.MonadFlow m) =>
   DBConfig beM ->
   MeshConfig ->
@@ -109,7 +108,6 @@ createWithKVConnector ::
     Serialize.Serialize (table Identity),
     Show (table Identity),
     KVConnector (table Identity),
-    MonadIO m,
     L.MonadFlow m) =>
   DBConfig beM ->
   MeshConfig ->
@@ -138,7 +136,6 @@ createKV :: forall (table :: (Type -> Type) -> Type) m.
     Serialize.Serialize (table Identity),
     Show (table Identity),
     KVConnector (table Identity),
-    MonadIO m,
     L.MonadFlow m) =>
   MeshConfig ->
   table Identity ->
@@ -220,8 +217,7 @@ updateWoReturningWithKVConnector :: forall be table beM m.
     ToJSON (table Identity),
     Serialize.Serialize (table Identity),
     Show (table Identity), --debugging purpose
-    L.MonadFlow m, MonadIO m
-  ) =>
+    L.MonadFlow m) =>
   DBConfig beM ->
   MeshConfig ->
   [Set be table] ->
@@ -260,7 +256,7 @@ updateWithKVConnector :: forall table m.
     ToJSON (table Identity),
     Serialize.Serialize (table Identity),
     Show (table Identity), --debugging purpose
-    L.MonadFlow m, MonadIO m
+    L.MonadFlow m
   ) =>
   DBConfig BP.Pg ->
   MeshConfig ->
@@ -300,7 +296,7 @@ modifyOneKV :: forall be table beM m.
     FromJSON (table Identity),
     Show (table Identity),
     Serialize.Serialize (table Identity),
-    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM, MonadIO m) =>
+    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM) =>
   DBConfig beM ->
   MeshConfig ->
   Where be table ->
@@ -434,7 +430,6 @@ updateObjectRedis :: forall beM be table m.
     BeamRunner beM,
     Model be table,
     MeshMeta be table,
-    MonadIO m,
     TableMappings (table Identity),
     B.HasQBuilder be,
     KVConnector (table Identity),
@@ -543,7 +538,7 @@ updateAllReturningWithKVConnector :: forall table m.
     TableMappings (table Identity),
     Serialize.Serialize (table Identity),
     Show (table Identity), --debugging purpose
-    L.MonadFlow m, MonadIO m
+    L.MonadFlow m
   ) =>
   DBConfig BP.Pg ->
   MeshConfig ->
@@ -581,7 +576,7 @@ updateAllWithKVConnector :: forall be table beM m.
     ToJSON (table Identity),
     Serialize.Serialize (table Identity),
     Show (table Identity), --debugging purpose
-    L.MonadFlow m, MonadIO m
+    L.MonadFlow m
   ) =>
   DBConfig beM ->
   MeshConfig ->
@@ -619,7 +614,6 @@ updateKVAndDBResults :: forall be table beM m.
     MeshMeta be table,
     TableMappings (table Identity),
     B.HasQBuilder be,
-    MonadIO m,
     KVConnector (table Identity),
     FromJSON (table Identity),
     ToJSON (table Identity),
@@ -693,7 +687,7 @@ findWithKVConnector :: forall be table beM m.
     ToJSON (table Identity),
     Serialize.Serialize (table Identity),
     L.MonadFlow m,
-    Show (table Identity), MonadIO m
+    Show (table Identity)
   ) =>
   DBConfig beM ->
   MeshConfig ->
@@ -764,7 +758,7 @@ findOneFromKvRedis :: forall be table beM m.
     KVConnector (table Identity),
     Serialize.Serialize (table Identity),
     FromJSON (table Identity),
-    L.MonadFlow m, MonadIO m
+    L.MonadFlow m
   ) =>
   DBConfig beM ->
   MeshConfig ->
@@ -834,7 +828,7 @@ findOneFromRedis :: forall be table beM m.
     KVConnector (table Identity),
     Serialize.Serialize (table Identity),
     FromJSON (table Identity),
-    L.MonadFlow m, MonadIO m
+    L.MonadFlow m
   ) =>
   MeshConfig -> Where be table -> m (MeshResult ([table Identity], [table Identity]))
 findOneFromRedis meshCfg whereClause = do
@@ -848,9 +842,7 @@ findOneFromRedis meshCfg whereClause = do
   case foldEither eitherKeyRes of
     Right keyRes -> do
       let lenKeyRes = lengthOfLists keyRes
-      -- latencyLogging <- liftIO $ fromMaybe False . (>>= readMaybe) <$> SE.lookupEnv "EULER_LOG_REDIS_LANTECY" -- uncomment this line to enable redis latency logging
-      latencyLogging <- pure False
-      allRowsRes <- foldEither <$> mapM (getDataFromPKeysRedis meshCfg latencyLogging) (mkUniq keyRes)
+      allRowsRes <- foldEither <$> mapM (getDataFromPKeysRedis meshCfg) (mkUniq keyRes)
       case allRowsRes of
         Right allRowsResPairList -> do
           let (allRowsResLiveListOfList, allRowsResDeadListOfList) = unzip allRowsResPairList
@@ -889,7 +881,7 @@ findAllWithOptionsHelper :: forall be table beM m.
     Show (table Identity),
     ToJSON (table Identity),
     FromJSON (table Identity),
-    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM, MonadIO m) =>
+    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM) =>
   DBConfig beM ->
   MeshConfig ->
   Where be table ->
@@ -969,7 +961,7 @@ findAllFromKvRedis :: forall be table beM m.
     KVConnector (table Identity),
     Serialize.Serialize (table Identity),
     FromJSON (table Identity),
-    L.MonadFlow m, MonadIO m
+    L.MonadFlow m
   ) =>
   DBConfig beM ->
   MeshConfig ->
@@ -1009,7 +1001,7 @@ findAllWithOptionsKVConnector :: forall be table beM m.
     Show (table Identity),
     ToJSON (table Identity),
     FromJSON (table Identity),
-    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM, MonadIO m) =>
+    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM) =>
   DBConfig beM ->
   MeshConfig ->
   Where be table ->
@@ -1031,7 +1023,7 @@ findAllWithOptionsKVConnector' :: forall be table beM m.
     Show (table Identity),
     ToJSON (table Identity),
     FromJSON (table Identity),
-    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM, MonadIO m) =>
+    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM) =>
   DBConfig beM ->
   MeshConfig ->
   Where be table ->
@@ -1050,7 +1042,7 @@ findAllWithKVConnector :: forall be table beM m.
     ToJSON (table Identity),
     FromJSON (table Identity),
     Serialize.Serialize (table Identity),
-    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM, MonadIO m) =>
+    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM) =>
   DBConfig beM ->
   MeshConfig ->
   Where be table ->
@@ -1080,7 +1072,7 @@ findAllWithKVAndConditionalDBInternal :: forall be table beM m.
     ToJSON (table Identity),
     FromJSON (table Identity),
     Serialize.Serialize (table Identity),
-    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM, MonadIO m) =>
+    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM) =>
   DBConfig beM ->
   MeshConfig ->
   Where be table ->
@@ -1129,7 +1121,7 @@ redisFindAll :: forall be table beM m.
     KVConnector (table Identity),
     FromJSON (table Identity),
     Serialize.Serialize (table Identity),
-    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM, MonadIO m) =>
+    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM) =>
   MeshConfig ->
   Where be table ->
   m (MeshResult ([table Identity], [table Identity]))
@@ -1141,13 +1133,12 @@ redisFindAll meshCfg whereClause = do
       andCombinationsFiltered = mkUniq $ filterPrimaryAndSecondaryKeys keyHashMap <$> andCombinations
       secondaryKeyLength = sum $ getSecondaryKeyLength keyHashMap <$> andCombinationsFiltered
   eitherKeyRes <- mapM (getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap) andCombinationsFiltered
-  flagPipe <- liftIO $ fromMaybe False . (>>= readMaybe) <$> SE.lookupEnv "enablePipelining" -- Just for Testing
-  latencyLogging <- liftIO $ fromMaybe False . (>>= readMaybe) <$> SE.lookupEnv "EULER_LOG_REDIS_LANTECY" -- Just for Testing
+  flagPipe <- L.runIO $ fromMaybe False . (>>= readMaybe) <$> SE.lookupEnv "enablePipelining" -- Just for Testing
   case foldEither eitherKeyRes of
     Right keyRes -> do
       let allKeys = concat keyRes
       let lenKeyRes = length allKeys
-      allRowsRes <- (if flagPipe then foldEither <$> mapM (getDataFromPKeysRedis' meshCfg latencyLogging) [(mkUniq allKeys)] else foldEither <$> mapM (getDataFromPKeysRedis meshCfg latencyLogging) (mkUniq keyRes))
+      allRowsRes <- (if flagPipe then foldEither <$> mapM (getDataFromPKeysRedis' meshCfg) [(mkUniq allKeys)] else foldEither <$> mapM (getDataFromPKeysRedis meshCfg) (mkUniq keyRes))
       case allRowsRes of
         Right allRowsResPairList -> do
           let (allRowsResLiveListOfList, allRowsResDeadListOfList) = unzip allRowsResPairList
@@ -1168,7 +1159,6 @@ deleteObjectRedis :: forall table be beM m.
     KVConnector (table Identity),
     FromJSON (table Identity),
     ToJSON (table Identity),
-    MonadIO m,
     Serialize.Serialize (table Identity),
     -- Show (table Identity), --debugging purpose
     L.MonadFlow m
@@ -1241,7 +1231,7 @@ deleteWithKVConnector :: forall be table beM m.
     FromJSON (table Identity),
     Show (table Identity),
     Serialize.Serialize (table Identity),
-    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM, MonadIO m) =>
+    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM) =>
   DBConfig beM ->
   MeshConfig ->
   Where be table ->
@@ -1282,7 +1272,7 @@ deleteReturningWithKVConnector :: forall be table beM m.
     TableMappings (table Identity),
     Show (table Identity),
     Serialize.Serialize (table Identity),
-    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM, MonadIO m) =>
+    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM) =>
   DBConfig beM ->
   MeshConfig ->
   Where be table ->
@@ -1318,7 +1308,7 @@ deleteAllReturningWithKVConnector :: forall be table beM m.
     FromJSON (table Identity),
     Show (table Identity),
     Serialize.Serialize (table Identity),
-    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM, MonadIO m) =>
+    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM) =>
   DBConfig beM ->
   MeshConfig ->
   Where be table ->
