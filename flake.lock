@@ -495,18 +495,18 @@
     "hedis": {
       "flake": false,
       "locked": {
-        "lastModified": 1730967537,
-        "narHash": "sha256-RDF/G/ptWazyFxCQOv+fTTQVV4hzDxTV630rnmhH3i4=",
-        "ref": "refs/heads/master",
-        "rev": "5547eb306006243f57d54e8ebb5225a055d40e73",
-        "revCount": 741,
-        "type": "git",
-        "url": "https://github.com/juspay/hedis"
+        "lastModified": 1738066090,
+        "narHash": "sha256-M7OPyN2qePbzJh/Ev605ozPpoyH8rrRBh1RacXDyeLY=",
+        "owner": "nammayatri",
+        "repo": "hedis",
+        "rev": "b8c831d11f95c3ddf82bb9258aa06c55241dab05",
+        "type": "github"
       },
       "original": {
-        "rev": "5547eb306006243f57d54e8ebb5225a055d40e73",
-        "type": "git",
-        "url": "https://github.com/juspay/hedis"
+        "owner": "nammayatri",
+        "repo": "hedis",
+        "rev": "b8c831d11f95c3ddf82bb9258aa06c55241dab05",
+        "type": "github"
       }
     },
     "hnix-store-core": {

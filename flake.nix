@@ -21,7 +21,10 @@
     sequelize.inputs.haskell-flake.follows = "haskell-flake";
     sequelize.inputs.flake-parts.follows = "flake-parts";
 
-    hedis.url = "git+https://github.com/juspay/hedis?rev=5547eb306006243f57d54e8ebb5225a055d40e73";
+    # hedis.url = "git+https://github.com/juspay/hedis?rev=5547eb306006243f57d54e8ebb5225a055d40e73";
+    # hedis.flake = false;
+
+    hedis.url = "github:nammayatri/hedis?rev=b8c831d11f95c3ddf82bb9258aa06c55241dab05";
     hedis.flake = false;
 
     servant-mock.url = "github:arjunkathuria/servant-mock?rev=17e90cb831820a30b3215d4f164cf8268607891e";
