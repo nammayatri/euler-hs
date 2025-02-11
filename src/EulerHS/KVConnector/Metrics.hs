@@ -10,7 +10,6 @@ import EulerHS.KVConnector.Types (DBLogEntry (..), Operation (..), Source (..))
 import qualified EulerHS.Language as L
 import EulerHS.Options (OptionEntity)
 import EulerHS.Prelude
-import GHC.Float (int2Double)
 import qualified Juspay.Extra.Config as Conf
 
 nominalDiffTimeToMilliseconds :: NominalDiffTime -> Double
@@ -42,7 +41,7 @@ mkKVMetricHandler = do
   pure $
     KVMetricHandler
       ( \case
-          (KVAction, tag, action, source, model, mid, latency, cpuLatency, diffFound, isLeftRes) -> do
+          (KVAction, tag, action, source, model, mid, _, _, _, isLeftRes) -> do
             -- inc (metrics </> #kv_action_counter) tag action source model  mid
             -- observe (metrics </> #kv_latency_observe) (int2Double latency) tag action source model
             -- observe (metrics </> #kv_cpu_latency_observe) (fromInteger cpuLatency) tag action source model
@@ -50,7 +49,7 @@ mkKVMetricHandler = do
             when isLeftRes $ inc (metrics </> #kv_sql_error_counter) tag action source model mid
       )
       ( \case
-          (tag, action, model, _redisCalls, redisSoftLimitExceeded, redisHardLimitExceeded) -> do
+          (_, action, model, _redisCalls, redisSoftLimitExceeded, redisHardLimitExceeded) -> do
             when redisSoftLimitExceeded (inc (metrics </> #kvRedis_soft_db_limit_exceeded) _redisCalls action model)
             when redisHardLimitExceeded (inc (metrics </> #kvRedis_hard_db_limit_exceeded) _redisCalls action model)
       )
