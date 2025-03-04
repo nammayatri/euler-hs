@@ -1,5 +1,5 @@
 module EulerHS.Interpreters
-  ( runKVDB,
+  ( runKVDBInMasterOrReplica,
     runLogger,
     runPubSub,
     interpretPubSubF,
@@ -9,7 +9,7 @@ module EulerHS.Interpreters
   ) where
 
 import           EulerHS.Framework.Interpreter (runFlow, runFlow')
-import           EulerHS.KVDB.Interpreter (runKVDB)
+import           EulerHS.KVDB.Interpreter (runKVDBInMasterOrReplica)
 import           EulerHS.Logger.Interpreter (runLogger)
 import           EulerHS.PubSub.Interpreter (interpretPubSubF, runPubSub)
 import           EulerHS.SqlDB.Interpreter (runSqlDB)

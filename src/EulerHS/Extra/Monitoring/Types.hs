@@ -44,7 +44,6 @@ data LocalLatencyId = LocalLatencyId
   deriving stock (Eq, Show, Generic, Ord)
   deriving anyclass (FromJSON, ToJSON)
 
-instance OptionEntity LocalLatencyId (Maybe Text)
 
 data RedisMetricInfoKey = RedisMetricInfoKey
   deriving stock (Eq, Show, Generic, Ord)
@@ -53,6 +52,14 @@ data RedisMetricInfoKey = RedisMetricInfoKey
 data APIMetricInfoKey = APIMetricInfoKey
   deriving stock (Eq, Show, Generic, Ord)
   deriving anyclass (FromJSON, ToJSON)
+
+data UseMasterRedis = UseMasterRedis
+  deriving stock (Eq, Show, Generic, Ord)
+  deriving anyclass (FromJSON, ToJSON)
+
+instance OptionEntity UseMasterRedis Bool
+
+instance OptionEntity LocalLatencyId (Maybe Text)
 
 instance OptionEntity DBMetricInfoKey DBMetricInfo
 

@@ -52,7 +52,7 @@ import           EulerHS.HttpAPI (HTTPIOException (HTTPIOException),
                                   getResponseCode, getResponseHeaders,
                                   getResponseStatus, maskHTTPRequest,maskHTTPResponse,
                                   mkHttpApiCallLogEntry, shouldBypassProxy, isART)
-import           EulerHS.KVDB.Interpreter (runKVDB)
+import           EulerHS.KVDB.Interpreter (runKVDBInMasterOrReplica)
 import           EulerHS.KVDB.Types (KVDBAnswer,
                                      KVDBConfig (KVDBClusterConfig, KVDBConfig),
                                      KVDBConn (Redis),
@@ -88,6 +88,8 @@ import           System.Process (readCreateProcess, shell)
 import           Unsafe.Coerce (unsafeCoerce)
 import qualified EulerHS.Extra.Monitoring.Flow as EEMF
 import qualified Data.Bool as Bool
+import EulerHS.Extra.Monitoring.Types 
+import EulerHS.Options
 
 connect :: DBConfig be -> IO (DBResult (SqlConn be))
 connect cfg = do
@@ -668,7 +670,10 @@ interpretFlowMethod mbFlowGuid flowRt (L.RunDB conn sqlDbMethod runInTransaction
 
 interpretFlowMethod _ flowRt@(R.FlowRuntime {..}) (L.RunKVDB cName act next) = do
     tick <- EEMF.getCurrentDateInMillisIO
-    val <- next <$> runKVDB cName _kvdbConnections act
+    shouldReadFromMaster <- readMVar _optionsLocal >>= \m -> 
+      pure $ fmap (unsafeCoerce @Any @Bool) (Map.lookup (mkOptionKey UseMasterRedis) m)
+    print ("shouldReadFromMaster => " <> show shouldReadFromMaster :: Text)
+    val <- next <$> runKVDBInMasterOrReplica shouldReadFromMaster cName _kvdbConnections act
     tock <- EEMF.getCurrentDateInMillisIO
     void $ EEMF.incrementRedisLatencyMetric flowRt (tock-tick)
     pure val
