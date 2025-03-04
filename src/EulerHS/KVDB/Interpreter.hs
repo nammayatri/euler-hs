@@ -4,7 +4,7 @@
 module EulerHS.KVDB.Interpreter
   (
     -- * KVDB Interpreter
-    runKVDB
+    runKVDBInMasterOrReplica
   ) where
 
 import qualified Data.Map as Map
@@ -19,6 +19,7 @@ import           EulerHS.KVDB.Types (KVDBError (KVDBConnectionDoesNotExist),
                                      exceptionToKVDBReply, fromRdStatus,
                                      fromRdTxResult, hedisReplyToKVDBReply)
 import           EulerHS.Prelude
+import qualified Database.Redis.Cluster as Cluster
 import           Text.Read (read)
 
 interpretKeyValueF
@@ -362,8 +363,30 @@ interpretDbF
 interpretDbF runRedis (L.KV f) = interpretKeyValueF    runRedis f
 interpretDbF runRedis (L.TX f) = interpretTransactionF runRedis f
 
-runKVDB :: Text -> MVar (Map Text NativeKVDBConn) -> L.KVDB a -> IO (Either KVDBReply a)
-runKVDB cName kvdbConnMapMVar =
+modifyMasterOnlyConnection :: R.Connection -> R.Connection
+modifyMasterOnlyConnection (R.ClusteredConnection connInfo (Cluster.Connection mvar infoMap clusterCfg)) =
+  R.ClusteredConnection connInfo (Cluster.Connection mvar infoMap (clusterCfg {Cluster.useMasterOnly = Just True}))
+modifyMasterOnlyConnection nonClustered = nonClustered
+
+
+runKVDBInMasterOrReplica :: Maybe Bool -> Text -> MVar (Map Text NativeKVDBConn) -> L.KVDB a -> IO (Either KVDBReply a)
+runKVDBInMasterOrReplica (Just True) cName kvdbConnMapMVar =
+  fmap (join . first exceptionToKVDBReply) . try @_ @SomeException .
+    foldF (interpretDbF runRedis) . runExceptT
+  where
+    runRedis :: R.Redis (Either R.Reply a) -> IO (Either KVDBReply a)
+    runRedis redisDsl = do
+      connections <- readMVar kvdbConnMapMVar
+      case Map.lookup cName connections of
+        Nothing -> pure $ Left $ KVDBError KVDBConnectionDoesNotExist
+          $ "Can't find redis connection: " <> T.unpack cName
+        Just (NativeKVDB c) -> do 
+          let c' = modifyMasterOnlyConnection c
+          first hedisReplyToKVDBReply <$> R.runRedis c' redisDsl
+runKVDBInMasterOrReplica _ cName kvdbConnMapMVar = runKVDB' cName kvdbConnMapMVar
+
+runKVDB' :: Text -> MVar (Map Text NativeKVDBConn) -> L.KVDB a -> IO (Either KVDBReply a)
+runKVDB' cName kvdbConnMapMVar =
   fmap (join . first exceptionToKVDBReply) . try @_ @SomeException .
     foldF (interpretDbF runRedis) . runExceptT
   where
