@@ -672,7 +672,7 @@ interpretFlowMethod _ flowRt@(R.FlowRuntime {..}) (L.RunKVDB cName act next) = d
     tick <- EEMF.getCurrentDateInMillisIO
     shouldReadFromMaster <- readMVar _optionsLocal >>= \m -> 
       pure $ fmap (unsafeCoerce @Any @Bool) (Map.lookup (mkOptionKey UseMasterRedis) m)
-    print ("shouldReadFromMaster => " <> show shouldReadFromMaster :: Text)
+    -- print ("shouldReadFromMaster => " <> show shouldReadFromMaster :: Text)
     val <- next <$> runKVDBInMasterOrReplica shouldReadFromMaster cName _kvdbConnections act
     tock <- EEMF.getCurrentDateInMillisIO
     void $ EEMF.incrementRedisLatencyMetric flowRt (tock-tick)
