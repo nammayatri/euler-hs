@@ -12,6 +12,7 @@ import qualified Data.Aeson.KeyMap as AKM
 import qualified Data.Aeson.Key as AKey
 import           Data.Aeson.Encode.Pretty (encodePretty)
 import qualified Data.List as DL
+import qualified Data.HashSet as HS
 import qualified Database.Beam as B
 import qualified Database.Beam.Schema.Tables as B
 import qualified Data.ByteString.Lazy as BSL
@@ -356,13 +357,13 @@ mergeKVAndDBResults redisKeyPrefix dbRows kvRows = do
 
 getUniqueDBRes :: KVConnector (table Identity) => Text -> [table Identity] -> [table Identity] -> [table Identity]
 getUniqueDBRes redisKeyPrefix dbRows kvRows = do
-  let kvPkeys = map (getLookupKeyByPKey redisKeyPrefix) kvRows
-  filter (\r -> (getLookupKeyByPKey redisKeyPrefix r) `notElem` kvPkeys) dbRows
+  let kvPkeysSet = HS.fromList $ map (getLookupKeyByPKey redisKeyPrefix) kvRows
+  filter (\r -> not $ HS.member (getLookupKeyByPKey redisKeyPrefix r) kvPkeysSet) dbRows
 
 removeDeleteResults :: KVConnector (table Identity) => Text -> [table Identity] -> [table Identity] -> [table Identity]
 removeDeleteResults redisKeyPrefix delRows rows = do
-  let delPKeys = map (getLookupKeyByPKey redisKeyPrefix) delRows
-      nonDelRows = filter (\r -> (getLookupKeyByPKey redisKeyPrefix r) `notElem` delPKeys) rows
+  let delPKeysSet = HS.fromList $ map (getLookupKeyByPKey redisKeyPrefix) delRows
+      nonDelRows = filter (\r -> not $ HS.member (getLookupKeyByPKey redisKeyPrefix r) delPKeysSet) rows
   nonDelRows
 
 getLatencyInMicroSeconds :: Integer -> Integer
@@ -620,6 +621,9 @@ isRecachingEnabled = fromMaybe False $ readMaybe =<< lookupEnvT @String "IS_RECA
 
 isCachingDbFindEnabled :: Bool
 isCachingDbFindEnabled = fromMaybe False $ readMaybe =<< lookupEnvT @String "IS_CACHING_DB_FIND_ENABLED"
+
+isPipeliningEnabled :: Bool
+isPipeliningEnabled = fromMaybe False $ readMaybe =<< lookupEnvT @String "enablePipelining"
 
 shouldLogFindDBCallLogs :: Bool
 shouldLogFindDBCallLogs = fromMaybe False $ readMaybe =<< lookupEnvT  @String "IS_FIND_DB_LOGS_ENABLED"

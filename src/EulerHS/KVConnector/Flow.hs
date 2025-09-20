@@ -59,7 +59,6 @@ import           Named (defaults, (!))
 import qualified Data.Serialize as Serialize
 import qualified EulerHS.KVConnector.Encoding as Encoding
 import qualified Data.Maybe as DMaybe
-import qualified System.Environment as SE
 import qualified EulerHS.KVConnector.Metrics as Metrics
 import           EulerHS.KVConnector.Compression
 import           EulerHS.KVConnector.Helper.Utils
@@ -1057,7 +1056,8 @@ findAllWithKVConnector dbConf meshCfg whereClause = do
       case (kvRows, dbRows) of
         (Right kvRes, Right dbRes) -> do
           let matchedKVLiveRows = findAllMatching whereClause (fst kvRes)
-          pure $ Right $ matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRes (snd kvRes ++ fst kvRes)
+              allKVRows = fst kvRes ++ snd kvRes
+          pure $ Right $ matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRes allKVRows
         (Left err, _) -> return $ Left err
         (_, Left err) -> return $ Left $ MDBError err
     else do
@@ -1133,12 +1133,11 @@ redisFindAll meshCfg whereClause = do
       andCombinationsFiltered = mkUniq $ filterPrimaryAndSecondaryKeys keyHashMap <$> andCombinations
       secondaryKeyLength = sum $ getSecondaryKeyLength keyHashMap <$> andCombinationsFiltered
   eitherKeyRes <- mapM (getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap) andCombinationsFiltered
-  flagPipe <- L.runIO $ fromMaybe False . (>>= readMaybe) <$> SE.lookupEnv "enablePipelining" -- Just for Testing
   case foldEither eitherKeyRes of
     Right keyRes -> do
       let allKeys = concat keyRes
       let lenKeyRes = length allKeys
-      allRowsRes <- (if flagPipe then foldEither <$> mapM (getDataFromPKeysRedis' meshCfg) [(mkUniq allKeys)] else foldEither <$> mapM (getDataFromPKeysRedis meshCfg) (mkUniq keyRes))
+      allRowsRes <- (if isPipeliningEnabled then foldEither <$> mapM (getDataFromPKeysRedis' meshCfg) [(mkUniq allKeys)] else foldEither <$> mapM (getDataFromPKeysRedis meshCfg) (mkUniq keyRes))
       case allRowsRes of
         Right allRowsResPairList -> do
           let (allRowsResLiveListOfList, allRowsResDeadListOfList) = unzip allRowsResPairList
