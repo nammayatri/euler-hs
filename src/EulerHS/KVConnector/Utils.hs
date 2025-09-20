@@ -134,21 +134,23 @@ getDataFromPKeysRedisHelper :: forall table m. (
     FromJSON (table Identity),
     Serialize.Serialize (table Identity),
     L.MonadFlow m) => Either KVDBReply [(Maybe ByteString)] -> m (MeshResult ([table Identity], [table Identity]))
-getDataFromPKeysRedisHelper (Right []) = pure $ Right ([], [])
-getDataFromPKeysRedisHelper (Right (Nothing : xs)) = getDataFromPKeysRedisHelper (Right xs)
-getDataFromPKeysRedisHelper (Right (Just r : xs)) = do
-  let (decodeResult, isLive) = decodeToField $ BSL.fromChunks [r]
-  case decodeResult of
-    Right decodeRes -> do
-      remainingPKeysResult <- getDataFromPKeysRedisHelper (Right xs)
-      case remainingPKeysResult of
-        Right remainingResult -> do
+getDataFromPKeysRedisHelper redisResult = do
+  result <- processResults [] [] redisResult
+  pure $ case result of
+    Right (liveAcc, deadAcc) -> Right (reverse liveAcc, reverse deadAcc)
+    Left e -> Left e
+  where
+    processResults liveAcc deadAcc (Right []) = pure $ Right (liveAcc, deadAcc)
+    processResults liveAcc deadAcc (Right (Nothing : xs)) = processResults liveAcc deadAcc (Right xs)
+    processResults liveAcc deadAcc (Right (Just r : xs)) = do
+      let (decodeResult, isLive) = decodeToField $ BSL.fromChunks [r]
+      case decodeResult of
+        Right decodeRes ->
           if isLive
-            then return $ Right (decodeRes ++ (fst remainingResult), snd remainingResult)
-            else return $ Right (fst remainingResult, decodeRes ++ (snd remainingResult))
-        Left err -> return $ Left err
-    Left e -> return $ Left e
-getDataFromPKeysRedisHelper (Left e) = return $ Left $ MRedisError e
+            then processResults (decodeRes ++ liveAcc) deadAcc (Right xs)
+            else processResults liveAcc (decodeRes ++ deadAcc) (Right xs)
+        Left e -> return $ Left e
+    processResults _ _ (Left e) = return $ Left $ MRedisError e
 
 
 getDataFromPKeysHelper :: forall table m. (
@@ -156,18 +158,17 @@ getDataFromPKeysHelper :: forall table m. (
     FromJSON (table Identity),
     Serialize.Serialize (table Identity),
     L.MonadFlow m) => MeshConfig -> [[ByteString]] -> m (MeshResult ([table Identity], [table Identity]))
-getDataFromPKeysHelper _ [] = pure $ Right ([], [])
-getDataFromPKeysHelper meshCfg (pKey : pKeys) = do
-  res <- L.runKVDB meshCfg.kvRedis $ L.mget (fromString . T.unpack . decodeUtf8 <$> pKey)
-  result <- getDataFromPKeysRedisHelper res
-  case result of
-    Left e -> return $ Left e
-    Right (a, b) -> do
-      remainingPKeysResult <- getDataFromPKeysHelper meshCfg pKeys
-      case remainingPKeysResult of
-        Right remainingResult -> do
-          return $ Right (a ++ fst remainingResult, b ++ snd remainingResult)
-        Left err -> return $ Left err
+getDataFromPKeysHelper meshCfg pKeysList = do
+  results <- mapM processKeyGroup pKeysList
+  pure $ case sequence results of
+    Right pairs ->
+      let (allLive, allDead) = unzip pairs
+      in Right (concat allLive, concat allDead)
+    Left e -> Left e
+  where
+    processKeyGroup pKey = do
+      res <- L.runKVDB meshCfg.kvRedis $ L.mget (fromString . T.unpack . decodeUtf8 <$> pKey)
+      getDataFromPKeysRedisHelper res
 
 getDataFromPKeysHelperAsync ::
   forall table m.
@@ -193,18 +194,17 @@ getDataFromPKeysHelperAsync meshCfg pKeysList = do
 
     awaitAll = mapM (L.await Nothing)
 
-    processResults [] = pure $ Right ([], [])
-    processResults (res : rest) = case res of
+    processResults results = do
+      pairs <- mapM processResult results
+      pure $ case sequence pairs of
+        Right allPairs ->
+          let (allLive, allDead) = unzip allPairs
+          in Right (concat allLive, concat allDead)
+        Left e -> Left e
+
+    processResult res = case res of
       Left e -> pure $ Left (RedisPipelineError (show e))
-      Right redisRes -> do
-        result <- getDataFromPKeysRedisHelper redisRes
-        case result of
-          Left e -> pure $ Left e
-          Right (a, b) -> do
-            remainingResult <- processResults rest
-            case remainingResult of
-              Left e -> pure $ Left e
-              Right (ra, rb) -> pure $ Right (a ++ ra, b ++ rb)
+      Right redisRes -> getDataFromPKeysRedisHelper redisRes
 
 getDataFromPKeysRedis' :: forall table m. (
     KVConnector (table Identity),
@@ -623,7 +623,7 @@ isCachingDbFindEnabled :: Bool
 isCachingDbFindEnabled = fromMaybe False $ readMaybe =<< lookupEnvT @String "IS_CACHING_DB_FIND_ENABLED"
 
 isPipeliningEnabled :: Bool
-isPipeliningEnabled = fromMaybe False $ readMaybe =<< lookupEnvT @String "enablePipelining"
+isPipeliningEnabled = fromMaybe True $ readMaybe =<< lookupEnvT @String "enablePipelining"
 
 shouldLogFindDBCallLogs :: Bool
 shouldLogFindDBCallLogs = fromMaybe False $ readMaybe =<< lookupEnvT  @String "IS_FIND_DB_LOGS_ENABLED"
@@ -632,7 +632,7 @@ redisCallsHardLimit :: Int
 redisCallsHardLimit = fromMaybe 5000 $ readMaybe =<< lookupEnvT @String "REDIS_CALLS_HARD_LIMIT"
 
 redisCallsSoftLimit :: Int
-redisCallsSoftLimit = fromMaybe 500 $ readMaybe =<< lookupEnvT @String "REDIS_CALLS_SOFT_LIMIT"
+redisCallsSoftLimit = fromMaybe 2500 $ readMaybe =<< lookupEnvT @String "REDIS_CALLS_SOFT_LIMIT"
 
 lengthOfLists :: [[a]] -> Int
 lengthOfLists = foldl' (\acc el -> acc + length el) 0
