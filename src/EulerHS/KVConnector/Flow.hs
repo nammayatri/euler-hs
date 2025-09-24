@@ -218,16 +218,17 @@ updateWoReturningWithKVConnector :: forall be table beM m.
     Show (table Identity), --debugging purpose
     L.MonadFlow m) =>
   DBConfig beM ->
+  DBConfig beM ->
   MeshConfig ->
   [Set be table] ->
   Where be table ->
   m (MeshResult ())
-updateWoReturningWithKVConnector dbConf meshCfg setClause whereClause = do
+updateWoReturningWithKVConnector dbConf replicaDbConfig meshCfg setClause whereClause = do
   let isDisabled = meshCfg.kvHardKilled
   (_, res) <- if not isDisabled
     then do
       -- Discarding object
-      (\updRes -> (fst updRes, mapRight (const ()) (snd updRes))) <$> modifyOneKV dbConf meshCfg whereClause (Just setClause) True True
+      (\updRes -> (fst updRes, mapRight (const ()) (snd updRes))) <$> modifyOneKV dbConf replicaDbConfig meshCfg whereClause (Just setClause) True True
     else do
       res <- updateOneSqlWoReturning dbConf setClause whereClause
       (SQL,) <$> case res of
@@ -237,7 +238,7 @@ updateWoReturningWithKVConnector dbConf meshCfg setClause whereClause = do
               and then update the json so fetched and finally setting it in the imc.
             -}
             if meshCfg.memcacheEnabled
-              then fetchRowFromDBAndAlterImc dbConf meshCfg whereClause ImcInsert
+              then fetchRowFromDBAndAlterImc replicaDbConfig meshCfg whereClause ImcInsert
               else return $ Right val
 
         Left e -> return $ Left $ MDBError e
@@ -258,15 +259,16 @@ updateWithKVConnector :: forall table m.
     L.MonadFlow m
   ) =>
   DBConfig BP.Pg ->
+  DBConfig BP.Pg ->
   MeshConfig ->
   [Set BP.Postgres table] ->
   Where BP.Postgres table ->
   m (MeshResult (Maybe (table Identity)))
-updateWithKVConnector dbConf meshCfg setClause whereClause = do
+updateWithKVConnector dbConf replicaDbConfig meshCfg setClause whereClause = do
   let isDisabled = meshCfg.kvHardKilled
   (_, res) <- if not isDisabled
     then do
-      modifyOneKV dbConf meshCfg whereClause (Just setClause) False True
+      modifyOneKV dbConf replicaDbConfig meshCfg whereClause (Just setClause) False True
     else do
       let updateQuery = DB.updateRowsReturningList $ sqlUpdate ! #set setClause ! #where_ whereClause
       res <- runQuery dbConf updateQuery
@@ -297,13 +299,14 @@ modifyOneKV :: forall be table beM m.
     Serialize.Serialize (table Identity),
     L.MonadFlow m, B.HasQBuilder be, BeamRunner beM) =>
   DBConfig beM ->
+  DBConfig beM ->
   MeshConfig ->
   Where be table ->
   Maybe [Set be table] ->
   Bool ->
   Bool ->
   m (Source, MeshResult (Maybe (table Identity)))
-modifyOneKV dbConf meshCfg whereClause mbSetClause updateWoReturning isLive = do
+modifyOneKV dbConf replicaDbConfig meshCfg whereClause mbSetClause updateWoReturning isLive = do
   let setClause = fromMaybe [] mbSetClause
       updVals = jsonKeyValueUpdates V1 setClause
   kvResult <- findOneFromRedis meshCfg whereClause
@@ -313,7 +316,7 @@ modifyOneKV dbConf meshCfg whereClause mbSetClause updateWoReturning isLive = do
       L.logDebugT "modifyOneKV" ("Modifying nothing - Row is deleted already for " <> tableName @(table Identity))
       pure (KV, Right Nothing)
     Right (kvLiveRows, _) -> do
-      findFromDBIfMatchingFailsRes <- findFromDBIfMatchingFails meshCfg dbConf whereClause kvLiveRows
+      findFromDBIfMatchingFailsRes <- findFromDBIfMatchingFails meshCfg replicaDbConfig whereClause kvLiveRows
       case findFromDBIfMatchingFailsRes of
         (_, Right [])        -> pure (KV, Right Nothing)
         (SQL, Right [dbRow]) -> updateInKVOrSQL (Just dbRow) updVals setClause
@@ -330,7 +333,7 @@ modifyOneKV dbConf meshCfg whereClause mbSetClause updateWoReturning isLive = do
       alterImc :: Maybe (table Identity) -> m (MeshResult ())
       alterImc mbRow = do
         case (isLive, mbRow) of
-          (True, Nothing) -> fetchRowFromDBAndAlterImc dbConf meshCfg whereClause ImcInsert
+          (True, Nothing) -> fetchRowFromDBAndAlterImc replicaDbConfig meshCfg whereClause ImcInsert
           (True, Just x) -> Right <$> pushToInMemConfigStream meshCfg ImcInsert x
           (False, Nothing) ->
               searchInMemoryCache meshCfg dbConf whereClause >>= (snd >>> \case
@@ -377,7 +380,7 @@ modifyOneKV dbConf meshCfg whereClause mbSetClause updateWoReturning isLive = do
         if isRecachingEnabled && meshCfg.meshEnabled
           then do
             dbRes <- case maybeRow of
-              Nothing -> findOneFromDB dbConf whereClause
+              Nothing -> findOneFromDB replicaDbConfig whereClause
               Just dbrow -> pure $ Right $ Just dbrow
             (KV,) <$> case dbRes of
               Right (Just obj) -> do
@@ -540,16 +543,17 @@ updateAllReturningWithKVConnector :: forall table m.
     L.MonadFlow m
   ) =>
   DBConfig BP.Pg ->
+  DBConfig BP.Pg ->
   MeshConfig ->
   [Set BP.Postgres table] ->
   Where BP.Postgres table ->
   m (MeshResult [table Identity])
-updateAllReturningWithKVConnector dbConf meshCfg setClause whereClause = do
+updateAllReturningWithKVConnector dbConf replicaDbConfig meshCfg setClause whereClause = do
   let isDisabled = meshCfg.kvHardKilled
   if not isDisabled
     then do
       let updVals = jsonKeyValueUpdates V1 setClause
-      (kvRows, dbRows) <- callKVDBAsync (redisFindAll meshCfg whereClause) (findAllSql dbConf whereClause)
+      (kvRows, dbRows) <- callKVDBAsync (redisFindAll meshCfg whereClause) (findAllSql replicaDbConfig whereClause)
       updateKVAndDBResults meshCfg whereClause dbRows kvRows (Just updVals) False dbConf (Just setClause) True
     else do
       let updateQuery = DB.updateRowsReturningList $ sqlUpdate ! #set setClause ! #where_ whereClause
@@ -578,16 +582,17 @@ updateAllWithKVConnector :: forall be table beM m.
     L.MonadFlow m
   ) =>
   DBConfig beM ->
+  DBConfig beM ->
   MeshConfig ->
   [Set be table] ->
   Where be table ->
   m (MeshResult ())
-updateAllWithKVConnector dbConf meshCfg setClause whereClause = do
+updateAllWithKVConnector dbConf replicaDbConfig meshCfg setClause whereClause = do
   let isDisabled = meshCfg.kvHardKilled
   if not isDisabled
     then do
       let updVals = jsonKeyValueUpdates V1 setClause
-      (kvRows, dbRows) <- callKVDBAsync (redisFindAll meshCfg whereClause) (findAllSql dbConf whereClause)
+      (kvRows, dbRows) <- callKVDBAsync (redisFindAll meshCfg whereClause) (findAllSql replicaDbConfig whereClause)
       mapRight (const ()) <$> updateKVAndDBResults meshCfg whereClause dbRows kvRows (Just updVals) True dbConf (Just setClause) True
     else do
       let updateQuery = DB.updateRows $ sqlUpdate ! #set setClause ! #where_ whereClause
@@ -595,7 +600,7 @@ updateAllWithKVConnector dbConf meshCfg setClause whereClause = do
       case res of
         Right _ -> do
           let findAllQuery = DB.findRows (sqlSelect ! #where_ whereClause ! defaults)
-          dbRes <- runQuery dbConf findAllQuery
+          dbRes <- runQuery replicaDbConfig findAllQuery
           case dbRes of
             Right dbRows -> do
               when meshCfg.memcacheEnabled $
@@ -1239,7 +1244,7 @@ deleteWithKVConnector dbConf meshCfg whereClause = do
   let isDisabled = meshCfg.kvHardKilled
   (_, res) <- if not isDisabled
     then do
-      (\delRes -> (fst delRes, mapRight (const ()) (snd delRes))) <$> modifyOneKV dbConf meshCfg whereClause Nothing True False
+      (\delRes -> (fst delRes, mapRight (const ()) (snd delRes))) <$> modifyOneKV dbConf dbConf meshCfg whereClause Nothing True False
     else do
       let deleteQuery = DB.deleteRows $ sqlDelete ! #where_ whereClause
       res <- runQuery dbConf deleteQuery
@@ -1280,7 +1285,7 @@ deleteReturningWithKVConnector dbConf meshCfg whereClause = do
   let isDisabled = meshCfg.kvHardKilled
   (_, res) <- if not isDisabled
     then do
-      modifyOneKV dbConf meshCfg whereClause Nothing False False
+      modifyOneKV dbConf dbConf meshCfg whereClause Nothing False False
     else do
       res <- deleteAllReturning dbConf whereClause
       (SQL,) <$> case res of
