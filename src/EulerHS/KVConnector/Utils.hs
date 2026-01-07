@@ -24,9 +24,10 @@ import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified EulerHS.KVConnector.Encoding as Encoding
 import           EulerHS.KVConnector.Metrics (incrementMetric, KVMetric(..))
-import           EulerHS.KVConnector.Types (DBCommandVersion (..), MeshMeta(..), MeshResult, MeshError(..), MeshConfig, KVConnector(..), PrimaryKey(..), SecondaryKey(..),
+import           EulerHS.KVConnector.Types (DBCommandVersion (..), MeshMeta(..), MeshResult, MeshError(..), MeshConfig(..), KVConnector(..), PrimaryKey(..), SecondaryKey(..),
                     DBLogEntry(..), Operation(..), Source(..), MerchantID(..))
 import qualified EulerHS.Language as L
+import           EulerHS.SqlDB.Types (DBError(..), DBErrorType(..))
 import           EulerHS.Types (ApiTag(..))
 -- import           Servant (err500)
 import           Sequelize (fromColumnar', columnize, Model, Where, Clause(..), Term(..), Set(..), modelTableName)
@@ -375,6 +376,81 @@ findOneMatching whereClause = find (`matchWhereClause` whereClause)
 
 findAllMatching :: B.Beamable table => Where be table -> [table Identity] -> [table Identity]
 findAllMatching whereClause = filter (`matchWhereClause` whereClause)
+
+-- Helper function to match and deduplicate rows from both Redis instances
+matchAndDeduplicateKVRows :: (KVConnector (table Identity), B.Beamable table) => MeshConfig -> Where be table -> [table Identity] -> [table Identity] -> [table Identity]
+matchAndDeduplicateKVRows meshCfg whereClause primaryKvLiveRows secondaryKvLiveRows = 
+  let primaryMatchedKVLiveRows = findAllMatching whereClause primaryKvLiveRows
+      secondaryMatchedKVLiveRows = findAllMatching whereClause secondaryKvLiveRows
+      uniqueSecondaryRows = getUniqueDBRes meshCfg.redisKeyPrefix secondaryMatchedKVLiveRows primaryMatchedKVLiveRows
+  in primaryMatchedKVLiveRows ++ uniqueSecondaryRows
+
+-- Helper function to deduplicate dead rows from both Redis instances
+deduplicateKVDeadRows :: (KVConnector (table Identity)) => MeshConfig -> [table Identity] -> [table Identity] -> [table Identity]
+deduplicateKVDeadRows meshCfg primaryKvDeadRows secondaryKvDeadRows = 
+  let uniqueSecondaryDeadRows = getUniqueDBRes meshCfg.redisKeyPrefix secondaryKvDeadRows primaryKvDeadRows
+  in primaryKvDeadRows ++ uniqueSecondaryDeadRows
+
+-- Helper function to create configs for multi-cloud Redis queries
+createMultiCloudConfigs :: MeshConfig -> (MeshConfig, MeshConfig)
+createMultiCloudConfigs meshCfg = 
+  let primaryOnlyCfg = meshCfg { secondaryRedisEnabled = False }
+      secondaryAsPrimaryCfg = meshCfg { kvRedis = meshCfg.kvRedisSecondary, secondaryRedisEnabled = False }
+  in (primaryOnlyCfg, secondaryAsPrimaryCfg)
+
+-- Helper function to extract and process multi-cloud Redis results
+extractMultiCloudKVRows :: MeshResult ([table Identity], [table Identity]) -> MeshResult ([table Identity], [table Identity]) -> MeshResult ([table Identity], [table Identity], [table Identity], [table Identity])
+extractMultiCloudKVRows primaryKvRows secondaryKvRows = case (primaryKvRows, secondaryKvRows) of
+  (Right primaryKvRes, Right secondaryKvRes) -> Right (fst primaryKvRes, snd primaryKvRes, fst secondaryKvRes, snd secondaryKvRes)
+  (Left err, _) -> Left err
+  (_, Left err) -> Left err
+
+-- Helper function to run two async operations in parallel
+callKVKVAsync :: (L.MonadFlow m) => m (MeshResult a) -> m (MeshResult b) -> m (MeshResult a, MeshResult b)
+callKVKVAsync action1 action2 = do
+  -- Fork both actions
+  awaitable1 <- L.awaitableFork action1
+  awaitable2 <- L.awaitableFork action2
+
+  -- Wait for all results
+  res1 <- L.await Nothing awaitable1
+  res2 <- L.await Nothing awaitable2
+
+  -- Handle results (convert errors to MeshResult format)
+  let res1' = case res1 of
+        Right r -> r
+        Left err -> Left $ AsyncKVCallFailed (show err)
+      res2' = case res2 of
+        Right r -> r
+        Left err -> Left $ AsyncKVCallFailed (show err)
+
+  pure (res1', res2')
+
+-- Helper function to run three async operations in parallel
+callMultiAsync :: (L.MonadFlow m) => m (MeshResult a) -> m (MeshResult b) -> m (Either DBError c) -> m (MeshResult a, MeshResult b, Either DBError c)
+callMultiAsync action1 action2 action3 = do
+  -- Fork all three actions
+  awaitable1 <- L.awaitableFork action1
+  awaitable2 <- L.awaitableFork action2
+  awaitable3 <- L.awaitableFork action3
+
+  -- Wait for all results
+  res1 <- L.await Nothing awaitable1
+  res2 <- L.await Nothing awaitable2
+  res3 <- L.await Nothing awaitable3
+
+  -- Handle results (convert errors to MeshResult/DBError format)
+  let res1' = case res1 of
+        Right r -> r
+        Left err -> Left $ AsyncKVCallFailed (show err)
+      res2' = case res2 of
+        Right r -> r
+        Left err -> Left $ AsyncKVCallFailed (show err)
+      res3' = case res3 of
+        Right r -> r
+        Left err -> Left (DBError AsyncDBCallFailed (show err))
+
+  pure (res1', res2', res3')
 
 matchWhereClause :: B.Beamable table => table Identity -> [Clause be table] -> Bool
 matchWhereClause row = all matchClauseQuery
