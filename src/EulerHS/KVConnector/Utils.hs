@@ -223,16 +223,16 @@ getDataFromPKeysRedis :: forall table m. (
     KVConnector (table Identity),
     FromJSON (table Identity),
     Serialize.Serialize (table Identity),
-    L.MonadFlow m) => MeshConfig -> [ByteString] -> m (MeshResult ([table Identity], [table Identity]))
+    L.MonadFlow m) => Text -> [ByteString] -> m (MeshResult ([table Identity], [table Identity]))
 getDataFromPKeysRedis _  [] = pure $ Right ([], [])
-getDataFromPKeysRedis meshCfg (pKey : pKeys)  = do
-  res <- L.runKVDB meshCfg.kvRedis $ L.get (fromString $ T.unpack $ decodeUtf8 pKey)
+getDataFromPKeysRedis redisConn (pKey : pKeys)  = do
+  res <- L.runKVDB redisConn $ L.get (fromString $ T.unpack $ decodeUtf8 pKey)
   case res of
     Right (Just r) -> do
       let (decodeResult, isLive) = decodeToField $ BSL.fromChunks [r]
       case decodeResult of
         Right decodeRes -> do
-          remainingPKeysResult <- getDataFromPKeysRedis meshCfg pKeys
+          remainingPKeysResult <- getDataFromPKeysRedis redisConn pKeys
           case remainingPKeysResult of
             Right remainingResult -> do
               if isLive
@@ -243,7 +243,7 @@ getDataFromPKeysRedis meshCfg (pKey : pKeys)  = do
           -- to handle the case where the key is not found in the redis and log the error
           L.logErrorT "getDataFromPKeysRedis" $ "Error while decoding: " <> show e
           return $ Right ([], [])
-    Right Nothing -> getDataFromPKeysRedis meshCfg pKeys
+    Right Nothing -> getDataFromPKeysRedis redisConn pKeys
     Left e -> return $ Left $ RedisError $ (show e <> " for key: " <> show (pKey : pKeys))
 
 ------------- KEY UTILS ------------------

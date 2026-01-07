@@ -36,7 +36,7 @@ import EulerHS.CachedSqlDBQuery
       createSqlWoReturing,
       updateOneSqlWoReturning,
       SqlReturning(..) )
-import           EulerHS.KVConnector.Types (DBCommandVersion (..), KVConnector(..), MeshConfig, MeshResult, MeshError(..), MeshMeta(..), SecondaryKey(..), tableName, keyMap, Source(..), TableMappings(..))
+import           EulerHS.KVConnector.Types (DBCommandVersion (..), KVConnector(..), MeshConfig(..), MeshResult, MeshError(..), MeshMeta(..), SecondaryKey(..), tableName, keyMap, Source(..), TableMappings(..))
 import           EulerHS.KVConnector.DBSync (getCreateQuery, getUpdateQuery, getDeleteQuery, getDbDeleteCommandJson, getDbUpdateCommandJson, getDbUpdateCommandJsonWithPrimaryKey, getDbDeleteCommandJsonWithPrimaryKey,getCreateQueryWithCompression, getDeleteQueryWithCompression, getUpdateQueryWithCompression)
 import           EulerHS.KVConnector.InMemConfig.Flow (searchInMemoryCache, pushToInMemConfigStream, fetchRowFromDBAndAlterImc)
 import           EulerHS.KVConnector.InMemConfig.Types (ImcStreamCommand(..))
@@ -309,40 +309,59 @@ modifyOneKV :: forall be table beM m.
 modifyOneKV dbConf replicaDbConfig meshCfg whereClause mbSetClause updateWoReturning isLive = do
   let setClause = fromMaybe [] mbSetClause
       updVals = jsonKeyValueUpdates V1 setClause
-  kvResult <- findOneFromRedis meshCfg whereClause
-  case kvResult of
-    Right ([], []) -> updateInKVOrSQL Nothing updVals setClause
+  -- First check primary Redis only (with secondaryRedisEnabled disabled)
+  let primaryOnlyCfg = meshCfg { secondaryRedisEnabled = False }
+  primaryKvResult <- findOneFromRedis primaryOnlyCfg whereClause
+  case primaryKvResult of
+    Right ([], []) -> do
+      -- Not found in primary Redis, check secondary Redis if enabled
+      if meshCfg.secondaryRedisEnabled && meshCfg.meshEnabled
+        then do
+          -- Check secondary Redis by treating it as primary (with secondaryRedisEnabled disabled)
+          let secondaryAsPrimaryCfg = meshCfg { kvRedis = meshCfg.kvRedisSecondary, secondaryRedisEnabled = False }
+          secondaryKvResult <- findOneFromRedis secondaryAsPrimaryCfg whereClause
+          processKvResult secondaryKvResult meshCfg.kvRedisSecondary updVals setClause
+        else updateInKVOrSQL Nothing updVals setClause
     Right ([], _) -> do
       L.logDebugT "modifyOneKV" ("Modifying nothing - Row is deleted already for " <> tableName @(table Identity))
       pure (KV, Right Nothing)
-    Right (kvLiveRows, _) -> do
-      findFromDBIfMatchingFailsRes <- findFromDBIfMatchingFails meshCfg replicaDbConfig whereClause kvLiveRows
-      case findFromDBIfMatchingFailsRes of
-        (_, Right [])        -> pure (KV, Right Nothing)
-        (SQL, Right [dbRow]) -> updateInKVOrSQL (Just dbRow) updVals setClause
-        (KV, Right [obj])   -> (KV,) . mapRight Just <$> (if isLive
-           then updateObjectRedis meshCfg updVals setClause False whereClause obj
-           else deleteObjectRedis meshCfg False whereClause obj)
-        (source, Right _)   -> do
-          L.logErrorT "modifyOneKV" "Found more than one record in redis - Modification failed"
-          pure (source, Left $ MUpdateFailed "Found more than one record in redis")
-        (source, Left err) -> pure (source, Left err)
+    Right (_, _) -> processKvResult primaryKvResult meshCfg.kvRedis updVals setClause
     Left err -> pure (KV, Left err)
+  
+  where
+    processKvResult :: MeshResult ([table Identity], [table Identity]) -> Text -> [(Text, A.Value)] -> [Set be table] -> m (Source, MeshResult (Maybe (table Identity)))
+    processKvResult kvResult redisConn updVals setClause = case kvResult of
+      Right ([], []) -> updateInKVOrSQL Nothing updVals setClause
+      Right ([], _) -> do
+        L.logDebugT "modifyOneKV" ("Modifying nothing - Row is deleted already for " <> tableName @(table Identity))
+        pure (KV, Right Nothing)
+      Right (kvLiveRows, _) -> do
+        findFromDBIfMatchingFailsRes <- findFromDBIfMatchingFails meshCfg replicaDbConfig whereClause kvLiveRows
+        case findFromDBIfMatchingFailsRes of
+          (_, Right [])        -> pure (KV, Right Nothing)
+          (SQL, Right [dbRow]) -> updateInKVOrSQL (Just dbRow) updVals setClause
+          (KV, Right [obj])   -> (KV,) . mapRight Just <$> (if isLive
+             then updateObjectRedis meshCfg redisConn updVals setClause False whereClause obj
+             else deleteObjectRedis meshCfg redisConn False whereClause obj)
+          (source, Right _)   -> do
+            L.logErrorT "modifyOneKV" ("Found more than one record in redis - Modification failed (redis: " <> redisConn <> ")")
+            pure (source, Left $ MUpdateFailed "Found more than one record in redis")
+          (source, Left err) -> pure (source, Left err)
+      Left err -> pure (KV, Left err)
 
-    where
-      alterImc :: Maybe (table Identity) -> m (MeshResult ())
-      alterImc mbRow = do
-        case (isLive, mbRow) of
-          (True, Nothing) -> fetchRowFromDBAndAlterImc replicaDbConfig meshCfg whereClause ImcInsert
-          (True, Just x) -> Right <$> pushToInMemConfigStream meshCfg ImcInsert x
-          (False, Nothing) ->
-              searchInMemoryCache meshCfg dbConf whereClause >>= (snd >>> \case
-                Left e -> return $ Left e
-                Right rs -> Right <$> mapM_ (pushToInMemConfigStream meshCfg ImcDelete) rs)
-          (False, Just x) -> Right <$> pushToInMemConfigStream meshCfg ImcDelete x
+    alterImc :: Maybe (table Identity) -> m (MeshResult ())
+    alterImc mbRow = do
+      case (isLive, mbRow) of
+        (True, Nothing) -> fetchRowFromDBAndAlterImc replicaDbConfig meshCfg whereClause ImcInsert
+        (True, Just x) -> Right <$> pushToInMemConfigStream meshCfg ImcInsert x
+        (False, Nothing) ->
+            searchInMemoryCache meshCfg dbConf whereClause >>= (snd >>> \case
+              Left e -> return $ Left e
+              Right rs -> Right <$> mapM_ (pushToInMemConfigStream meshCfg ImcDelete) rs)
+        (False, Just x) -> Right <$> pushToInMemConfigStream meshCfg ImcDelete x
 
-      runUpdateOrDelete setClause = do
-        case (isLive, updateWoReturning) of
+    runUpdateOrDelete setClause = do
+      case (isLive, updateWoReturning) of
           (True, True) -> do
             res <- updateOneSqlWoReturning dbConf setClause whereClause
             case res of
@@ -376,7 +395,7 @@ modifyOneKV dbConf replicaDbConfig meshCfg whereClause mbSetClause updateWoRetur
                   return $ Left $ UnexpectedError message
                 Left e -> return $ Left $ MDBError e
 
-      updateInKVOrSQL maybeRow updVals setClause = do
+    updateInKVOrSQL maybeRow updVals setClause = do
         if isRecachingEnabled && meshCfg.meshEnabled
           then do
             dbRes <- case maybeRow of
@@ -388,8 +407,8 @@ modifyOneKV dbConf replicaDbConfig meshCfg whereClause mbSetClause updateWoRetur
                 case reCacheDBRowsRes of
                   Left err -> return $ Left $ RedisError (show err <> "Primary key => " <> show (getLookupKeyByPKey meshCfg.redisKeyPrefix obj) <> " Secondary key => " <> show (getSecondaryLookupKeys meshCfg.redisKeyPrefix obj) <> " in updateInKVOrSQL")
                   Right _  -> mapRight Just <$> if isLive
-                    then updateObjectRedis meshCfg updVals setClause False whereClause obj
-                    else deleteObjectRedis meshCfg False whereClause obj
+                    then updateObjectRedis meshCfg meshCfg.kvRedis updVals setClause False whereClause obj
+                    else deleteObjectRedis meshCfg meshCfg.kvRedis False whereClause obj
               Right Nothing -> pure $ Right Nothing
               Left err -> pure $ Left err
           else (SQL,) <$> (do
@@ -441,8 +460,8 @@ updateObjectRedis :: forall beM be table m.
     -- Show (table Identity), --debugging purpose
     L.MonadFlow m
   ) =>
-  MeshConfig -> [(Text, A.Value)] -> [Set be table] -> Bool -> Where be table -> table Identity -> m (MeshResult (table Identity))
-updateObjectRedis meshCfg updVals setClauses addPrimaryKeyToWhereClause whereClause obj = do
+  MeshConfig -> Text -> [(Text, A.Value)] -> [Set be table] -> Bool -> Where be table -> table Identity -> m (MeshResult (table Identity))
+updateObjectRedis meshCfg redisConn updVals setClauses addPrimaryKeyToWhereClause whereClause obj = do
   configUpdateResult <- updateObjectInMemConfig meshCfg whereClause updVals obj
   when (isLeft configUpdateResult) $ L.logErrorT "MEMCONFIG_UPDATE_ERROR" (show configUpdateResult)
   case (updateModel @be @table) obj updVals of
@@ -466,7 +485,7 @@ updateObjectRedis meshCfg updVals setClauses addPrimaryKeyToWhereClause whereCla
           skeysUpdationRes <- modifySKeysRedis olderSkeys value
           case skeysUpdationRes of
             Right _ -> do
-              kvdbRes <- L.runKVDB meshCfg.kvRedis $ L.multiExecWithHash (encodeUtf8 shard) $ do
+              kvdbRes <- L.runKVDB redisConn $ L.multiExecWithHash (encodeUtf8 shard) $ do
                 _ <- L.xaddTx
                       (encodeUtf8 (meshCfg.ecRedisDBStream <> shard))
                       L.AutoID
@@ -498,17 +517,17 @@ updateObjectRedis meshCfg updVals setClauses addPrimaryKeyToWhereClause whereCla
 
     resetTTL Nothing = pure $ Right False
     resetTTL (Just key) = do
-      x <- L.rExpire meshCfg.kvRedis (fromString $ T.unpack key) meshCfg.redisTtl
+      x <- L.rExpire redisConn (fromString $ T.unpack key) meshCfg.redisTtl
       pure $ mapLeft MRedisError x
 
     deletePkeyFromSkey _ Nothing = pure $ Right 0
-    deletePkeyFromSkey pKey (Just key) = mapLeft MRedisError <$> L.sRemB meshCfg.kvRedis (fromString $ T.unpack key) [pKey]
+    deletePkeyFromSkey pKey (Just key) = mapLeft MRedisError <$> L.sRemB redisConn (fromString $ T.unpack key) [pKey]
 
     addPkeyToSkey :: ByteString -> Maybe Text -> m (MeshResult Bool)
     addPkeyToSkey _ Nothing = pure $ Right False
     addPkeyToSkey pKey (Just key) = do
-      _ <- L.rSadd meshCfg.kvRedis (fromString $ T.unpack key) [pKey]
-      mapLeft MRedisError <$> L.rExpireB meshCfg.kvRedis (fromString $ T.unpack key) meshCfg.redisTtl
+      _ <- L.rSadd redisConn (fromString $ T.unpack key) [pKey]
+      mapLeft MRedisError <$> L.rExpireB redisConn (fromString $ T.unpack key) meshCfg.redisTtl
 
     getSortedKeyAndValue :: Text -> [(Text,Text)] -> Maybe Text
     getSortedKeyAndValue tName kvTup = do
@@ -642,11 +661,11 @@ updateKVAndDBResults meshCfg whereClause eitherDbRows eitherKvRows mbUpdateVals 
             Left err -> return $ Left $ RedisError (show err <> "Primary key => " <> show (getLookupKeyByPKey meshCfg.redisKeyPrefix <$> uniqueDbRows) <> " Secondary key => " <> show (getSecondaryLookupKeys meshCfg.redisKeyPrefix <$> uniqueDbRows) <> " in updateKVAndDBResults")
             Right _  -> do
               let allRows = matchedKVLiveRows ++ uniqueDbRows
-              sequence <$> mapM (updateObjectRedis meshCfg updVals setClause True whereClause) allRows
+              sequence <$> mapM (updateObjectRedis meshCfg meshCfg.kvRedis updVals setClause True whereClause) allRows
         else do
           updateOrDelKVRowRes <- if isLive
-            then mapM (updateObjectRedis meshCfg updVals setClause True whereClause) matchedKVLiveRows
-            else mapM (deleteObjectRedis meshCfg True whereClause) matchedKVLiveRows
+            then mapM (updateObjectRedis meshCfg meshCfg.kvRedis updVals setClause True whereClause) matchedKVLiveRows
+            else mapM (deleteObjectRedis meshCfg meshCfg.kvRedis True whereClause) matchedKVLiveRows
           let kvres = foldEither updateOrDelKVRowRes
           case kvres of
             Left err -> return $ Left err
@@ -846,13 +865,24 @@ findOneFromRedis meshCfg whereClause = do
   case foldEither eitherKeyRes of
     Right keyRes -> do
       let lenKeyRes = lengthOfLists keyRes
-      allRowsRes <- foldEither <$> mapM (getDataFromPKeysRedis meshCfg) (mkUniq keyRes)
+      -- First try primary Redis (current cloud)
+      allRowsRes <- foldEither <$> mapM (getDataFromPKeysRedis meshCfg.kvRedis) (mkUniq keyRes)
       case allRowsRes of
         Right allRowsResPairList -> do
           let (allRowsResLiveListOfList, allRowsResDeadListOfList) = unzip allRowsResPairList
               total_length = secondaryKeyLength + lenKeyRes
           Metrics.incrementRedisCallMetric "REDIS_FIND_ONE" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit )
-          return $ Right (concat allRowsResLiveListOfList, concat allRowsResDeadListOfList)
+          -- If no results found in primary Redis and table is enabled in KV, check secondary cloud Redis
+          if null (concat allRowsResLiveListOfList) && null (concat allRowsResDeadListOfList) && meshCfg.meshEnabled && meshCfg.secondaryRedisEnabled
+            then do
+              secondaryRowsRes <- foldEither <$> mapM (getDataFromPKeysRedis meshCfg.kvRedisSecondary) (mkUniq keyRes)
+              case secondaryRowsRes of
+                Right secondaryRowsResPairList -> do
+                  let (secondaryLiveListOfList, secondaryDeadListOfList) = unzip secondaryRowsResPairList
+                  Metrics.incrementRedisCallMetric "REDIS_FIND_ONE_SECONDARY" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit )
+                  return $ Right (concat secondaryLiveListOfList, concat secondaryDeadListOfList)
+                Left err -> return $ Left err
+            else return $ Right (concat allRowsResLiveListOfList, concat allRowsResDeadListOfList)
         Left err -> return $ Left err
     Left err -> pure $ Left err
 
@@ -1142,7 +1172,7 @@ redisFindAll meshCfg whereClause = do
     Right keyRes -> do
       let allKeys = concat keyRes
       let lenKeyRes = length allKeys
-      allRowsRes <- (if isPipeliningEnabled then foldEither <$> mapM (getDataFromPKeysRedis' meshCfg) [(mkUniq allKeys)] else foldEither <$> mapM (getDataFromPKeysRedis meshCfg) (mkUniq keyRes))
+      allRowsRes <- (if isPipeliningEnabled then foldEither <$> mapM (getDataFromPKeysRedis' meshCfg) [(mkUniq allKeys)] else foldEither <$> mapM (getDataFromPKeysRedis meshCfg.kvRedis) (mkUniq keyRes))
       case allRowsRes of
         Right allRowsResPairList -> do
           let (allRowsResLiveListOfList, allRowsResDeadListOfList) = unzip allRowsResPairList
@@ -1167,8 +1197,8 @@ deleteObjectRedis :: forall table be beM m.
     -- Show (table Identity), --debugging purpose
     L.MonadFlow m
   ) =>
-  MeshConfig -> Bool -> Where be table -> table Identity -> m (MeshResult (table Identity))
-deleteObjectRedis meshCfg addPrimaryKeyToWhereClause whereClause obj = do
+  MeshConfig -> Text -> Bool -> Where be table -> table Identity -> m (MeshResult (table Identity))
+deleteObjectRedis meshCfg redisConn addPrimaryKeyToWhereClause whereClause obj = do
   time <- fromIntegral <$> L.getCurrentDateInMillis
   let pKeyText  = getLookupKeyByPKey meshCfg.redisKeyPrefix obj
       shard     = getShardedHashTag meshCfg.tableShardModRange pKeyText
@@ -1181,7 +1211,7 @@ deleteObjectRedis meshCfg addPrimaryKeyToWhereClause whereClause obj = do
           then do getDeleteQueryWithCompression (pKeyText <> shard) time meshCfg.meshDBName deleteCmd (getTableMappings @(table Identity)) (getTableName @(table Identity))
           else do pure $ BSL.toStrict $ A.encode $ getDeleteQuery (pKeyText <> shard) time meshCfg.meshDBName deleteCmd (getTableMappings @(table Identity)) 
 
-  kvDbRes <- L.runKVDB meshCfg.kvRedis $ L.multiExecWithHash (encodeUtf8 shard) $ do
+  kvDbRes <- L.runKVDB redisConn $ L.multiExecWithHash (encodeUtf8 shard) $ do
     _ <- L.xaddTx
           (encodeUtf8 (meshCfg.ecRedisDBStream <> shard))
           L.AutoID

@@ -103,6 +103,8 @@ data MeshConfig = MeshConfig
   , meshDBName      :: Text
   , ecRedisDBStream :: Text
   , kvRedis         :: Text
+  , kvRedisSecondary :: Text
+  , secondaryRedisEnabled :: Bool
   , redisTtl        :: L.KVDBDuration
   , kvHardKilled    :: Bool
   , tableShardModRange :: (Int, Int)
