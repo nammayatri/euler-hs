@@ -84,9 +84,9 @@ library
     EulerHS.Extra.URLSanitization
     EulerHS.Extra.Monitoring.Types
     EulerHS.Extra.Monitoring.Flow
+    EulerHS.Api
 
   other-modules:
-    EulerHS.Api
     EulerHS.BinaryString
     EulerHS.Common
     EulerHS.Extra.Language

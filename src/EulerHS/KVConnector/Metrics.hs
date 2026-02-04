@@ -11,6 +11,7 @@ import qualified EulerHS.Language as L
 import EulerHS.Options (OptionEntity)
 import EulerHS.Prelude
 import qualified Juspay.Extra.Config as Conf
+import EulerHS.Api (ApiTag(..))
 
 nominalDiffTimeToMilliseconds :: NominalDiffTime -> Double
 nominalDiffTimeToMilliseconds latency = realToFrac latency * 1000
@@ -30,7 +31,8 @@ incrementKVMetric handle metric dblog isLeftRes = do
 data KVMetricHandler = KVMetricHandler
   { kvCounter :: (KVMetric, Text, Operation, Source, Text, Text, Int, Integer, Bool, Bool) -> IO (),
     kvCalls :: (Text, Text, Text, Int, Bool, Bool) -> IO (),
-    compressionLatency :: (Text, Text, Text, NominalDiffTime) -> IO ()
+    compressionLatency :: (Text, Text, Text, NominalDiffTime) -> IO (),
+    handlerLatency :: (Text, Text, Double, Text, Text) -> IO ()
   }
 
 data KVMetric = KVAction
@@ -56,6 +58,10 @@ mkKVMetricHandler = do
       ( \case
           (tag, action, model, latency) ->
             observe (metrics </> #kv_compression_latency_observer) (nominalDiffTimeToMilliseconds latency) tag action model
+      )
+      ( \case
+          (handler, model, totalLatency, redisCluster, apiTag) ->
+            observe (metrics </> #kv_handler_latency) totalLatency handler model redisCluster apiTag
       )
 
 kv_compression_latency_observer =
@@ -126,7 +132,17 @@ collectionLock =
     .> kvRedis_soft_db_limit_exceeded
     .> kvRedis_hard_db_limit_exceeded
     .> kv_compression_latency_observer
+    .> kv_handler_latency_observe
     .> MNil
+
+
+kv_handler_latency_observe =
+  histogram #kv_handler_latency
+    .& lbl @"handler" @Text
+    .& lbl @"model" @Text
+    .& lbl @"redis_cluster" @Text
+    .& lbl @"api_tag" @Text
+    .& build
 
 ---------------------------------------------------------
 
@@ -175,3 +191,20 @@ logCompressionLatencyMetrics action model latency = do
       let tag = "KvCompressionMetrics"
       logKVCompressionLatencyMetrics val tag action model latency
     Nothing -> pure ()
+
+incrementKVHandlerLatencyMetric :: (HasCallStack, L.MonadFlow m) => Text -> Text -> Double -> Text -> m ()
+incrementKVHandlerLatencyMetric handler model totalLatency redisCluster = when isKVMetricEnabled $ do
+  env <- L.getOption KVMetricCfg
+  apiTag <- fromMaybe "UNKNOWN" <$> L.getOptionLocal ApiTag
+  case env of
+    Just val -> L.runIO $ handlerLatency val (handler, model, totalLatency, redisCluster, apiTag)
+    Nothing -> pure ()
+
+withKVLatencyMetric :: (HasCallStack, L.MonadFlow m) => Text -> Text -> Text -> m a -> m a
+withKVLatencyMetric handler model redisCluster action = do
+  startTime <- L.getCurrentDateInMillis
+  result <- action
+  endTime <- L.getCurrentDateInMillis
+  let totalLatency = fromIntegral (endTime - startTime)
+  incrementKVHandlerLatencyMetric handler model totalLatency redisCluster
+  pure result

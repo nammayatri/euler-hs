@@ -308,7 +308,7 @@ modifyOneKV :: forall be table beM m.
   m (Source, MeshResult (Maybe (table Identity)))
 modifyOneKV dbConf replicaDbConfig meshCfg whereClause mbSetClause updateWoReturning isLive = do
   let setClause = fromMaybe [] mbSetClause
-      updVals = jsonKeyValueUpdates V1 setClause
+      updVals = jsonKeyValueUpdates V1 setClause  
   -- First check primary Redis only (with secondaryRedisEnabled disabled)
   let primaryOnlyCfg = meshCfg { secondaryRedisEnabled = False }
   primaryKvResult <- findOneFromRedis primaryOnlyCfg whereClause
@@ -327,7 +327,7 @@ modifyOneKV dbConf replicaDbConfig meshCfg whereClause mbSetClause updateWoRetur
       pure (KV, Right Nothing)
     Right (_, _) -> processKvResult primaryKvResult meshCfg.kvRedis updVals setClause
     Left err -> pure (KV, Left err)
-  
+    
   where
     processKvResult :: MeshResult ([table Identity], [table Identity]) -> Text -> [(Text, A.Value)] -> [Set be table] -> m (Source, MeshResult (Maybe (table Identity)))
     processKvResult kvResult redisConn updVals setClause = case kvResult of
@@ -462,40 +462,45 @@ updateObjectRedis :: forall beM be table m.
   ) =>
   MeshConfig -> Text -> [(Text, A.Value)] -> [Set be table] -> Bool -> Where be table -> table Identity -> m (MeshResult (table Identity))
 updateObjectRedis meshCfg redisConn updVals setClauses addPrimaryKeyToWhereClause whereClause obj = do
-  configUpdateResult <- updateObjectInMemConfig meshCfg whereClause updVals obj
-  when (isLeft configUpdateResult) $ L.logErrorT "MEMCONFIG_UPDATE_ERROR" (show configUpdateResult)
-  case (updateModel @be @table) obj updVals of
-    Left err -> return $ Left err
-    Right updatedModel -> do
-      time <- fromIntegral <$> L.getCurrentDateInMillis
-      let pKeyText  = getLookupKeyByPKey meshCfg.redisKeyPrefix obj
-          shard     = getShardedHashTag meshCfg.tableShardModRange pKeyText
-          pKey      = fromString . T.unpack $ pKeyText <> shard
-          updateCmd = if addPrimaryKeyToWhereClause
-                        then getDbUpdateCommandJsonWithPrimaryKey (getTableName @(table Identity)) setClauses obj whereClause
-                        else getDbUpdateCommandJson (getTableName @(table Identity)) setClauses whereClause
+  let modelName = tableName @(table Identity)
+      clusterName = if redisConn == meshCfg.kvRedisSecondary then "secondaryCluster" else "primaryCluster"
+  
+  Metrics.withKVLatencyMetric "REDIS_UPDATE" modelName clusterName $ do
+    configUpdateResult <- updateObjectInMemConfig meshCfg whereClause updVals obj
+    when (isLeft configUpdateResult) $ L.logErrorT "MEMCONFIG_UPDATE_ERROR" (show configUpdateResult)
+    case (updateModel @be @table) obj updVals of
+      Left err -> return $ Left err
+      Right updatedModel -> do
+        time <- fromIntegral <$> L.getCurrentDateInMillis
+        let pKeyText  = getLookupKeyByPKey meshCfg.redisKeyPrefix obj
+            shard     = getShardedHashTag meshCfg.tableShardModRange pKeyText
+            pKey      = fromString . T.unpack $ pKeyText <> shard
+            updateCmd = if addPrimaryKeyToWhereClause
+                          then getDbUpdateCommandJsonWithPrimaryKey (getTableName @(table Identity)) setClauses obj whereClause
+                          else getDbUpdateCommandJson (getTableName @(table Identity)) setClauses whereClause
 
-      qCmd <- if isCompressionAllowed
-        then do getUpdateQueryWithCompression (pKeyText <> shard) time meshCfg.meshDBName updateCmd (getTableMappings @(table Identity)) updatedModel (getTableName @(table Identity)) meshCfg.forceDrainToDB
-        else do pure $ BSL.toStrict $ A.encode $ getUpdateQuery (pKeyText <> shard) time meshCfg.meshDBName updateCmd (getTableMappings @(table Identity)) updatedModel meshCfg.forceDrainToDB
+        qCmd <- if isCompressionAllowed
+          then do getUpdateQueryWithCompression (pKeyText <> shard) time meshCfg.meshDBName updateCmd (getTableMappings @(table Identity)) updatedModel (getTableName @(table Identity)) meshCfg.forceDrainToDB
+          else do pure $ BSL.toStrict $ A.encode $ getUpdateQuery (pKeyText <> shard) time meshCfg.meshDBName updateCmd (getTableMappings @(table Identity)) updatedModel meshCfg.forceDrainToDB
  
-      case resultToEither $ A.fromJSON updatedModel of
-        Right value -> do
-          let olderSkeys = map (\(SKey s) -> s) (secondaryKeysFiltered obj)
-          skeysUpdationRes <- modifySKeysRedis olderSkeys value
-          case skeysUpdationRes of
-            Right _ -> do
-              kvdbRes <- L.runKVDB redisConn $ L.multiExecWithHash (encodeUtf8 shard) $ do
-                _ <- L.xaddTx
-                      (encodeUtf8 (meshCfg.ecRedisDBStream <> shard))
-                      L.AutoID
-                      [("command", qCmd)]
-                L.setexTx pKey meshCfg.redisTtl (BSL.toStrict $ Encoding.encode_ meshCfg.cerealEnabled value)
-              case kvdbRes of
-                Right _ -> pure $ Right value
-                Left err -> pure $ Left $ RedisError (show err <> "Primary key => " <> show pKey <> " Secondary key => " <> show (getSecondaryLookupKeys meshCfg.redisKeyPrefix value) <> " in updateObjectRedis")
-            Left err -> pure $ Left err
-        Left err -> pure $ Left $ MDecodingError err
+        case resultToEither $ A.fromJSON updatedModel of
+          Right value -> do
+            let olderSkeys = map (\(SKey s) -> s) (secondaryKeysFiltered obj)
+            skeysUpdationRes <- modifySKeysRedis olderSkeys value
+            case skeysUpdationRes of
+              Right _ -> do
+                kvdbRes <- L.runKVDB redisConn $ L.multiExecWithHash (encodeUtf8 shard) $ do
+                  _ <- L.xaddTx
+                        (encodeUtf8 (meshCfg.ecRedisDBStream <> shard))
+                        L.AutoID
+                        [("command", qCmd)]
+                  L.setexTx pKey meshCfg.redisTtl (BSL.toStrict $ Encoding.encode_ meshCfg.cerealEnabled value)
+                
+                case kvdbRes of
+                  Right _ -> pure $ Right value
+                  Left err -> pure $ Left $ RedisError (show err <> "Primary key => " <> show pKey <> " Secondary key => " <> show (getSecondaryLookupKeys meshCfg.redisKeyPrefix value) <> " in updateObjectRedis")
+              Left err -> pure $ Left err
+          Left err -> pure $ Left $ MDecodingError err
 
   where
     modifySKeysRedis :: [[(Text, Text)]] -> table Identity -> m (MeshResult (table Identity)) -- TODO: Optimise this logic
@@ -987,30 +992,36 @@ findOneFromRedis meshCfg whereClause = do
       keyHashMap = keyMap @(table Identity)
       andCombinationsFiltered = mkUniq $ filterPrimaryAndSecondaryKeys keyHashMap <$> andCombinations
       secondaryKeyLength = sum $ getSecondaryKeyLength keyHashMap <$> andCombinationsFiltered
-  eitherKeyRes <- mapM (getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap) andCombinationsFiltered
-  case foldEither eitherKeyRes of
-    Right keyRes -> do
-      let lenKeyRes = lengthOfLists keyRes
-      -- First try primary Redis (current cloud)
-      allRowsRes <- foldEither <$> mapM (getDataFromPKeysRedis meshCfg.kvRedis) (mkUniq keyRes)
-      case allRowsRes of
-        Right allRowsResPairList -> do
-          let (allRowsResLiveListOfList, allRowsResDeadListOfList) = unzip allRowsResPairList
-              total_length = secondaryKeyLength + lenKeyRes
-          Metrics.incrementRedisCallMetric "REDIS_FIND_ONE" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit )
-          -- If no results found in primary Redis and table is enabled in KV, check secondary cloud Redis
-          if null (concat allRowsResLiveListOfList) && null (concat allRowsResDeadListOfList) && meshCfg.meshEnabled && meshCfg.secondaryRedisEnabled
-            then do
-              secondaryRowsRes <- foldEither <$> mapM (getDataFromPKeysRedis meshCfg.kvRedisSecondary) (mkUniq keyRes)
-              case secondaryRowsRes of
-                Right secondaryRowsResPairList -> do
-                  let (secondaryLiveListOfList, secondaryDeadListOfList) = unzip secondaryRowsResPairList
-                  Metrics.incrementRedisCallMetric "REDIS_FIND_ONE_SECONDARY" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit )
-                  return $ Right (concat secondaryLiveListOfList, concat secondaryDeadListOfList)
-                Left err -> return $ Left err
-            else return $ Right (concat allRowsResLiveListOfList, concat allRowsResDeadListOfList)
-        Left err -> return $ Left err
-    Left err -> pure $ Left err
+      clusterName = if meshCfg.kvRedis == meshCfg.kvRedisSecondary then "secondaryCluster" else "primaryCluster"
+  
+  Metrics.withKVLatencyMetric "REDIS_FIND_ONE" modelName clusterName $ do
+    eitherKeyRes <- mapM (getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap) andCombinationsFiltered
+    result <- case foldEither eitherKeyRes of
+      Right keyRes -> do
+        let lenKeyRes = lengthOfLists keyRes
+        allRowsRes <- foldEither <$> mapM (getDataFromPKeysRedis meshCfg.kvRedis) (mkUniq keyRes)
+        case allRowsRes of
+          Right allRowsResPairList -> do
+            let (allRowsResLiveListOfList, allRowsResDeadListOfList) = unzip allRowsResPairList
+                total_length = secondaryKeyLength + lenKeyRes
+            Metrics.incrementRedisCallMetric "REDIS_FIND_ONE" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit )
+            -- If no results found in primary Redis and table is enabled in KV, check secondary cloud Redis
+            if null (concat allRowsResLiveListOfList) && null (concat allRowsResDeadListOfList) && meshCfg.meshEnabled && meshCfg.secondaryRedisEnabled
+              then do
+                Metrics.withKVLatencyMetric "REDIS_FIND_ONE" modelName "secondaryCluster" $ do
+                  secondaryRowsRes <- foldEither <$> mapM (getDataFromPKeysRedis meshCfg.kvRedisSecondary) (mkUniq keyRes)
+                  case secondaryRowsRes of
+                    Right secondaryRowsResPairList -> do
+                      let (secondaryLiveListOfList, secondaryDeadListOfList) = unzip secondaryRowsResPairList
+                      Metrics.incrementRedisCallMetric "REDIS_FIND_ONE_SECONDARY" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit )
+                      return (Right (concat secondaryLiveListOfList, concat secondaryDeadListOfList), True)
+                    Left err -> return (Left err, True)
+              else
+                return (Right (concat allRowsResLiveListOfList, concat allRowsResDeadListOfList), False)
+          Left err -> return (Left err, False)
+      Left err -> pure (Left err, False)
+    
+    pure $ fst result
 
 findOneFromDB :: forall be table beM m.
   ( HasCallStack,
@@ -1127,7 +1138,7 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
             ! #offset mbOffset
             ! defaults)
       mapLeft MDBError <$> runQuery dbConf findAllQuery
-    where
+  where
       applyOptions :: Int -> [table Identity] -> [table Identity]
       applyOptions shift rows = do
         let resWithoutLimit = case orderBy of
@@ -1324,6 +1335,7 @@ findAllWithKVAndConditionalDBInternal :: forall be table beM m.
   m (MeshResult [table Identity])
 findAllWithKVAndConditionalDBInternal dbConf meshCfg whereClause orderBy = do
   let isDisabled = meshCfg.kvHardKilled
+  
   if not isDisabled
     then do
       -- Find from both Redis instances if secondary is enabled
@@ -1410,20 +1422,25 @@ redisFindAll meshCfg whereClause = do
       keyHashMap = keyMap @(table Identity)
       andCombinationsFiltered = mkUniq $ filterPrimaryAndSecondaryKeys keyHashMap <$> andCombinations
       secondaryKeyLength = sum $ getSecondaryKeyLength keyHashMap <$> andCombinationsFiltered
-  eitherKeyRes <- mapM (getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap) andCombinationsFiltered
-  case foldEither eitherKeyRes of
-    Right keyRes -> do
-      let allKeys = concat keyRes
-      let lenKeyRes = length allKeys
-      allRowsRes <- (if isPipeliningEnabled then foldEither <$> mapM (getDataFromPKeysRedis' meshCfg) [(mkUniq allKeys)] else foldEither <$> mapM (getDataFromPKeysRedis meshCfg.kvRedis) (mkUniq keyRes))
-      case allRowsRes of
-        Right allRowsResPairList -> do
-          let (allRowsResLiveListOfList, allRowsResDeadListOfList) = unzip allRowsResPairList
-              total_length = secondaryKeyLength + lenKeyRes
-          Metrics.incrementRedisCallMetric "REDIS_FIND_ALL" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit ) 
-          return $ Right (concat allRowsResLiveListOfList, concat allRowsResDeadListOfList)
-        Left err -> return $ Left err
-    Left err -> pure $ Left err
+      clusterName = if meshCfg.kvRedis == meshCfg.kvRedisSecondary then "secondaryCluster" else "primaryCluster"
+  
+  Metrics.withKVLatencyMetric "REDIS_FIND_ALL" modelName clusterName $ do
+    eitherKeyRes <- mapM (getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap) andCombinationsFiltered
+    result <- case foldEither eitherKeyRes of
+      Right keyRes -> do
+        let allKeys = concat keyRes
+        let lenKeyRes = length allKeys
+        allRowsRes <- (if isPipeliningEnabled then foldEither <$> mapM (getDataFromPKeysRedis' meshCfg) [(mkUniq allKeys)] else foldEither <$> mapM (getDataFromPKeysRedis meshCfg.kvRedis) (mkUniq keyRes))
+        let total_length = secondaryKeyLength + lenKeyRes
+        case allRowsRes of
+          Right allRowsResPairList -> do
+            let (allRowsResLiveListOfList, allRowsResDeadListOfList) = unzip allRowsResPairList
+            Metrics.incrementRedisCallMetric "REDIS_FIND_ALL" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit )
+            return $ Right (concat allRowsResLiveListOfList, concat allRowsResDeadListOfList)
+          Left err -> return $ Left err
+      Left err -> pure $ Left err
+    
+    pure result
 
 deleteObjectRedis :: forall table be beM m.
   ( HasCallStack,
