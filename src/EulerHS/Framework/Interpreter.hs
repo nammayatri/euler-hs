@@ -88,8 +88,9 @@ import           System.Process (readCreateProcess, shell)
 import           Unsafe.Coerce (unsafeCoerce)
 import qualified EulerHS.Extra.Monitoring.Flow as EEMF
 import qualified Data.Bool as Bool
-import EulerHS.Extra.Monitoring.Types 
-import EulerHS.Options
+import           EulerHS.Extra.Monitoring.Types
+import           EulerHS.Options
+import qualified EulerHS.KVConnector.Metrics as Metrics
 
 connect :: DBConfig be -> IO (DBResult (SqlConn be))
 connect cfg = do
