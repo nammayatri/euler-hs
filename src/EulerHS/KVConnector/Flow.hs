@@ -1003,10 +1003,17 @@ findOneFromRedis meshCfg whereClause = do
         case allRowsRes of
           Right allRowsResPairList -> do
             let (allRowsResLiveListOfList, allRowsResDeadListOfList) = unzip allRowsResPairList
+                primaryLiveRows = concat allRowsResLiveListOfList
+                primaryDeadRows = concat allRowsResDeadListOfList
                 total_length = secondaryKeyLength + lenKeyRes
             Metrics.incrementRedisCallMetric "REDIS_FIND_ONE" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit )
-            -- If no results found in primary Redis and table is enabled in KV, check secondary cloud Redis
-            if null (concat allRowsResLiveListOfList) && null (concat allRowsResDeadListOfList) && meshCfg.meshEnabled && meshCfg.secondaryRedisEnabled
+            -- Apply WHERE clause to primary results to check if we have any matches
+            let primaryMatching = findAllMatching whereClause primaryLiveRows
+            -- Check secondary cloud Redis if:
+            -- 1. No matching rows in primary (even if raw rows exist)
+            -- 2. No dead rows (deleted data should not trigger fallback)
+            -- 3. Mesh and secondary enabled
+            if null primaryMatching && null primaryDeadRows && meshCfg.meshEnabled && meshCfg.secondaryRedisEnabled
               then do
                 Metrics.withKVLatencyMetric "REDIS_FIND_ONE" modelName "secondaryCluster" $ do
                   secondaryRowsRes <- foldEither <$> mapM (getDataFromPKeysRedis meshCfg.kvRedisSecondary) (mkUniq keyRes)
@@ -1017,7 +1024,7 @@ findOneFromRedis meshCfg whereClause = do
                       return (Right (concat secondaryLiveListOfList, concat secondaryDeadListOfList), True)
                     Left err -> return (Left err, True)
               else
-                return (Right (concat allRowsResLiveListOfList, concat allRowsResDeadListOfList), False)
+                return (Right (primaryLiveRows, primaryDeadRows), False)
           Left err -> return (Left err, False)
       Left err -> pure (Left err, False)
     
