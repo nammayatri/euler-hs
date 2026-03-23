@@ -635,22 +635,26 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = 
       case HM.lookup k keyHashMap of
         Just True -> pure $ Right $ Just [fromString $ T.unpack (constructedKey <> getShardedHashTag meshCfg.tableShardModRange constructedKey)]
         Just False -> do
-          -- Check primary Redis first
-          primaryRes <- L.runKVDB meshCfg.kvRedis $ L.smembers (fromString $ T.unpack constructedKey)
-          case primaryRes of
-            Left e -> pure $ Left $ RedisError $ (show e <> " for key: " <> show constructedKey)
-            Right primaryKeys -> do
-              -- If secondary Redis is enabled, also check it and merge results
-              if meshCfg.secondaryRedisEnabled && meshCfg.meshEnabled
-                then do
-                  secondaryRes <- L.runKVDB meshCfg.kvRedisSecondary $ L.smembers (fromString $ T.unpack constructedKey)
-                  case secondaryRes of
-                    Left e -> pure $ Left $ RedisError $ (show e <> " for secondary key: " <> show constructedKey)
-                    Right secondaryKeys -> do
-                      -- Merge primary keys from both Redis instances (union)
-                      let mergedKeys = mkUniq (primaryKeys ++ secondaryKeys)
-                      pure $ Right $ Just mergedKeys
-                else pure $ Right $ Just primaryKeys
+          let sKey = fromString $ T.unpack constructedKey
+          if meshCfg.secondaryRedisEnabled && meshCfg.meshEnabled
+            then do
+              -- Fetch from both Redis clusters in parallel
+              primaryAwaitable <- L.awaitableFork $ L.runKVDB meshCfg.kvRedis $ L.smembers sKey
+              secondaryAwaitable <- L.awaitableFork $ L.runKVDB meshCfg.kvRedisSecondary $ L.smembers sKey
+              primaryAwaitRes <- L.await Nothing primaryAwaitable
+              secondaryAwaitRes <- L.await Nothing secondaryAwaitable
+              case (primaryAwaitRes, secondaryAwaitRes) of
+                (Right (Right primaryKeys), Right (Right secondaryKeys)) ->
+                  pure $ Right $ Just $ mkUniq (primaryKeys ++ secondaryKeys)
+                (Right (Left e), _) -> pure $ Left $ RedisError $ (show e <> " for key: " <> show constructedKey)
+                (_, Right (Left e)) -> pure $ Left $ RedisError $ (show e <> " for secondary key: " <> show constructedKey)
+                (Left e, _) -> pure $ Left $ RedisError $ (show e <> " for key: " <> show constructedKey)
+                (_, Left e) -> pure $ Left $ RedisError $ (show e <> " for secondary key: " <> show constructedKey)
+            else do
+              primaryRes <- L.runKVDB meshCfg.kvRedis $ L.smembers sKey
+              case primaryRes of
+                Left e -> pure $ Left $ RedisError $ (show e <> " for key: " <> show constructedKey)
+                Right primaryKeys -> pure $ Right $ Just primaryKeys
         _ -> pure $ Right Nothing
 
     intersectList (x : y : xs) = intersectList (intersect x y : xs)
