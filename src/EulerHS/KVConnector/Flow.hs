@@ -1021,7 +1021,7 @@ findOneFromRedis meshCfg whereClause = do
                     Right secondaryRowsResPairList -> do
                       let (secondaryLiveListOfList, secondaryDeadListOfList) = unzip secondaryRowsResPairList
                       Metrics.incrementRedisCallMetric "REDIS_FIND_ONE_SECONDARY" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit )
-                      return (Right (concat secondaryLiveListOfList, concat secondaryDeadListOfList), True)
+                      return (Right (concat secondaryLiveListOfList ++ primaryLiveRows, concat secondaryDeadListOfList ++ primaryDeadRows), True)
                     Left err -> return (Left err, True)
               else
                 return (Right (primaryLiveRows, primaryDeadRows), False)
