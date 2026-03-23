@@ -971,7 +971,7 @@ findFromDBIfMatchingFails meshCfg dbConf whereClause kvRows = do
         _                  -> pure (SQL, Right [])
     xs -> pure (KV, Right xs)
 
--- TODO: Once record matched in redis stop and return it
+-- Early return optimization: stop fetching once a matching row is found
 findOneFromRedis :: forall be table beM m.
   ( HasCallStack,
     BeamRuntime be beM,
@@ -986,49 +986,81 @@ findOneFromRedis :: forall be table beM m.
   ) =>
   MeshConfig -> Where be table -> m (MeshResult ([table Identity], [table Identity]))
 findOneFromRedis meshCfg whereClause = do
-  let keyAndValueCombinations = getFieldsAndValuesFromClause meshModelTableEntityDescriptor (And whereClause)
-      andCombinations = map (uncurry zip . applyFPair (map (T.intercalate "_") . sortOn (Down . length) . nonEmptySubsequences) . unzip . sort) keyAndValueCombinations
-      modelName = tableName @(table Identity)
+  let modelName = tableName @(table Identity)
       keyHashMap = keyMap @(table Identity)
-      andCombinationsFiltered = mkUniq $ filterPrimaryAndSecondaryKeys keyHashMap <$> andCombinations
+      keyAndValueCombinations = getFieldsAndValuesFromClause meshModelTableEntityDescriptor (And whereClause)
+      -- Pre-filter to only indexed fields before generating subsequences (avoids 2^n blowup on non-indexed fields)
+      filteredKVCombinations = filter (not . null) $ map (filter (\(k, _) -> HM.member k keyHashMap)) keyAndValueCombinations
+      andCombinations = map (uncurry zip . applyFPair (map (T.intercalate "_") . sortOn (Down . length) . nonEmptySubsequences) . unzip . sort) filteredKVCombinations
+      andCombinationsFiltered = mkUniq andCombinations
       secondaryKeyLength = sum $ getSecondaryKeyLength keyHashMap <$> andCombinationsFiltered
       clusterName = if meshCfg.kvRedis == meshCfg.kvRedisSecondary then "secondaryCluster" else "primaryCluster"
-  
+
   Metrics.withKVLatencyMetric "REDIS_FIND_ONE" modelName clusterName $ do
     eitherKeyRes <- mapM (getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap) andCombinationsFiltered
     result <- case foldEither eitherKeyRes of
       Right keyRes -> do
-        let lenKeyRes = lengthOfLists keyRes
-        allRowsRes <- foldEither <$> mapM (getDataFromPKeysRedis meshCfg.kvRedis) (mkUniq keyRes)
-        case allRowsRes of
-          Right allRowsResPairList -> do
-            let (allRowsResLiveListOfList, allRowsResDeadListOfList) = unzip allRowsResPairList
-                primaryLiveRows = concat allRowsResLiveListOfList
-                primaryDeadRows = concat allRowsResDeadListOfList
-                total_length = secondaryKeyLength + lenKeyRes
-            Metrics.incrementRedisCallMetric "REDIS_FIND_ONE" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit )
-            -- Apply WHERE clause to primary results to check if we have any matches
-            let primaryMatching = findAllMatching whereClause primaryLiveRows
-            -- Check secondary cloud Redis if:
-            -- 1. No matching rows in primary (even if raw rows exist)
-            -- 2. No dead rows (deleted data should not trigger fallback)
-            -- 3. Mesh and secondary enabled
-            if null primaryMatching && null primaryDeadRows && meshCfg.meshEnabled && meshCfg.secondaryRedisEnabled
-              then do
-                Metrics.withKVLatencyMetric "REDIS_FIND_ONE" modelName "secondaryCluster" $ do
-                  secondaryRowsRes <- foldEither <$> mapM (getDataFromPKeysRedis meshCfg.kvRedisSecondary) (mkUniq keyRes)
-                  case secondaryRowsRes of
-                    Right secondaryRowsResPairList -> do
-                      let (secondaryLiveListOfList, secondaryDeadListOfList) = unzip secondaryRowsResPairList
-                      Metrics.incrementRedisCallMetric "REDIS_FIND_ONE_SECONDARY" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit )
-                      return (Right (concat secondaryLiveListOfList ++ primaryLiveRows, concat secondaryDeadListOfList ++ primaryDeadRows), True)
-                    Left err -> return (Left err, True)
+        let allPKeys = mkUniq $ concat keyRes
+            lenKeyRes = length allPKeys
+        -- Fetch keys one at a time with early return on match
+        (primaryLiveRows, primaryDeadRows, matchFound) <- fetchWithEarlyReturn meshCfg.kvRedis allPKeys
+        let total_length = secondaryKeyLength + lenKeyRes
+        Metrics.incrementRedisCallMetric "REDIS_FIND_ONE" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit )
+        -- If match already found in primary, no need to check secondary
+        if matchFound
+          then return (Right (primaryLiveRows, primaryDeadRows), False)
+          else if null primaryLiveRows && null primaryDeadRows && meshCfg.meshEnabled && meshCfg.secondaryRedisEnabled
+            then do
+              Metrics.withKVLatencyMetric "REDIS_FIND_ONE" modelName "secondaryCluster" $ do
+                (secondaryLiveRows, secondaryDeadRows, _) <- fetchWithEarlyReturn meshCfg.kvRedisSecondary allPKeys
+                Metrics.incrementRedisCallMetric "REDIS_FIND_ONE_SECONDARY" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit )
+                return (Right (secondaryLiveRows ++ primaryLiveRows, secondaryDeadRows ++ primaryDeadRows), True)
+            else if null primaryLiveRows && not (null primaryDeadRows)
+              then return (Right (primaryLiveRows, primaryDeadRows), False)
               else
-                return (Right (primaryLiveRows, primaryDeadRows), False)
-          Left err -> return (Left err, False)
+                -- Primary has live rows but none matched — still need to preserve them for primary key protection
+                -- Check secondary for potential matches
+                if meshCfg.meshEnabled && meshCfg.secondaryRedisEnabled
+                  then do
+                    Metrics.withKVLatencyMetric "REDIS_FIND_ONE" modelName "secondaryCluster" $ do
+                      (secondaryLiveRows, secondaryDeadRows, _) <- fetchWithEarlyReturn meshCfg.kvRedisSecondary allPKeys
+                      Metrics.incrementRedisCallMetric "REDIS_FIND_ONE_SECONDARY" modelName total_length (total_length > redisCallsSoftLimit ) (total_length > redisCallsHardLimit )
+                      return (Right (secondaryLiveRows ++ primaryLiveRows, secondaryDeadRows ++ primaryDeadRows), True)
+                  else return (Right (primaryLiveRows, primaryDeadRows), False)
       Left err -> pure (Left err, False)
-    
+
     pure $ fst result
+
+  where
+    -- Fetch primary keys one at a time, stop as soon as a matching row is found
+    -- Returns (liveRows, deadRows, matchFound)
+    -- When matchFound=True, liveRows contains at least one row matching whereClause
+    -- When matchFound=False, liveRows contains ALL fetched rows (needed for primary key protection)
+    fetchWithEarlyReturn :: Text -> [ByteString] -> m ([table Identity], [table Identity], Bool)
+    fetchWithEarlyReturn _ [] = pure ([], [], False)
+    fetchWithEarlyReturn redisConn pKeys = go pKeys [] []
+      where
+        go [] liveAcc deadAcc = pure (liveAcc, deadAcc, False)
+        go (pKey : rest) liveAcc deadAcc = do
+          res <- L.runKVDB redisConn $ L.get (fromString $ T.unpack $ decodeUtf8 pKey)
+          case res of
+            Right (Just r) -> do
+              let (decodeResult, isLive) = decodeToField $ BSL.fromChunks [r]
+              case decodeResult of
+                Right decodeRes ->
+                  if isLive
+                    then do
+                      let newLive = decodeRes ++ liveAcc
+                      -- Check if any newly decoded row matches the WHERE clause
+                      if any (`matchWhereClause` whereClause) decodeRes
+                        then pure (newLive, deadAcc, True)  -- Early return: match found
+                        else go rest newLive deadAcc
+                    else go rest liveAcc (decodeRes ++ deadAcc)
+                Left e -> do
+                  L.logErrorT "fetchWithEarlyReturn" $ "Error while decoding: " <> show e
+                  go rest liveAcc deadAcc
+            Right Nothing -> go rest liveAcc deadAcc
+            Left e -> pure (liveAcc, deadAcc, False)  -- On error, return what we have
 
 findOneFromDB :: forall be table beM m.
   ( HasCallStack,
@@ -1089,25 +1121,30 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
                   matchedKVDeadRows = deduplicateKVDeadRows meshCfg primaryKvDeadRows secondaryKvDeadRows
                   offset = fromMaybe 0 mbOffset
                   shift = length matchedKVLiveRows + length matchedKVDeadRows
-                  updatedOffset = max (offset - shift) 0
-                  findAllQueryUpdated = DB.findRows (sqlSelect'
-                    ! #where_ whereClause
-                    ! #orderBy (if isJust orderBy then Just [DMaybe.fromJust orderBy] else Nothing)
-                    ! #limit ((shift +) <$> mbLimit)
-                    ! #offset (Just updatedOffset) -- Offset is 0 in case mbOffset Nothing
-                    ! defaults)
-              dbRes <- runQuery dbConf findAllQueryUpdated
-              case dbRes of
-                Left err -> pure $ Left $ MDBError err
-                Right [] -> pure $ Right $ applyOptions offset matchedKVLiveRows
-                Right dbRows -> do
-                  let allKVRows = allKvLiveRows ++ allKvDeadRows
-                      mergedRows = matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRows allKVRows
-                  if isJust mbOffset
-                    then do
-                      let noOfRowsFelledLeftSide = calculateLeftFelledRedisEntries matchedKVLiveRows dbRows
-                      pure $ Right $ applyOptions ((if updatedOffset == 0 then offset else shift) - noOfRowsFelledLeftSide) mergedRows
-                    else pure $ Right $ applyOptions 0 mergedRows
+                  -- Skip DB query if Redis has enough matched rows for the requested limit, no offset, and no ordering
+                  kvHasSufficientData = not (null matchedKVLiveRows) && offset == 0 && isNothing orderBy && maybe False (<= length matchedKVLiveRows) mbLimit
+              if kvHasSufficientData
+                then pure $ Right $ applyOptions 0 matchedKVLiveRows
+                else do
+                  let updatedOffset = max (offset - shift) 0
+                      findAllQueryUpdated = DB.findRows (sqlSelect'
+                        ! #where_ whereClause
+                        ! #orderBy (if isJust orderBy then Just [DMaybe.fromJust orderBy] else Nothing)
+                        ! #limit ((shift +) <$> mbLimit)
+                        ! #offset (Just updatedOffset)
+                        ! defaults)
+                  dbRes <- runQuery dbConf findAllQueryUpdated
+                  case dbRes of
+                    Left err -> pure $ Left $ MDBError err
+                    Right [] -> pure $ Right $ applyOptions offset matchedKVLiveRows
+                    Right dbRows -> do
+                      let allKVRows = allKvLiveRows ++ allKvDeadRows
+                          mergedRows = matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRows allKVRows
+                      if isJust mbOffset
+                        then do
+                          let noOfRowsFelledLeftSide = calculateLeftFelledRedisEntries matchedKVLiveRows dbRows
+                          pure $ Right $ applyOptions ((if updatedOffset == 0 then offset else shift) - noOfRowsFelledLeftSide) mergedRows
+                        else pure $ Right $ applyOptions 0 mergedRows
             Left err -> pure $ Left err
         else do
           -- Original single Redis logic
@@ -1118,24 +1155,29 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
                   matchedKVDeadRows = snd kvRows
                   offset = fromMaybe 0 mbOffset
                   shift = length matchedKVLiveRows + length matchedKVDeadRows
-                  updatedOffset = max (offset - shift) 0
-                  findAllQueryUpdated = DB.findRows (sqlSelect'
-                    ! #where_ whereClause
-                    ! #orderBy (if isJust orderBy then Just [DMaybe.fromJust orderBy] else Nothing)
-                    ! #limit ((shift +) <$> mbLimit)
-                    ! #offset (Just updatedOffset) -- Offset is 0 in case mbOffset Nothing
-                    ! defaults)
-              dbRes <- runQuery dbConf findAllQueryUpdated
-              case dbRes of
-                Left err -> pure $ Left $ MDBError err
-                Right [] -> pure $ Right $ applyOptions offset matchedKVLiveRows
-                Right dbRows -> do
-                  let mergedRows = matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRows (snd kvRows ++ fst kvRows)
-                  if isJust mbOffset
-                    then do
-                      let noOfRowsFelledLeftSide = calculateLeftFelledRedisEntries matchedKVLiveRows dbRows
-                      pure $ Right $ applyOptions ((if updatedOffset == 0 then offset else shift) - noOfRowsFelledLeftSide) mergedRows
-                    else pure $ Right $ applyOptions 0 mergedRows
+                  -- Skip DB query if Redis has enough matched rows for the requested limit, no offset, and no ordering
+                  kvHasSufficientData = not (null matchedKVLiveRows) && offset == 0 && isNothing orderBy && maybe False (<= length matchedKVLiveRows) mbLimit
+              if kvHasSufficientData
+                then pure $ Right $ applyOptions 0 matchedKVLiveRows
+                else do
+                  let updatedOffset = max (offset - shift) 0
+                      findAllQueryUpdated = DB.findRows (sqlSelect'
+                        ! #where_ whereClause
+                        ! #orderBy (if isJust orderBy then Just [DMaybe.fromJust orderBy] else Nothing)
+                        ! #limit ((shift +) <$> mbLimit)
+                        ! #offset (Just updatedOffset)
+                        ! defaults)
+                  dbRes <- runQuery dbConf findAllQueryUpdated
+                  case dbRes of
+                    Left err -> pure $ Left $ MDBError err
+                    Right [] -> pure $ Right $ applyOptions offset matchedKVLiveRows
+                    Right dbRows -> do
+                      let mergedRows = matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRows (snd kvRows ++ fst kvRows)
+                      if isJust mbOffset
+                        then do
+                          let noOfRowsFelledLeftSide = calculateLeftFelledRedisEntries matchedKVLiveRows dbRows
+                          pure $ Right $ applyOptions ((if updatedOffset == 0 then offset else shift) - noOfRowsFelledLeftSide) mergedRows
+                        else pure $ Right $ applyOptions 0 mergedRows
             Left err -> pure $ Left err
     else do
       let findAllQuery = DB.findRows (sqlSelect'
