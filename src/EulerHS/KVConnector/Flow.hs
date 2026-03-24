@@ -1496,6 +1496,7 @@ deleteObjectRedisOnly :: forall table m.
   ( HasCallStack,
     KVConnector (table Identity),
     Serialize.Serialize (table Identity),
+    ToJSON (table Identity),
     L.MonadFlow m
   ) =>
   MeshConfig -> Text -> table Identity -> m (MeshResult (table Identity))
@@ -1503,7 +1504,7 @@ deleteObjectRedisOnly meshCfg redisConn obj = do
   let pKeyText = getLookupKeyByPKey meshCfg.redisKeyPrefix obj
       shard    = getShardedHashTag meshCfg.tableShardModRange pKeyText
       pKey     = fromString . T.unpack $ pKeyText <> shard
-  kvDbRes <- L.runKVDB redisConn $ L.setexTx pKey meshCfg.redisTtl (BSL.toStrict $ Encoding.encodeDead $ Encoding.encode_ meshCfg.cerealEnabled obj)
+  kvDbRes <- L.runKVDB redisConn $ L.setex pKey meshCfg.redisTtl (BSL.toStrict $ Encoding.encodeDead $ Encoding.encode_ meshCfg.cerealEnabled obj)
   case kvDbRes of
     Left err -> return . Left $ RedisError (show err <> " for key " <> show pKey <> " in deleteObjectRedisOnly")
     Right _  -> do
