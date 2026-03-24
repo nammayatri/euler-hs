@@ -1089,12 +1089,17 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
                   matchedKVDeadRows = deduplicateKVDeadRows meshCfg primaryKvDeadRows secondaryKvDeadRows
                   offset = fromMaybe 0 mbOffset
                   shift = length matchedKVLiveRows + length matchedKVDeadRows
-                  updatedOffset = max (offset - shift) 0
+                  -- Desc: KV rows (latest) occupy positions 0..shift-1 in DB too;
+                  -- DB's own offset already accounts for them, so no reduction needed.
+                  -- Asc: KV rows are at the high end; reducing offset is safe.
+                  updatedOffset = case orderBy of
+                    Just (Desc _) -> offset
+                    _             -> max (offset - shift) 0
                   findAllQueryUpdated = DB.findRows (sqlSelect'
                     ! #where_ whereClause
                     ! #orderBy (if isJust orderBy then Just [DMaybe.fromJust orderBy] else Nothing)
                     ! #limit ((shift +) <$> mbLimit)
-                    ! #offset (Just updatedOffset) -- Offset is 0 in case mbOffset Nothing
+                    ! #offset (Just updatedOffset)
                     ! defaults)
               dbRes <- runQuery dbConf findAllQueryUpdated
               case dbRes of
@@ -1104,9 +1109,7 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
                   let allKVRows = allKvLiveRows ++ allKvDeadRows
                       mergedRows = matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRows allKVRows
                   if isJust mbOffset
-                    then do
-                      let noOfRowsFelledLeftSide = calculateLeftFelledRedisEntries matchedKVLiveRows dbRows
-                      pure $ Right $ applyOptions ((if updatedOffset == 0 then offset else shift) - noOfRowsFelledLeftSide) mergedRows
+                    then pure $ Right $ applyOptions (min offset shift) mergedRows
                     else pure $ Right $ applyOptions 0 mergedRows
             Left err -> pure $ Left err
         else do
@@ -1118,12 +1121,14 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
                   matchedKVDeadRows = snd kvRows
                   offset = fromMaybe 0 mbOffset
                   shift = length matchedKVLiveRows + length matchedKVDeadRows
-                  updatedOffset = max (offset - shift) 0
+                  updatedOffset = case orderBy of
+                    Just (Desc _) -> offset
+                    _             -> max (offset - shift) 0
                   findAllQueryUpdated = DB.findRows (sqlSelect'
                     ! #where_ whereClause
                     ! #orderBy (if isJust orderBy then Just [DMaybe.fromJust orderBy] else Nothing)
                     ! #limit ((shift +) <$> mbLimit)
-                    ! #offset (Just updatedOffset) -- Offset is 0 in case mbOffset Nothing
+                    ! #offset (Just updatedOffset)
                     ! defaults)
               dbRes <- runQuery dbConf findAllQueryUpdated
               case dbRes of
@@ -1132,9 +1137,7 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
                 Right dbRows -> do
                   let mergedRows = matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRows (snd kvRows ++ fst kvRows)
                   if isJust mbOffset
-                    then do
-                      let noOfRowsFelledLeftSide = calculateLeftFelledRedisEntries matchedKVLiveRows dbRows
-                      pure $ Right $ applyOptions ((if updatedOffset == 0 then offset else shift) - noOfRowsFelledLeftSide) mergedRows
+                    then pure $ Right $ applyOptions (min offset shift) mergedRows
                     else pure $ Right $ applyOptions 0 mergedRows
             Left err -> pure $ Left err
     else do
@@ -1161,7 +1164,7 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
       calculateLeftFelledRedisEntries kvRows dbRows = do
         case orderBy of
           Just (Asc col) -> do
-            let dbMn = maximum $ map (fromColumnar' . col . columnize) dbRows
+            let dbMn = minimum $ map (fromColumnar' . col . columnize) dbRows
             length $ filter (\r -> dbMn > fromColumnar' (col $ columnize r)) kvRows
           Just (Desc col) -> do
             let dbMx = maximum $ map (fromColumnar' . col . columnize) dbRows
@@ -1313,8 +1316,7 @@ findAllWithKVConnector dbConf meshCfg whereClause = do
             (_, Left err, _) -> return $ Left err
             (_, _, Left err) -> return $ Left $ MDBError err
         else do
-          -- Original single Redis logic
-          (kvRows, dbRows) <- callKVDBAsync (redisFindAll meshCfg whereClause) (findAllSql dbConf whereClause)
+          -- Original single Redis logic          (kvRows, dbRows) <- callKVDBAsync (redisFindAll meshCfg whereClause) (findAllSql dbConf whereClause)
           case (kvRows, dbRows) of
             (Right kvRes, Right dbRes) -> do
               let matchedKVLiveRows = findAllMatching whereClause (fst kvRes)
