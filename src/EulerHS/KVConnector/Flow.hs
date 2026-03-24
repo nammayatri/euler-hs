@@ -24,7 +24,9 @@ module EulerHS.KVConnector.Flow
     deleteAllReturningWithKVConnector,
     findAllWithKVAndConditionalDBInternal,
     findOneFromKvRedis,
-    findAllFromKvRedis
+    findAllFromKvRedis,
+    deleteAllFromKvRedis,
+    deleteAllFromSecondaryKvRedis
   )
  where
 
@@ -1490,6 +1492,24 @@ deleteObjectRedis meshCfg redisConn addPrimaryKeyToWhereClause whereClause obj =
       when meshCfg.memcacheEnabled $ pushToInMemConfigStream meshCfg ImcDelete obj
       return $ Right obj
 
+deleteObjectRedisOnly :: forall table m.
+  ( HasCallStack,
+    KVConnector (table Identity),
+    Serialize.Serialize (table Identity),
+    L.MonadFlow m
+  ) =>
+  MeshConfig -> Text -> table Identity -> m (MeshResult (table Identity))
+deleteObjectRedisOnly meshCfg redisConn obj = do
+  let pKeyText = getLookupKeyByPKey meshCfg.redisKeyPrefix obj
+      shard    = getShardedHashTag meshCfg.tableShardModRange pKeyText
+      pKey     = fromString . T.unpack $ pKeyText <> shard
+  kvDbRes <- L.runKVDB redisConn $ L.setexTx pKey meshCfg.redisTtl (BSL.toStrict $ Encoding.encodeDead $ Encoding.encode_ meshCfg.cerealEnabled obj)
+  case kvDbRes of
+    Left err -> return . Left $ RedisError (show err <> " for key " <> show pKey <> " in deleteObjectRedisOnly")
+    Right _  -> do
+      when meshCfg.memcacheEnabled $ pushToInMemConfigStream meshCfg ImcDelete obj
+      return $ Right obj
+
 reCacheDBRows :: forall table m.
   ( HasCallStack,
     KVConnector (table Identity),
@@ -1638,3 +1658,84 @@ deleteAllReturningWithKVConnector dbConf meshCfg whereClause = do
         Right re -> do
           when meshCfg.memcacheEnabled $ mapM_ (pushToInMemConfigStream meshCfg ImcDelete) re
           return $ Right re
+
+-- deletes all entries from redis both clouds
+deleteAllFromKvRedis :: forall be table beM m.
+  ( HasCallStack,
+    BeamRuntime be beM,
+    BeamRunner beM,
+    B.HasQBuilder be,
+    Model be table,
+    MeshMeta be table,
+    TableMappings (table Identity),
+    KVConnector (table Identity),
+    FromJSON (table Identity),
+    ToJSON (table Identity),
+    Serialize.Serialize (table Identity),
+    L.MonadFlow m
+  ) =>
+  MeshConfig ->
+  Where be table ->
+  m (MeshResult [table Identity])
+deleteAllFromKvRedis meshCfg whereClause = do
+  if meshCfg.kvHardKilled
+    then pure $ Left $ MUpdateFailed "KV is hard killed; cannot delete from Redis only"
+    else if meshCfg.secondaryRedisEnabled && meshCfg.meshEnabled
+      then do
+        let (primaryOnlyCfg, secondaryAsPrimaryCfg) = createMultiCloudConfigs meshCfg
+        (primaryKvRows, secondaryKvRows) <- callKVKVAsync
+          (redisFindAll primaryOnlyCfg whereClause)
+          (redisFindAll secondaryAsPrimaryCfg whereClause)
+        case extractMultiCloudKVRows primaryKvRows secondaryKvRows of
+          Left err -> pure $ Left err
+          Right (primaryKvLiveRows, _, secondaryKvLiveRows, _) -> do
+            let primaryMatchedRows   = findAllMatching whereClause primaryKvLiveRows
+                secondaryMatchedRows = findAllMatching whereClause secondaryKvLiveRows
+            primaryDelRes   <- sequence <$> mapM (deleteObjectRedisOnly meshCfg meshCfg.kvRedis) primaryMatchedRows
+            secondaryDelRes <- sequence <$> mapM (deleteObjectRedisOnly meshCfg meshCfg.kvRedisSecondary) secondaryMatchedRows
+            case foldEither [primaryDelRes, secondaryDelRes] of
+              Left err -> pure $ Left err
+              Right _ ->
+                let uniqueSecondaryRows = getUniqueDBRes meshCfg.redisKeyPrefix secondaryMatchedRows primaryMatchedRows
+                in pure $ Right $ primaryMatchedRows ++ uniqueSecondaryRows
+      else do
+        kvRes <- redisFindAll meshCfg whereClause
+        case kvRes of
+          Left err -> pure $ Left err
+          Right (kvLiveRows, _) -> do
+            let matchedRows = findAllMatching whereClause kvLiveRows
+            delRes <- sequence <$> mapM (deleteObjectRedisOnly meshCfg meshCfg.kvRedis) matchedRows
+            pure $ mapRight (const matchedRows) delRes
+
+-- deletes all entries from redis only from secondary cloud
+deleteAllFromSecondaryKvRedis :: forall be table beM m.
+  ( HasCallStack,
+    BeamRuntime be beM,
+    BeamRunner beM,
+    B.HasQBuilder be,
+    Model be table,
+    MeshMeta be table,
+    TableMappings (table Identity),
+    KVConnector (table Identity),
+    FromJSON (table Identity),
+    ToJSON (table Identity),
+    Serialize.Serialize (table Identity),
+    L.MonadFlow m
+  ) =>
+  MeshConfig ->
+  Where be table ->
+  m (MeshResult [table Identity])
+deleteAllFromSecondaryKvRedis meshCfg whereClause = do
+  if meshCfg.kvHardKilled
+    then pure $ Left $ MUpdateFailed "KV is hard killed; cannot delete from Redis only"
+    else if not (meshCfg.secondaryRedisEnabled && meshCfg.meshEnabled)
+      then pure $ Left $ MUpdateFailed "Secondary Redis is not enabled"
+      else do
+        let (_, secondaryAsPrimaryCfg) = createMultiCloudConfigs meshCfg
+        kvRes <- redisFindAll secondaryAsPrimaryCfg whereClause
+        case kvRes of
+          Left err -> pure $ Left err
+          Right (kvLiveRows, _) -> do
+            let matchedRows = findAllMatching whereClause kvLiveRows
+            delRes <- sequence <$> mapM (deleteObjectRedisOnly meshCfg meshCfg.kvRedisSecondary) matchedRows
+            pure $ mapRight (const matchedRows) delRes
