@@ -41,9 +41,12 @@ module EulerHS.Language
     Y.DBAndRedisMetricHandler,
     Y.DBAndRedisMetric (..),
     Y.mkDBAndRedisMetricHandler,
-    Y.DBMetricCfg (..)
+    Y.DBMetricCfg (..),
+    -- * Awaitable cancellation
+    Common.cancelAwaitable
   ) where
 
+import qualified EulerHS.Common as Common
 import           EulerHS.Extra.Language as X
 import           EulerHS.Framework.Language as Y
 import           EulerHS.KVDB.Language as X

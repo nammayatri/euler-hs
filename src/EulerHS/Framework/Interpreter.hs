@@ -498,11 +498,11 @@ interpretFlowMethod mbFlowGuid rt (L.Fork desc _newFlowGUID flow next) = do
       Right _ -> pure ()
     putMVar awaitableMVar res
   labelThread tid $ "euler-Fork:" ++ Text.unpack desc
-  pure $ next $ Awaitable awaitableMVar
+  pure $ next $ Awaitable tid awaitableMVar
 
 ----------------------------------------------------------------------
 
-interpretFlowMethod _ _ (L.Await mbMcs (Awaitable awaitableMVar) next) = do
+interpretFlowMethod _ _ (L.Await mbMcs (Awaitable _tid awaitableMVar) next) = do
   let act = case mbMcs of
         Nothing -> do
           val <- readMVar awaitableMVar

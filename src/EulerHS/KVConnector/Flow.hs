@@ -24,7 +24,8 @@ module EulerHS.KVConnector.Flow
     deleteAllReturningWithKVConnector,
     findAllWithKVAndConditionalDBInternal,
     findOneFromKvRedis,
-    findAllFromKvRedis
+    findAllFromKvRedis,
+    redisFindAll
   )
  where
 
