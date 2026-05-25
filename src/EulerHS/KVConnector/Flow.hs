@@ -871,15 +871,16 @@ findWithKVConnector dbConf meshCfg whereClause = do --This function fetches all 
     kvFetch :: m (Source, MeshResult (Maybe (table Identity)))
     kvFetch = do
       let isDisabled = meshCfg.kvHardKilled
+          modelName = tableName @(table Identity)
       if not isDisabled
         then do
           eitherKvRows <- findOneFromRedis meshCfg whereClause
           case eitherKvRows of
             Right ([], []) -> do
-              -- (SQL,) <$> findOneFromDB dbConf whereClause
               res <- findOneFromDB dbConf whereClause
               case res of
                 Right (Just dbRow) -> do
+                  Metrics.incrementKVHitMissMetric "FIND" modelName False
                   if isCachingDbFindEnabled && meshCfg.meshEnabled
                     then do
                       reCacheDBRowsRes <- createInRedis meshCfg dbRow
@@ -894,9 +895,11 @@ findWithKVConnector dbConf meshCfg whereClause = do --This function fetches all 
                 Right Nothing -> pure (SQL, Right Nothing)
                 Left err -> pure (SQL, Left err)
             Right ([], _) -> do
+              Metrics.incrementKVHitMissMetric "FIND" modelName True
               L.logInfoT "findWithKVConnector" ("Returning nothing - Row is deleted already for " <> tableName @(table Identity))
               pure (KV, Right Nothing)
             Right (kvLiveRows, _) -> do
+              Metrics.incrementKVHitMissMetric "FIND" modelName True
               second (mapRight DMaybe.listToMaybe) <$> findFromDBIfMatchingFails meshCfg dbConf whereClause kvLiveRows
             Left err -> pure (KV, Left err)
         else do
@@ -1069,6 +1072,7 @@ findAllWithOptionsHelper :: forall be table beM m.
   m (MeshResult [table Identity])
 findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = do
   let isDisabled = meshCfg.kvHardKilled
+      modelName = tableName @(table Identity)
   if not isDisabled
     then do
       -- Find from both Redis instances if secondary is enabled
@@ -1076,7 +1080,7 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
         then do
           -- Find from primary Redis, secondary Redis in parallel
           let (primaryOnlyCfg, secondaryAsPrimaryCfg) = createMultiCloudConfigs meshCfg
-          (primaryKvRows, secondaryKvRows) <- callKVKVAsync 
+          (primaryKvRows, secondaryKvRows) <- callKVKVAsync
             (redisFindAll primaryOnlyCfg whereClause)
             (redisFindAll secondaryAsPrimaryCfg whereClause)
           case extractMultiCloudKVRows primaryKvRows secondaryKvRows of
@@ -1099,8 +1103,11 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
               dbRes <- runQuery dbConf findAllQueryUpdated
               case dbRes of
                 Left err -> pure $ Left $ MDBError err
-                Right [] -> pure $ Right $ applyOptions offset matchedKVLiveRows
+                Right [] -> do
+                  when (not (null matchedKVLiveRows)) $ Metrics.incrementKVHitMissMetric "FIND_ALL" modelName True
+                  pure $ Right $ applyOptions offset matchedKVLiveRows
                 Right dbRows -> do
+                  Metrics.incrementKVHitMissMetric "FIND_ALL" modelName (not (null matchedKVLiveRows))
                   let allKVRows = allKvLiveRows ++ allKvDeadRows
                       mergedRows = matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRows allKVRows
                   if isJust mbOffset
@@ -1128,8 +1135,11 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
               dbRes <- runQuery dbConf findAllQueryUpdated
               case dbRes of
                 Left err -> pure $ Left $ MDBError err
-                Right [] -> pure $ Right $ applyOptions offset matchedKVLiveRows
+                Right [] -> do
+                  when (not (null matchedKVLiveRows)) $ Metrics.incrementKVHitMissMetric "FIND_ALL" modelName True
+                  pure $ Right $ applyOptions offset matchedKVLiveRows
                 Right dbRows -> do
+                  Metrics.incrementKVHitMissMetric "FIND_ALL" modelName (not (null matchedKVLiveRows))
                   let mergedRows = matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRows (snd kvRows ++ fst kvRows)
                   if isJust mbOffset
                     then do
@@ -1195,7 +1205,7 @@ findAllFromKvRedis dbConf meshCfg whereClause orderBy = do
         then do
           -- Find from primary Redis, secondary Redis in parallel
           let (primaryOnlyCfg, secondaryAsPrimaryCfg) = createMultiCloudConfigs meshCfg
-          (primaryKvRows, secondaryKvRows) <- callKVKVAsync 
+          (primaryKvRows, secondaryKvRows) <- callKVKVAsync
             (redisFindAll primaryOnlyCfg whereClause)
             (redisFindAll secondaryAsPrimaryCfg whereClause)
           case extractMultiCloudKVRows primaryKvRows secondaryKvRows of
@@ -1283,6 +1293,7 @@ findAllWithKVConnector :: forall be table beM m.
 findAllWithKVConnector dbConf meshCfg whereClause = do
   let findAllQuery = DB.findRows (sqlSelect ! #where_ whereClause ! defaults)
   let isDisabled = meshCfg.kvHardKilled
+      modelName = tableName @(table Identity)
   if not isDisabled
     then do
       -- Find from both Redis instances if secondary is enabled
@@ -1290,7 +1301,7 @@ findAllWithKVConnector dbConf meshCfg whereClause = do
         then do
           -- Find from primary Redis, secondary Redis, and DB in parallel
           let (primaryOnlyCfg, secondaryAsPrimaryCfg) = createMultiCloudConfigs meshCfg
-          (primaryKvRows, secondaryKvRows, dbRows) <- callMultiAsync 
+          (primaryKvRows, secondaryKvRows, dbRows) <- callMultiAsync
             (redisFindAll primaryOnlyCfg whereClause)
             (redisFindAll secondaryAsPrimaryCfg whereClause)
             (findAllSql dbConf whereClause)
@@ -1307,6 +1318,8 @@ findAllWithKVConnector dbConf meshCfg whereClause = do
                       allMatchedKVLiveRows = matchAndDeduplicateKVRows meshCfg whereClause primaryKvLiveRows secondaryKvLiveRows
                       -- Get unique DB rows (not in any KV rows)
                       uniqueDbRows = getUniqueDBRes meshCfg.redisKeyPrefix dbRes allKVRows
+                  when (not (null allMatchedKVLiveRows) || not (null dbRes)) $
+                    Metrics.incrementKVHitMissMetric "FIND_ALL" modelName (not (null allMatchedKVLiveRows))
                   pure $ Right $ allMatchedKVLiveRows ++ uniqueDbRows
                 Left err -> return $ Left err  -- Should never happen since both inputs are Right, but needed for completeness
             (Left err, _, _) -> return $ Left err
@@ -1319,6 +1332,8 @@ findAllWithKVConnector dbConf meshCfg whereClause = do
             (Right kvRes, Right dbRes) -> do
               let matchedKVLiveRows = findAllMatching whereClause (fst kvRes)
                   allKVRows = fst kvRes ++ snd kvRes
+              when (not (null matchedKVLiveRows) || not (null dbRes)) $
+                Metrics.incrementKVHitMissMetric "FIND_ALL" modelName (not (null matchedKVLiveRows))
               pure $ Right $ matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRes allKVRows
             (Left err, _) -> return $ Left err
             (_, Left err) -> return $ Left $ MDBError err
@@ -1342,7 +1357,7 @@ findAllWithKVAndConditionalDBInternal :: forall be table beM m.
   m (MeshResult [table Identity])
 findAllWithKVAndConditionalDBInternal dbConf meshCfg whereClause orderBy = do
   let isDisabled = meshCfg.kvHardKilled
-  
+      modelName = tableName @(table Identity)
   if not isDisabled
     then do
       -- Find from both Redis instances if secondary is enabled
@@ -1350,7 +1365,7 @@ findAllWithKVAndConditionalDBInternal dbConf meshCfg whereClause orderBy = do
         then do
           -- Find from primary Redis, secondary Redis in parallel
           let (primaryOnlyCfg, secondaryAsPrimaryCfg) = createMultiCloudConfigs meshCfg
-          (primaryKvRows, secondaryKvRows) <- callKVKVAsync 
+          (primaryKvRows, secondaryKvRows) <- callKVKVAsync
             (redisFindAll primaryOnlyCfg whereClause)
             (redisFindAll secondaryAsPrimaryCfg whereClause)
           case extractMultiCloudKVRows primaryKvRows secondaryKvRows of
@@ -1358,6 +1373,7 @@ findAllWithKVAndConditionalDBInternal dbConf meshCfg whereClause orderBy = do
               let matchedKVLiveRows = matchAndDeduplicateKVRows meshCfg whereClause primaryKvLiveRows secondaryKvLiveRows
               if not (null matchedKVLiveRows)
                 then do
+                  Metrics.incrementKVHitMissMetric "FIND_ALL" modelName True
                   case orderBy of
                       Nothing -> pure $ Right matchedKVLiveRows
                       Just res -> do
@@ -1374,6 +1390,7 @@ findAllWithKVAndConditionalDBInternal dbConf meshCfg whereClause orderBy = do
                   case dbRes of
                     Right dbRows -> do
                       let allKvDeadRows = primaryKvDeadRows ++ secondaryKvDeadRows
+                      when (not (null dbRows)) $ Metrics.incrementKVHitMissMetric "FIND_ALL" modelName False
                       pure $ Right $ getUniqueDBRes meshCfg.redisKeyPrefix dbRows allKvDeadRows
                     Left err     -> return $ Left $ MDBError err
             Left err -> return $ Left err
@@ -1385,6 +1402,7 @@ findAllWithKVAndConditionalDBInternal dbConf meshCfg whereClause orderBy = do
               let matchedKVLiveRows = findAllMatching whereClause (fst kvRows)
               if not (null matchedKVLiveRows)
                 then do
+                  Metrics.incrementKVHitMissMetric "FIND_ALL" modelName True
                   case orderBy of
                       Nothing -> pure $ Right matchedKVLiveRows
                       Just res -> do
@@ -1399,7 +1417,9 @@ findAllWithKVAndConditionalDBInternal dbConf meshCfg whereClause orderBy = do
                           ! defaults)
                   dbRes <- runQuery dbConf findAllQueryUpdated
                   case dbRes of
-                    Right dbRows -> pure $ Right $ getUniqueDBRes meshCfg.redisKeyPrefix dbRows (snd kvRows)
+                    Right dbRows -> do
+                      when (not (null dbRows)) $ Metrics.incrementKVHitMissMetric "FIND_ALL" modelName False
+                      pure $ Right $ getUniqueDBRes meshCfg.redisKeyPrefix dbRows (snd kvRows)
                     Left err     -> return $ Left $ MDBError err
             Left err -> return $ Left err
     else do
