@@ -33,8 +33,11 @@ data KVMetricHandler = KVMetricHandler
     kvCalls :: (Text, Text, Text, Int, Bool, Bool) -> IO (),
     compressionLatency :: (Text, Text, Text, NominalDiffTime) -> IO (),
     handlerLatency :: (Text, Text, Double, Text, Text) -> IO (),
-    kvHitMiss :: (Text, Text, Bool) -> IO ()
+    kvHitMiss :: (Text, Text, KVFindResult) -> IO ()
   }
+
+data KVFindResult = KVHit | MissInKV | MissInDB
+  deriving (Show, Eq)
 
 data KVMetric = KVAction
 
@@ -65,10 +68,11 @@ mkKVMetricHandler = do
             observe (metrics </> #kv_handler_latency) totalLatency handler model redisCluster apiTag
       )
       ( \case
-          (action, model, isHit) -> do
-            if isHit
-              then inc (metrics </> #kv_hit_counter) action model
-              else inc (metrics </> #kv_miss_counter) action model
+          (action, model, findResult) -> do
+            case findResult of
+              KVHit    -> inc (metrics </> #kv_hit_counter) action model
+              MissInKV -> inc (metrics </> #kv_miss_in_kv_counter) action model
+              MissInDB -> inc (metrics </> #kv_miss_in_db_counter) action model
       )
 
 kv_compression_latency_observer =
@@ -140,8 +144,14 @@ kv_hit_counter =
     .& lbl @"model" @Text
     .& build
 
-kv_miss_counter =
-  counter #kv_miss_counter
+kv_miss_in_kv_counter =
+  counter #kv_miss_in_kv_counter
+    .& lbl @"action" @Text
+    .& lbl @"model" @Text
+    .& build
+
+kv_miss_in_db_counter =
+  counter #kv_miss_in_db_counter
     .& lbl @"action" @Text
     .& lbl @"model" @Text
     .& build
@@ -153,7 +163,8 @@ collectionLock =
     .> kv_compression_latency_observer
     .> kv_handler_latency_observe
     .> kv_hit_counter
-    .> kv_miss_counter
+    .> kv_miss_in_kv_counter
+    .> kv_miss_in_db_counter
     .> MNil
 
 
@@ -221,11 +232,11 @@ incrementKVHandlerLatencyMetric handler model totalLatency redisCluster = when i
     Just val -> L.runIO $ handlerLatency val (handler, model, totalLatency, redisCluster, apiTag)
     Nothing -> pure ()
 
-incrementKVHitMissMetric :: (HasCallStack, L.MonadFlow m) => Text -> Text -> Bool -> m ()
-incrementKVHitMissMetric action model isHit = when isKVMetricEnabled $ do
+incrementKVHitMissMetric :: (HasCallStack, L.MonadFlow m) => Text -> Text -> KVFindResult -> m ()
+incrementKVHitMissMetric action model findResult = when isKVMetricEnabled $ do
   env <- L.getOption KVMetricCfg
   case env of
-    Just val -> L.runIO $ kvHitMiss val (action, model, isHit)
+    Just val -> L.runIO $ kvHitMiss val (action, model, findResult)
     Nothing -> pure ()
 
 withKVLatencyMetric :: (HasCallStack, L.MonadFlow m) => Text -> Text -> Text -> m a -> m a
