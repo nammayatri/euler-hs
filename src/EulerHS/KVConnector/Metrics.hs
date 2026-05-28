@@ -33,7 +33,8 @@ data KVMetricHandler = KVMetricHandler
     kvCalls :: (Text, Text, Text, Int, Bool, Bool) -> IO (),
     compressionLatency :: (Text, Text, Text, NominalDiffTime) -> IO (),
     handlerLatency :: (Text, Text, Double, Text, Text) -> IO (),
-    kvHitMiss :: (Text, Text, KVFindResult) -> IO ()
+    kvHitMiss :: (Text, Text, KVFindResult) -> IO (),
+    jsonbFallback :: (Text, Text, Text) -> IO ()
   }
 
 data KVFindResult = KVHit | MissInKV | MissInDB
@@ -73,6 +74,10 @@ mkKVMetricHandler = do
               KVHit    -> inc (metrics </> #kv_hit_counter) action model
               MissInKV -> inc (metrics </> #kv_miss_in_kv_counter) action model
               MissInDB -> inc (metrics </> #kv_miss_in_db_counter) action model
+      )
+      ( \case
+          (schema, model, _err) ->
+            inc (metrics </> #kv_jsonb_fallback_counter) schema model
       )
 
 kv_compression_latency_observer =
@@ -156,6 +161,12 @@ kv_miss_in_db_counter =
     .& lbl @"model" @Text
     .& build
 
+kv_jsonb_fallback_counter =
+  counter #kv_jsonb_fallback_counter
+    .& lbl @"schema" @Text
+    .& lbl @"model" @Text
+    .& build
+
 collectionLock =
   kv_sql_error_counter
     .> kvRedis_soft_db_limit_exceeded
@@ -165,6 +176,7 @@ collectionLock =
     .> kv_hit_counter
     .> kv_miss_in_kv_counter
     .> kv_miss_in_db_counter
+    .> kv_jsonb_fallback_counter
     .> MNil
 
 
@@ -237,6 +249,13 @@ incrementKVHitMissMetric action model findResult = when isKVMetricEnabled $ do
   env <- L.getOption KVMetricCfg
   case env of
     Just val -> L.runIO $ kvHitMiss val (action, model, findResult)
+    Nothing -> pure ()
+
+incrementJsonbFallbackMetric :: (HasCallStack, L.MonadFlow m) => Text -> Text -> Text -> m ()
+incrementJsonbFallbackMetric schema model err = when isKVMetricEnabled $ do
+  env <- L.getOption KVMetricCfg
+  case env of
+    Just val -> L.runIO $ jsonbFallback val (schema, model, err)
     Nothing -> pure ()
 
 withKVLatencyMetric :: (HasCallStack, L.MonadFlow m) => Text -> Text -> Text -> m a -> m a

@@ -36,6 +36,7 @@ import EulerHS.CachedSqlDBQuery
       createSqlWoReturing,
       updateOneSqlWoReturning,
       SqlReturning(..) )
+import qualified EulerHS.JsonbFallback as JF
 import           EulerHS.KVConnector.Types (DBCommandVersion (..), KVConnector(..), MeshConfig(..), MeshResult, MeshError(..), MeshMeta(..), SecondaryKey(..), tableName, keyMap, Source(..), TableMappings(..))
 import           EulerHS.KVConnector.DBSync (getCreateQuery, getUpdateQuery, getDeleteQuery, getDbDeleteCommandJson, getDbUpdateCommandJson, getDbUpdateCommandJsonWithPrimaryKey, getDbDeleteCommandJsonWithPrimaryKey,getCreateQueryWithCompression, getDeleteQueryWithCompression, getUpdateQueryWithCompression)
 import           EulerHS.KVConnector.InMemConfig.Flow (searchInMemoryCache, pushToInMemConfigStream, fetchRowFromDBAndAlterImc)
@@ -564,7 +565,8 @@ updateAllReturningWithKVConnector :: forall table m.
     TableMappings (table Identity),
     Serialize.Serialize (table Identity),
     Show (table Identity), --debugging purpose
-    L.MonadFlow m
+    L.MonadFlow m,
+    JF.TryJsonbFallback BP.Pg BP.Postgres table
   ) =>
   DBConfig BP.Pg ->
   DBConfig BP.Pg ->
@@ -616,7 +618,8 @@ updateAllWithKVConnector :: forall be table beM m.
     ToJSON (table Identity),
     Serialize.Serialize (table Identity),
     Show (table Identity), --debugging purpose
-    L.MonadFlow m
+    L.MonadFlow m,
+    JF.TryJsonbFallback beM be table
   ) =>
   DBConfig beM ->
   DBConfig beM ->
@@ -1317,7 +1320,8 @@ findAllWithKVConnector :: forall be table beM m.
     ToJSON (table Identity),
     FromJSON (table Identity),
     Serialize.Serialize (table Identity),
-    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM) =>
+    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM,
+    JF.TryJsonbFallback beM be table) =>
   DBConfig beM ->
   MeshConfig ->
   Where be table ->
@@ -1671,7 +1675,8 @@ deleteAllReturningWithKVConnector :: forall be table beM m.
     FromJSON (table Identity),
     Show (table Identity),
     Serialize.Serialize (table Identity),
-    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM) =>
+    L.MonadFlow m, B.HasQBuilder be, BeamRunner beM,
+    JF.TryJsonbFallback beM be table) =>
   DBConfig beM ->
   MeshConfig ->
   Where be table ->

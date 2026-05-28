@@ -56,6 +56,7 @@ library
   import:          common-lang
   exposed-modules:
     EulerHS.CachedSqlDBQuery
+    EulerHS.JsonbFallback
     EulerHS.Extra.AltValidation
     EulerHS.Extra.Aeson
     EulerHS.Extra.Combinators
@@ -195,6 +196,23 @@ library
     , mtl
 
   hs-source-dirs:  src
+
+executable jsonb-live-test
+  import:           common-lang
+  main-is:          Main.hs
+  hs-source-dirs:   test-jsonb-live
+  build-depends:
+    , aeson
+    , beam-core
+    , beam-postgres
+    , euler-hs
+    , postgresql-simple
+    , sequelize
+    , text
+    , casing
+    , time
+    , vector
+  ghc-options:      -threaded
 
 flag enable-tests
   description: Enable building tests
