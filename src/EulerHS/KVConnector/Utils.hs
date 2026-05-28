@@ -361,6 +361,12 @@ getUniqueDBRes redisKeyPrefix dbRows kvRows = do
   let kvPkeysSet = HS.fromList $ map (getLookupKeyByPKey redisKeyPrefix) kvRows
   filter (\r -> not $ HS.member (getLookupKeyByPKey redisKeyPrefix r) kvPkeysSet) dbRows
 
+-- Count how many Redis rows overlap with DB rows (have the same primary key)
+countOverlap :: KVConnector (table Identity) => Text -> [table Identity] -> [table Identity] -> Int
+countOverlap redisKeyPrefix kvRows dbRows = do
+  let kvPkeysSet = HS.fromList $ map (getLookupKeyByPKey redisKeyPrefix) kvRows
+  length $ filter (\r -> HS.member (getLookupKeyByPKey redisKeyPrefix r) kvPkeysSet) dbRows
+
 removeDeleteResults :: KVConnector (table Identity) => Text -> [table Identity] -> [table Identity] -> [table Identity]
 removeDeleteResults redisKeyPrefix delRows rows = do
   let delPKeysSet = HS.fromList $ map (getLookupKeyByPKey redisKeyPrefix) delRows
