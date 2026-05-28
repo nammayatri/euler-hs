@@ -38,6 +38,7 @@ import qualified Database.Beam.Sqlite as BS
 import qualified Database.Beam.Backend.SQL.BeamExtensions as BExt
 import           EulerHS.Extra.Language (getOrInitSqlConn, rGet, rSetB, rDel)
 import qualified EulerHS.Framework.Language as L
+import qualified EulerHS.JsonbFallback as JF
 import           EulerHS.Prelude
 import qualified EulerHS.SqlDB.Language as DB
 import           EulerHS.SqlDB.Types (BeamRunner, BeamRuntime, DBConfig(..),
@@ -300,7 +301,8 @@ findOne ::
     B.HasQBuilder be,
     ToJSON (table Identity),
     FromJSON (table Identity),
-    L.MonadFlow m
+    L.MonadFlow m,
+    JF.TryJsonbFallback beM be table
   ) =>
   DBConfig beM ->
   Maybe Text ->
@@ -327,7 +329,8 @@ findAll ::
     B.HasQBuilder be,
     ToJSON (table Identity),
     FromJSON (table Identity),
-    L.MonadFlow m
+    L.MonadFlow m,
+    JF.TryJsonbFallback beM be table
   ) =>
   DBConfig beM ->
   Maybe Text ->
@@ -519,38 +522,64 @@ countSql ::
 countSql dbConf whereClause = runQuery dbConf findQuery
   where findQuery = DB.countRows (sqlCount ! #where_ whereClause ! defaults)
 
+-- Postgres "42703 column does not exist".
+is42703DBError :: DBError -> Bool
+is42703DBError (DBError _ msg) =
+  T.isInfixOf "42703" msg
+    || (T.isInfixOf "does not exist" msg && T.isInfixOf "column" msg)
+
 findOneSql ::
+  forall be beM table m.
   ( HasCallStack,
     BeamRuntime be beM,
     BeamRunner beM,
     Model be table,
     B.HasQBuilder be,
-    L.MonadFlow m
+    L.MonadFlow m,
+    JF.TryJsonbFallback beM be table
   ) =>
   DBConfig beM ->
   Where be table ->
   m (Either DBError (Maybe (table Identity)))
-findOneSql dbConf whereClause = runQuery dbConf findQuery
-  where findQuery = DB.findRow (sqlSelect ! #where_ whereClause ! defaults)
+findOneSql dbConf whereClause = do
+  result <- runQuery dbConf $ DB.findRow (sqlSelect ! #where_ whereClause ! defaults)
+  case result of
+    Right _ -> pure result
+    Left err
+      | is42703DBError err -> do
+          mFallback <- JF.tryJsonbFallback @beM @be @table dbConf whereClause (T.pack (show err))
+          pure $ case mFallback of
+            Just (r:_) -> Right (Just r)
+            _         -> result
+      | otherwise -> pure result
 
 findAllSql ::
+  forall be beM table m.
   ( HasCallStack,
     BeamRuntime be beM,
     BeamRunner beM,
     Model be table,
     B.HasQBuilder be,
-    L.MonadFlow m
+    L.MonadFlow m,
+    JF.TryJsonbFallback beM be table
   ) =>
   DBConfig beM ->
   Where be table ->
   m (Either DBError [table Identity])
 findAllSql dbConf whereClause = do
-  let findQuery = DB.findRows (sqlSelect ! #where_ whereClause ! defaults)
   sqlConn <- getOrInitSqlConn dbConf
-  rows <- join <$> mapM (`L.runDB` findQuery) sqlConn
+  rows <- join <$> mapM (`L.runDB` DB.findRows (sqlSelect ! #where_ whereClause ! defaults)) sqlConn
   case rows of
     Right _ -> pure rows
-    Left err -> L.incrementDbMetric err dbConf *> pure rows
+    Left err -> do
+      L.incrementDbMetric err dbConf
+      if is42703DBError err
+        then do
+          mFallback <- JF.tryJsonbFallback @beM @be @table dbConf whereClause (T.pack (show err))
+          pure $ case mFallback of
+            Just rs -> Right rs
+            Nothing -> rows
+        else pure rows
 
 cacheWithKey :: (HasCallStack, ToJSON table, L.MonadFlow m) => Text -> table -> m ()
 cacheWithKey key row = do
@@ -638,7 +667,8 @@ deleteAllSqlMySQL ::
     BeamRunner beM,
     B.HasQBuilder be,
     Model be table,
-    L.MonadFlow m
+    L.MonadFlow m,
+    JF.TryJsonbFallback beM be table
   ) =>
   DBConfig beM ->
   Where be table ->
@@ -660,7 +690,8 @@ deleteAllMySQL ::
     BeamRunner beM,
     B.HasQBuilder be,
     Model be table,
-    L.MonadFlow m
+    L.MonadFlow m,
+    JF.TryJsonbFallback beM be table
   ) =>
   DBConfig beM ->
   Where be table ->
