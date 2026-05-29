@@ -203,6 +203,7 @@ executable jsonb-live-test
   hs-source-dirs:   test-jsonb-live
   build-depends:
     , aeson
+    , async
     , base16-bytestring
     , beam-core
     , beam-postgres

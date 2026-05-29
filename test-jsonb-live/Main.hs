@@ -23,6 +23,8 @@ import qualified Data.Aeson                    as A
 import qualified Data.Text                     as T
 import qualified Data.Text.Encoding            as TE
 import           Data.Time                     (UTCTime)
+import           Control.Concurrent.Async      (mapConcurrently)
+import qualified Data.Aeson.KeyMap             as AKM
 import qualified Data.ByteString               as BS
 import qualified Data.ByteString.Base16        as B16
 import qualified Data.ByteString.Lazy          as BL
@@ -103,7 +105,7 @@ instance ModelMeta PersonT where
   modelTableName  = "person"
   modelSchemaName = Just "atlas_driver_offer_bpp"
 
-instance ToSQLObject Bool where
+instance {-# OVERLAPPING #-} ToSQLObject Bool where
   convertToSQLObject = SQLObjectValue . T.pack . show
 
 -- | Stand-in for a @mkBeamInstancesForJSON@-style type: stored as TEXT
@@ -377,9 +379,135 @@ main = do
   putStrLn $ "  K override-mapped value preserved: " <> show valuesOK
   resetSchema
 
+  -- ============================================================
+  -- Production-readiness deep tests
+  -- ============================================================
+
+  putStrLn "\n[L] Nested JSONB containing snake_case keys MUST NOT be camelized (user payload safety)"
+  resetSchema
+  runRaw "UPDATE atlas_driver_offer_bpp.person SET metadata='{\"first_name\":\"nested\",\"deep\":{\"another_key\":42},\"arr\":[{\"snake_case_in_array\":true}]}'::jsonb WHERE id='p1'"
+  dropCol "description"
+  resetHits hitRef
+  rL <- runFlow handler $ DBQ.findOneSql dbConf (wherePid "p1")
+  let okL = case rL of
+        Right (Just p) -> case metadata p of
+          Just (A.Object o) ->
+            AKM.lookup "first_name" o == Just (A.String "nested") &&
+            (case AKM.lookup "deep" o of
+               Just (A.Object d) -> AKM.lookup "another_key" d == Just (A.Number 42)
+               _ -> False) &&
+            (case AKM.lookup "arr" o of
+               Just (A.Array _) -> True
+               _ -> False)
+          _ -> False
+        _ -> False
+  putStrLn $ "  L nested-payload integrity: " <> (if okL then "OK" else "*** CORRUPTED *** " <> show rL)
+  resetSchema
+
+  putStrLn "\n[M] Bytea-prefix strip MUST be guarded: text starting with \\x but non-hex stays as-is"
+  resetSchema
+  runRaw "UPDATE atlas_driver_offer_bpp.person SET last_name='\\xnot-hex-text' WHERE id='p1'"
+  dropCol "tags"
+  resetHits hitRef
+  rM <- runFlow handler $ DBQ.findOneSql dbConf (wherePid "p1")
+  let okM' = case rM of
+        Right (Just p) -> lastName p == Just "\\xnot-hex-text"
+        _ -> False
+  putStrLn $ "  M guarded bytea strip: " <> (if okM' then "OK preserved as-is" else "*** stripped non-hex *** " <> show rM)
+  resetSchema
+
+  putStrLn "\n[N] unwrapJsonText safety: text starting with { but invalid JSON stays as String"
+  resetSchema
+  runRaw "UPDATE atlas_driver_offer_bpp.person SET last_name='{not valid json' WHERE id='p1'"
+  dropCol "tags"
+  resetHits hitRef
+  rN <- runFlow handler $ DBQ.findOneSql dbConf (wherePid "p1")
+  let okN' = case rN of
+        Right (Just p) -> lastName p == Just "{not valid json"
+        _ -> False
+  putStrLn $ "  N guarded unwrapJsonText: " <> (if okN' then "OK preserved" else "*** corrupted *** " <> show rN)
+  resetSchema
+
+  putStrLn "\n[O] Non-42703 error MUST surface untouched (no fallback attempt)"
+  resetSchema
+  resetHits hitRef
+  rO <- runFlow handler $ DBQ.findAllSql dbConf
+          ([Is merchantId (Eq ("M_does_not_match'_INJECTION" :: Text))] :: Where BP.Postgres PersonT)
+  let okO = case rO of
+        Right rs -> length rs == 0
+        Left  _  -> False
+  okO2 <- checkHits hitRef False "O"
+  putStrLn $ "  O non-42703 path: rows=" <> show (case rO of Right rs -> length rs; _ -> -1) <> " unchanged=" <> show okO
+
+  putStrLn "\n[P] WHERE on override-mapped column (Eq on oldNightShiftCharge) — drop unrelated col, fallback uses override-aware columnName"
+  resetSchema
+  dropCol "description"
+  resetHits hitRef
+  rP <- runFlow handler $ DBQ.findAllSql dbConf
+          ([Is merchantId (Eq ("M1" :: Text)), Is oldNightShiftCharge (Eq (Just 1.5 :: Maybe Double))] :: Where BP.Postgres PersonT)
+  let okP = case rP of
+        Right rs -> length rs == 2 && all (\p -> oldNightShiftCharge p == Just 1.5) rs
+        _ -> False
+  okP2 <- checkHits hitRef True "P"
+  putStrLn $ "  P override-col WHERE: " <> (if okP then "OK" else "*** miss *** " <> show rP)
+  resetSchema
+
+  putStrLn "\n[Q] Multi-clause WHERE (AND of two predicates) via fallback"
+  resetSchema
+  dropCol "description"
+  resetHits hitRef
+  rQ <- runFlow handler $ DBQ.findAllSql dbConf
+          ([Is merchantId (Eq ("M1" :: Text)), Is isNew (Eq True)] :: Where BP.Postgres PersonT)
+  okQ1 <- reportEither "Q" rQ
+  okQ2 <- checkHits hitRef True "Q"
+
+  putStrLn "\n[R] SQL-injection probe in Eq literal — must be escaped, no rows match"
+  resetSchema
+  dropCol "description"
+  resetHits hitRef
+  rR <- runFlow handler $ DBQ.findAllSql dbConf
+          ([Is merchantId (Eq ("M1' OR '1'='1" :: Text))] :: Where BP.Postgres PersonT)
+  let okR = case rR of
+        Right rs -> length rs == 0   -- escaped, no match
+        Left  _  -> True             -- also fine if it errors
+  okR2 <- checkHits hitRef True "R"
+  putStrLn $ "  R injection probe: rows=" <> show (case rR of Right rs -> length rs; _ -> -1)
+
+  putStrLn "\n[S] Zero-row fallback result returns Right []"
+  resetSchema
+  dropCol "description"
+  resetHits hitRef
+  rS <- runFlow handler $ DBQ.findAllSql dbConf
+          ([Is merchantId (Eq ("MERCHANT_DOES_NOT_EXIST" :: Text))] :: Where BP.Postgres PersonT)
+  let okS = case rS of Right [] -> True; _ -> False
+  okS2 <- checkHits hitRef True "S"
+  putStrLn $ "  S zero-row: " <> (if okS then "OK Right []" else "*** unexpected *** " <> show rS)
+
+  putStrLn "\n[T] Concurrent fallbacks (10 in parallel) must all succeed"
+  resetSchema
+  dropCol "description"
+  results' <- mapConcurrently
+                (\_ -> runFlow handler $ DBQ.findAllSql dbConf whereM1)
+                [1 .. 10 :: Int]
+  let okT = all (\r -> case r of Right rs -> length rs == 2; _ -> False) results'
+  putStrLn $ "  T 10 concurrent calls: " <> show (length (filter (\r -> case r of Right _ -> True; _ -> False) results')) <> "/10 OK"
+  resetSchema
+
+  putStrLn "\n[U] findOneSql zero-row fallback returns Right Nothing"
+  resetSchema
+  dropCol "description"
+  resetHits hitRef
+  rU <- runFlow handler $ DBQ.findOneSql dbConf (wherePid "ID_DOES_NOT_EXIST")
+  let okU = case rU of Right Nothing -> True; _ -> False
+  okU2 <- checkHits hitRef True "U"
+  putStrLn $ "  U findOneSql zero-row: " <> (if okU then "OK Right Nothing" else "*** unexpected *** " <> show rU)
+  resetSchema
+
   let results = [okA1, okA2, okB1, okB2, okC1, okC2, okD, okE1, okE2, okF1, okF2,
                  okG1, okG2, okH1, okH2, okI1, okI2, okJ1, okJ2,
-                 okK1, okK2, valuesOK]
+                 okK1, okK2, valuesOK,
+                 okL, okM', okN', okO, okO2, okP, okP2, okQ1, okQ2,
+                 okR, okR2, okS, okS2, okT, okU, okU2]
       passed = length (filter (== True) results)
   putStrLn $ "\n=== Summary: " <> show passed <> "/" <> show (length results) <> " passed ==="
   unless (and results) exitFailure

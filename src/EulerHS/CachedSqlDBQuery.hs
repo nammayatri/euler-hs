@@ -550,7 +550,8 @@ findOneSql dbConf whereClause = do
           mFallback <- JF.tryJsonbFallback @beM @be @table dbConf whereClause (T.pack (show err))
           pure $ case mFallback of
             Just (r:_) -> Right (Just r)
-            _         -> result
+            Just []    -> Right Nothing
+            Nothing    -> result
       | otherwise -> pure result
 
 findAllSql ::
