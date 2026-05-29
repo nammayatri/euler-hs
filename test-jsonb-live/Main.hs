@@ -68,6 +68,7 @@ data PersonT f = PersonT
   , mobileHash  :: B.C f (Maybe HexBlob)        -- bytea column; HexBlob mirrors DbHash (hex string FromJSON + native bytea Beam IO)
   , metadata    :: B.C f (Maybe A.Value)        -- jsonb passthrough
   , pref        :: B.C f (Maybe VehiclePref)    -- text storing JSON (mkBeamInstancesForJSON shape): structured sum type
+  , oldNightShiftCharge :: B.C f (Maybe Double) -- DB column is `night_shift_multiplier` (mirrors rider-app Estimate's mkTableInstancesWithTModifier override)
   } deriving (Generic, B.Beamable)
 
 instance B.Table PersonT where
@@ -97,6 +98,7 @@ instance ModelMeta PersonT where
     , mobileHash  = B.fieldNamed "mobile_hash"
     , metadata    = B.fieldNamed "metadata"
     , pref        = B.fieldNamed "pref"
+    , oldNightShiftCharge = B.fieldNamed "night_shift_multiplier"
     }
   modelTableName  = "person"
   modelSchemaName = Just "atlas_driver_offer_bpp"
@@ -233,7 +235,8 @@ resetSchema = do
   runRaw "ALTER TABLE atlas_driver_offer_bpp.person ADD COLUMN IF NOT EXISTS mobile_hash bytea"
   runRaw "ALTER TABLE atlas_driver_offer_bpp.person ADD COLUMN IF NOT EXISTS metadata jsonb"
   runRaw "ALTER TABLE atlas_driver_offer_bpp.person ADD COLUMN IF NOT EXISTS pref text"
-  runRaw "UPDATE atlas_driver_offer_bpp.person SET tags=ARRAY['vip','english']::text[], mobile_hash=E'\\\\xDEADBEEFCAFEBABE'::bytea, metadata='{\"foo\":1}'::jsonb, pref='{\"tag\":\"VehicleSedan\",\"contents\":[\"spacious\",\"quiet\"]}' WHERE id IN ('p1','p2')"
+  runRaw "ALTER TABLE atlas_driver_offer_bpp.person ADD COLUMN IF NOT EXISTS night_shift_multiplier double precision"
+  runRaw "UPDATE atlas_driver_offer_bpp.person SET tags=ARRAY['vip','english']::text[], mobile_hash=E'\\\\xDEADBEEFCAFEBABE'::bytea, metadata='{\"foo\":1}'::jsonb, pref='{\"tag\":\"VehicleSedan\",\"contents\":[\"spacious\",\"quiet\"]}', night_shift_multiplier=1.5 WHERE id IN ('p1','p2')"
 
 dropCol :: Text -> IO ()
 dropCol col = runRaw ("ALTER TABLE atlas_driver_offer_bpp.person DROP COLUMN " <> col)
@@ -253,6 +256,7 @@ reportEither label = \case
               <> "  mobileHash=" <> show (mobileHash p)
               <> "  metadata=" <> show (metadata p)
               <> "  pref=" <> show (pref p)
+              <> "  oldNightShiftCharge=" <> show (oldNightShiftCharge p)
     pure True
   Left e -> do
     putStrLn $ "  " <> label <> ": ERR " <> show e
@@ -360,8 +364,22 @@ main = do
 
   resetSchema
 
+  putStrLn "\n[K] mkTableInstancesWithTModifier override (oldNightShiftCharge<->night_shift_multiplier): drop unrelated col, fallback must recover the override-mapped value"
+  resetSchema
+  dropCol "description"
+  resetHits hitRef
+  rK <- runFlow handler $ DBQ.findAllSql dbConf whereM1
+  let valuesOK = case rK of
+        Right rs -> all (\p -> oldNightShiftCharge p == Just 1.5) rs && length rs == 2
+        _        -> False
+  okK1 <- reportEither "K" rK
+  okK2 <- checkHits hitRef True "K"
+  putStrLn $ "  K override-mapped value preserved: " <> show valuesOK
+  resetSchema
+
   let results = [okA1, okA2, okB1, okB2, okC1, okC2, okD, okE1, okE2, okF1, okF2,
-                 okG1, okG2, okH1, okH2, okI1, okI2, okJ1, okJ2]
+                 okG1, okG2, okH1, okH2, okI1, okI2, okJ1, okJ2,
+                 okK1, okK2, valuesOK]
       passed = length (filter (== True) results)
   putStrLn $ "\n=== Summary: " <> show passed <> "/" <> show (length results) <> " passed ==="
   unless (and results) exitFailure

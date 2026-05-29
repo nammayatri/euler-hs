@@ -1,4 +1,5 @@
 {-# LANGUAGE AllowAmbiguousTypes  #-}
+{-# LANGUAGE ConstraintKinds      #-}
 {-# LANGUAGE DeriveAnyClass       #-}
 {-# LANGUAGE DeriveGeneric        #-}
 {-# LANGUAGE DerivingStrategies   #-}
@@ -9,6 +10,7 @@
 {-# LANGUAGE RankNTypes           #-}
 {-# LANGUAGE ScopedTypeVariables  #-}
 {-# LANGUAGE TypeApplications     #-}
+{-# LANGUAGE TypeOperators        #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 -- | Schema-tolerant Postgres reads: on @42703 column does not exist@ retry
@@ -28,13 +30,16 @@ import           Control.Exception                    (SomeException, try)
 import qualified Data.Aeson                           as A
 import qualified Data.Aeson.Key                       as AK
 import qualified Data.Aeson.KeyMap                    as AKM
+import qualified Data.HashMap.Strict                  as HM
 import           Data.Maybe                           (listToMaybe)
 import qualified Data.Pool                            as DP
 import qualified Data.Text                            as T
 import qualified Data.Text.Encoding                   as TE
 import qualified Database.Beam.Postgres               as BP
-import           Database.Beam.Schema.Tables          (TableField (..),
+import           Database.Beam.Schema.Tables          (Columnar' (..),
+                                                       TableField (..),
                                                        TableSettings,
+                                                       allBeamValues,
                                                        dbTableSettings)
 import qualified Database.PostgreSQL.Simple           as PGS
 import           Database.PostgreSQL.Simple.Types     (Query (..))
@@ -45,6 +50,7 @@ import           EulerHS.Prelude                      hiding (try)
 import           EulerHS.SqlDB.Types                  (DBConfig,
                                                        NativeSqlPool (..),
                                                        SqlConn, bemToNative)
+import qualified GHC.Generics                         as G
 import           Sequelize                            (Clause (..), Column,
                                                        Model, ModelMeta,
                                                        Term (..), Where,
@@ -66,9 +72,8 @@ data JsonbFallbackError
   deriving stock    (Show, Generic)
   deriving anyclass (A.ToJSON)
 
--- | Log the original Postgres error and bump @kv_jsonb_fallback_counter@
--- BEFORE the retry runs. Gated by @KV_METRIC_ENABLED@ via the same
--- 'KVMetricCfg' / 'L.getOption' dispatch as 'incrementRedisCallMetric'.
+-- | Emit a structured error log and bump @kv_jsonb_fallback_counter@ BEFORE
+-- the retry runs. The metric is ungated (rare, high-signal event).
 fireFallbackHook
   :: forall table m
    . (HasCallStack, L.MonadFlow m, ModelMeta table)
@@ -85,13 +90,9 @@ fireFallbackHook errText = do
   L.logErrorV ("JsonbFallbackTriggered" :: Text) payload
   KVM.incrementJsonbFallbackMetric schema tbl errText
 
---------------------------------------------------------------------------------
--- WHERE rendering: Sequelize 'Where' → raw SQL fragment.
---
 -- Sequelize's @valueToText = T.pack . show@ wraps text literals in escaped
--- quotes (@"M1"@ → @"\"M1\""@); 'unShowText' strips that so the resulting
--- SQL matches what beam would have produced.
---------------------------------------------------------------------------------
+-- quotes (@"M1"@ → @"\"M1\""@); 'unShowText' strips that so the SQL matches
+-- what beam would have produced.
 
 columnName
   :: forall table value. (Model BP.Postgres table)
@@ -114,19 +115,19 @@ quoteIdent     t = "\"" <> T.replace "\"" "\"\"" t <> "\""
 
 sqlLit, sqlInList :: SQLObject a -> Text
 sqlLit = \case
-  SQLObjectValue v  -> quoteSqlString (unShowText v)
-  SQLObjectList xs  -> "ARRAY[" <> T.intercalate "," (map sqlLit xs) <> "]"
+  SQLObjectValue v -> quoteSqlString (unShowText v)
+  SQLObjectList xs -> "ARRAY[" <> T.intercalate "," (map sqlLit xs) <> "]"
 sqlInList = \case
-  SQLObjectValue v  -> "(" <> quoteSqlString (unShowText v) <> ")"
-  SQLObjectList xs  -> "(" <> T.intercalate "," (map sqlLit xs) <> ")"
+  SQLObjectValue v -> "(" <> quoteSqlString (unShowText v) <> ")"
+  SQLObjectList xs -> "(" <> T.intercalate "," (map sqlLit xs) <> ")"
 
 renderWhere
   :: forall table. (Model BP.Postgres table)
   => Where BP.Postgres table -> Either JsonbFallbackError Text
 renderWhere = \case
-  []       -> Right "TRUE"
-  [c]      -> renderClause c
-  cs       -> renderClause (And cs)
+  []  -> Right "TRUE"
+  [c] -> renderClause c
+  cs  -> renderClause (And cs)
   where
     renderClause :: Clause BP.Postgres table -> Either JsonbFallbackError Text
     renderClause = \case
@@ -160,30 +161,56 @@ renderWhere = \case
         Null  -> Right $ quoteIdent c <> " IS NOT NULL"
         other -> (\inner' -> "NOT (" <> inner' <> ")") <$> renderTerm c other
 
---------------------------------------------------------------------------------
--- Execute SELECT to_jsonb(t.*) and decode rows
---------------------------------------------------------------------------------
+-- | Walk a record's 'G.Rep' to extract Haskell record-selector names in
+-- declaration order. Used on @table Identity@ to get the camelCase field
+-- names that @genericParseJSON defaultOptions@ expects.
+class GFieldNames (f :: Type -> Type) where
+  gFieldNames :: Proxy f -> [Text]
 
--- | Normalise a row JSON value for downstream @FromJSON@. All transforms
--- apply ONLY to top-level column values — nested objects / arrays are user
--- payload (JSONB / @text[]@) and must stay byte-identical.
+instance GFieldNames G.U1                                  where gFieldNames _ = []
+instance G.Selector s => GFieldNames (G.M1 G.S s a)         where gFieldNames _ = [T.pack (G.selName (undefined :: G.M1 G.S s a x))]
+instance (GFieldNames f, GFieldNames g) => GFieldNames (f G.:*: g) where gFieldNames _ = gFieldNames (Proxy @f) <> gFieldNames (Proxy @g)
+instance GFieldNames f => GFieldNames (G.M1 G.D s f)        where gFieldNames _ = gFieldNames (Proxy @f)
+instance GFieldNames f => GFieldNames (G.M1 G.C s f)        where gFieldNames _ = gFieldNames (Proxy @f)
+
+-- | @<db-column-name> → <haskell-record-selector-name>@. DB names from
+-- 'modelFieldModification' (covers @mkTableInstancesWithTModifier@ overrides),
+-- Haskell names from 'GHC.Generics'; paired in beam's structural order.
+fieldNameMap
+  :: forall table
+   . (Model BP.Postgres table, G.Generic (table Identity), GFieldNames (G.Rep (table Identity)))
+  => HM.HashMap Text Text
+fieldNameMap =
+  let modSettings :: TableSettings table
+      modSettings = dbTableSettings (modelTableEntityDescriptor @table @BP.Postgres)
+      pick :: forall a. Columnar' (TableField table) a -> Text
+      pick (Columnar' f) = _fieldName f
+   in HM.fromList $ zip (allBeamValues pick modSettings)
+                        (gFieldNames (Proxy @(G.Rep (table Identity))))
+
+-- | Normalise a row Value for the table's auto-derived @FromJSON@. All
+-- transforms are top-level only — nested objects / arrays (JSONB columns,
+-- text[] arrays) stay byte-identical.
 --
--- 1. Rewrite top-level keys @snake_case → camelCase@ so the
---    @mkTableInstances@-generated @genericParseJSON defaultOptions@ instances
---    (which expect Haskell field names) decode unchanged.
--- 2. Strip the Postgres bytea text-format @\\x@ prefix from string values
---    (@"\\xdeadbeef" → "deadbeef"@) so @DbHash@-style @decodeHex@ accepts them.
--- 3. Unwrap @TEXT@ columns that hold a serialised JSON object / array (the
---    @mkBeamInstancesForJSON@ shape) — @to_jsonb@ emits them as JSON strings
---    @\"{...}\"@, the type's auto-derived FromJSON expects the structured
---    Value. We parse and substitute only when the inner parse yields an
---    Object or Array (scalar-looking strings are left untouched).
-normaliseRow :: A.Value -> A.Value
+-- * Key: DB column name → Haskell selector name via 'fieldNameMap'; falls
+--   back to snake↔camel for any column not in the map.
+-- * Value: 'unbyteaEncode' strips bytea's @\\x@ prefix; 'unwrapJsonText'
+--   promotes TEXT-stored JSON objects/arrays so @mkBeamInstancesForJSON@
+--   FromJSON instances receive the structured Value, not a JSON string.
+normaliseRow
+  :: forall table
+   . (Model BP.Postgres table, G.Generic (table Identity), GFieldNames (G.Rep (table Identity)))
+  => A.Value -> A.Value
 normaliseRow = \case
   A.Object o -> A.Object $ AKM.fromList
-    [ (AK.fromText (T.pack (Casing.camel (T.unpack (AK.toText k)))), normaliseValue v)
-    | (k, v) <- AKM.toList o ]
-  other      -> other
+    [ (renameKey (AK.toText k), normaliseValue v)
+    | (k, v) <- AKM.toList o
+    ]
+  other -> other
+  where
+    nameMap = fieldNameMap @table
+    renameKey dbCol = AK.fromText $
+      HM.lookupDefault (T.pack (Casing.camel (T.unpack dbCol))) dbCol nameMap
 
 normaliseValue :: A.Value -> A.Value
 normaliseValue = unwrapJsonText . unbyteaEncode
@@ -200,9 +227,6 @@ unbyteaEncode = \case
                || (c >= 'a' && c <= 'f')
                || (c >= 'A' && c <= 'F')
 
--- | Promote @TEXT@-stored JSON to its parsed Value, but only when the string
--- starts with @{@ or @[@ and parses to a structured value. Plain strings
--- (even those starting with other JSON-prefix characters) are preserved.
 unwrapJsonText :: A.Value -> A.Value
 unwrapJsonText = \case
   A.String t
@@ -217,9 +241,16 @@ unwrapJsonText = \case
     structured (A.Array  _) = True
     structured _            = False
 
+type JsonbDecodeable table =
+  ( Model BP.Postgres table
+  , A.FromJSON (table Identity)
+  , G.Generic (table Identity)
+  , GFieldNames (G.Rep (table Identity))
+  )
+
 runJsonbSelect
   :: forall table m
-   . (HasCallStack, L.MonadFlow m, A.FromJSON (table Identity))
+   . (HasCallStack, L.MonadFlow m, JsonbDecodeable table)
   => DBConfig BP.Pg -> Text
   -> m (Either JsonbFallbackError [table Identity])
 runJsonbSelect dbConf sql = do
@@ -237,7 +268,7 @@ runJsonbSelect dbConf sql = do
   where
     decodeRows :: [A.Value] -> [table Identity] -> Either JsonbFallbackError [table Identity]
     decodeRows []     acc = Right (reverse acc)
-    decodeRows (v:vs) acc = case A.fromJSON (normaliseRow v) of
+    decodeRows (v:vs) acc = case A.fromJSON (normaliseRow @table v) of
       A.Success r -> decodeRows vs (r : acc)
       A.Error err -> Left (JfeJsonDecodeError (T.pack err))
 
@@ -248,7 +279,7 @@ qualifiedTableName = case modelSchemaName @table of
 
 findAllSqlJsonb
   :: forall table m
-   . (HasCallStack, L.MonadFlow m, Model BP.Postgres table, A.FromJSON (table Identity))
+   . (HasCallStack, L.MonadFlow m, JsonbDecodeable table)
   => DBConfig BP.Pg -> Where BP.Postgres table
   -> m (Either JsonbFallbackError [table Identity])
 findAllSqlJsonb dbConf w = case renderWhere @table w of
@@ -258,7 +289,7 @@ findAllSqlJsonb dbConf w = case renderWhere @table w of
 
 findOneSqlJsonb
   :: forall table m
-   . (HasCallStack, L.MonadFlow m, Model BP.Postgres table, A.FromJSON (table Identity))
+   . (HasCallStack, L.MonadFlow m, JsonbDecodeable table)
   => DBConfig BP.Pg -> Where BP.Postgres table
   -> m (Either JsonbFallbackError (Maybe (table Identity)))
 findOneSqlJsonb dbConf w = case renderWhere @table w of
@@ -266,12 +297,9 @@ findOneSqlJsonb dbConf w = case renderWhere @table w of
   Right s -> fmap listToMaybe <$> runJsonbSelect @table dbConf
     ("SELECT to_jsonb(t.*) FROM " <> qualifiedTableName @table <> " t WHERE " <> s <> " LIMIT 1")
 
---------------------------------------------------------------------------------
--- Backend-polymorphic dispatch used by CachedSqlDBQuery.{findAllSql,findOneSql}.
--- OVERLAPPABLE default returns Nothing (any backend); OVERLAPPING Pg+Postgres
--- specialization runs the to_jsonb fallback after firing the metric/log.
---------------------------------------------------------------------------------
-
+-- | Backend-polymorphic dispatch used inside @CachedSqlDBQuery.findAllSql@ /
+-- @findOneSql@. OVERLAPPABLE default = no-op (any backend);
+-- OVERLAPPING Pg+Postgres+FromJSON = runs the to_jsonb fallback.
 class TryJsonbFallback beM be table where
   tryJsonbFallback
     :: (HasCallStack, L.MonadFlow m, Model be table, ModelMeta table)
@@ -282,7 +310,10 @@ instance {-# OVERLAPPABLE #-} TryJsonbFallback beM be table where
   tryJsonbFallback _ _ _ = pure Nothing
 
 instance {-# OVERLAPPING #-}
-         (A.FromJSON (table Identity))
+         ( A.FromJSON (table Identity)
+         , G.Generic  (table Identity)
+         , GFieldNames (G.Rep (table Identity))
+         )
          => TryJsonbFallback BP.Pg BP.Postgres table where
   tryJsonbFallback dbConf w origErr = do
     fireFallbackHook @table origErr
