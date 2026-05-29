@@ -19,6 +19,7 @@
 -- 'TryJsonbFallback' typeclass — external callers need no source changes.
 module EulerHS.JsonbFallback
   ( TryJsonbFallback (..),
+    GFieldNames,
     findAllSqlJsonb,
     findOneSqlJsonb,
     fireFallbackHook,
