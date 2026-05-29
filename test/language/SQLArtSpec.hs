@@ -1,7 +1,7 @@
-{-# LANGUAGE DeriveAnyClass     #-}
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE StandaloneDeriving #-}
 
 module SQLArtSpec
   (
-  ) where
-
+  )
+where

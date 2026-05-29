@@ -1,12 +1,12 @@
 module KVDB.KVDBSpec where
 
-import           EulerHS.Interpreters
+import EulerHS.Interpreters
 import qualified EulerHS.Language as L
-import           EulerHS.Prelude
-import           EulerHS.Runtime
+import EulerHS.Prelude
+import EulerHS.Runtime
 import qualified EulerHS.Types as T
-import           Test.Hspec hiding (runIO)
-import           Prelude (head)
+import Test.Hspec hiding (runIO)
+import Prelude (head)
 
 redisName :: Text
 redisName = "eulerKVDB"
@@ -17,9 +17,7 @@ redisCfg = T.mkKVDBConfig redisName T.defaultKVDBConnConfig
 spec :: Spec
 spec =
   around (withFlowRuntime Nothing) $
-
     describe "EulerHS KVDB tests" $ do
-
       it "Double connection initialization should fail" $ \rt -> do
         eRes <- runFlow rt $ do
           eConn1 <- L.initKVDBConnection redisCfg
@@ -47,7 +45,7 @@ spec =
           case (eConn1, eConn2) of
             (Left err, _) -> pure $ Left $ "Failed to connect: " <> show @Text err
             (_, Left err) -> pure $ Left $ "Unexpected error on get connection: " <> show err
-            _             -> pure $ Right ()
+            _ -> pure $ Right ()
         eRes `shouldBe` Right ()
 
       it "Init and double get connection should succeed" $ \rt -> do
@@ -59,7 +57,7 @@ spec =
             (Left err, _, _) -> pure $ Left $ "Failed to connect: " <> show @Text err
             (_, Left err, _) -> pure $ Left $ "Unexpected error on 1st get connection: " <> show err
             (_, _, Left err) -> pure $ Left $ "Unexpected error on 2nd get connection: " <> show err
-            _                -> pure $ Right ()
+            _ -> pure $ Right ()
         eRes `shouldBe` Right ()
 
       it "getOrInitKVDBConn should succeed" $ \rt -> do
@@ -67,16 +65,18 @@ spec =
           eConn <- L.getOrInitKVDBConn redisCfg
           case eConn of
             Left err -> pure $ Left $ "Failed to connect: " <> show @Text err
-            _        -> pure $ Right ()
+            _ -> pure $ Right ()
         eRes `shouldBe` Right ()
 
       it "Prepared connection should be available" $ \rt -> do
-        void $ runFlow rt $ do
-          eConn <- L.initKVDBConnection redisCfg
-          when (isLeft eConn) $ error "Failed to prepare connection."
-        void $ runFlow rt $ do
-          eConn <- L.getKVDBConnection redisCfg
-          when (isLeft eConn) $ error "Failed to get prepared connection."
+        void $
+          runFlow rt $ do
+            eConn <- L.initKVDBConnection redisCfg
+            when (isLeft eConn) $ error "Failed to prepare connection."
+        void $
+          runFlow rt $ do
+            eConn <- L.getKVDBConnection redisCfg
+            when (isLeft eConn) $ error "Failed to get prepared connection."
 
       it "Redis binary strings 1" $ \rt -> do
         let key = "a\xfcज" :: ByteString

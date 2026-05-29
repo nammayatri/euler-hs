@@ -1,65 +1,67 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes          #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE DeriveAnyClass     #-}
-{-# OPTIONS_GHC -Wno-star-is-type #-}
-{-# OPTIONS_GHC -Wno-orphans #-}
-{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+{-# OPTIONS_GHC -Wno-star-is-type #-}
 
 module EulerHS.KVConnector.Types
-  (
-    module EulerHS.KVConnector.Types,
-    MeshError(..), TableMappings(..)
-  ) where
+  ( module EulerHS.KVConnector.Types,
+    MeshError (..),
+    TableMappings (..),
+  )
+where
 
-import EulerHS.Prelude
+import Data.Aeson ((.=))
 import qualified Data.Aeson as A
-import           Data.Aeson.Types (Parser)
-import           Data.Data (Data)
+import Data.Aeson.Types (Parser)
+import Data.Data (Data)
 import qualified Data.HashMap.Strict as HM
 import qualified Data.Map.Strict as Map
-import           Data.Time (UTCTime)
-import qualified EulerHS.KVDB.Language as L
+import Data.Time (UTCTime)
 import qualified Database.Beam as B
-import           Database.Beam.MySQL (MySQL)
-import           Database.Beam.Backend (BeamSqlBackend, HasSqlValueSyntax (sqlValueSyntax), autoSqlValueSyntax)
+import Database.Beam.Backend (BeamSqlBackend, HasSqlValueSyntax (sqlValueSyntax), autoSqlValueSyntax)
 import qualified Database.Beam.Backend.SQL as B
-import           Database.Beam.Schema (FieldModification, TableField)
-import           Sequelize (Column, Set)
+import Database.Beam.MySQL (MySQL)
+import Database.Beam.Schema (FieldModification, TableField)
+import qualified EulerHS.KVDB.Language as L
+import EulerHS.Prelude
 import qualified EulerHS.Types as T
-import           Data.Aeson ((.=))
+import Sequelize (Column, Set)
 import Sequelize.SQLObject (ToSQLObject)
+
 ------------ TYPES AND CLASSES ------------
 
 data DBCommandVersion = V1 | V2
   deriving (Generic, Show, ToJSON, FromJSON)
 
-data PrimaryKey = PKey [(Text,Text)]
-data SecondaryKey = SKey [(Text,Text)]
+data PrimaryKey = PKey [(Text, Text)]
+
+data SecondaryKey = SKey [(Text, Text)]
 
 class KVConnector table where
   tableName :: Text
   keyMap :: HM.HashMap Text Bool -- True implies it is primary key and False implies secondary
   primaryKey :: table -> PrimaryKey
-  secondaryKeys:: table -> [SecondaryKey]
+  secondaryKeys :: table -> [SecondaryKey]
   mkSQLObject :: table -> A.Value
 
-  ----------------------------------------------
+----------------------------------------------
 
 class TableMappings a where
-  getTableMappings :: [(String,String)]
+  getTableMappings :: [(String, String)]
   getTableName :: Text
-
 
 --------------- EXISTING DB MESH ---------------
 class MeshState a where
-  getShardedHashTag :: (Int,Int) -> a -> Maybe Text
-  getKVKey          :: a -> Maybe Text
-  getKVDirtyKey     :: a -> Maybe Text
-  isDBMeshEnabled   :: a -> Bool
+  getShardedHashTag :: (Int, Int) -> a -> Maybe Text
+  getKVKey :: a -> Maybe Text
+  getKVDirtyKey :: a -> Maybe Text
+  isDBMeshEnabled :: a -> Bool
 
 class MeshMeta be table where
   meshModelFieldModification :: table (FieldModification (TableField table))
@@ -68,8 +70,11 @@ class MeshMeta be table where
   parseSetClause :: [(Text, A.Value)] -> Parser [Set be table]
 
 data TermWrap be (table :: (* -> *) -> *) where
-  TermWrap :: (B.BeamSqlBackendCanSerialize be a, A.ToJSON a, Ord a, B.HasSqlEqualityCheck be a, Show a,ToSQLObject a)
-              => Column table a -> a -> TermWrap be table
+  TermWrap ::
+    (B.BeamSqlBackendCanSerialize be a, A.ToJSON a, Ord a, B.HasSqlEqualityCheck be a, Show a, ToSQLObject a) =>
+    Column table a ->
+    a ->
+    TermWrap be table
 
 type MeshResult a = Either MeshError a
 
@@ -87,29 +92,29 @@ data MeshError
   deriving (Show, Generic, Exception, Data)
 
 instance ToJSON MeshError where
-  toJSON (MRedisError r) = A.object
-    [
-      "contents" A..= (show r :: Text),
-      "tag" A..= ("MRedisError" :: Text)
-    ]
+  toJSON (MRedisError r) =
+    A.object
+      [ "contents" A..= (show r :: Text),
+        "tag" A..= ("MRedisError" :: Text)
+      ]
   toJSON a = A.toJSON a
 
 data QueryPath = KVPath | SQLPath
 
 data MeshConfig = MeshConfig
-  { meshEnabled     :: Bool
-  , cerealEnabled   :: Bool
-  , memcacheEnabled :: Bool
-  , meshDBName      :: Text
-  , ecRedisDBStream :: Text
-  , kvRedis         :: Text
-  , kvRedisSecondary :: Text
-  , secondaryRedisEnabled :: Bool
-  , redisTtl        :: L.KVDBDuration
-  , kvHardKilled    :: Bool
-  , tableShardModRange :: (Int, Int)
-  , redisKeyPrefix  :: Text
-  , forceDrainToDB  :: Bool
+  { meshEnabled :: Bool,
+    cerealEnabled :: Bool,
+    memcacheEnabled :: Bool,
+    meshDBName :: Text,
+    ecRedisDBStream :: Text,
+    kvRedis :: Text,
+    kvRedisSecondary :: Text,
+    secondaryRedisEnabled :: Bool,
+    redisTtl :: L.KVDBDuration,
+    kvHardKilled :: Bool,
+    tableShardModRange :: (Int, Int),
+    redisKeyPrefix :: Text,
+    forceDrainToDB :: Bool
   }
   deriving (Generic, Eq, Show, A.ToJSON)
 
@@ -155,33 +160,36 @@ data Operation
   deriving (Generic, Show, ToJSON)
 
 data Source = KV | SQL | KV_AND_SQL | IN_MEM
-    deriving (Generic, Show, Eq, ToJSON)
+  deriving (Generic, Show, Eq, ToJSON)
 
 data DBLogEntry a = DBLogEntry
-  { _log_type             :: Text
-  , _action               :: Text
-  , _operation            :: Operation
-  , _data                 :: a
-  , _latency              :: Int
-  , _model                :: Text
-  , _cpuLatency           :: Integer
-  , _source               :: Source
-  , _apiTag               :: Maybe Text
-  , _merchant_id          :: Maybe Text
-  , _whereDiffCheckRes    :: Maybe [[Text]]
+  { _log_type :: Text,
+    _action :: Text,
+    _operation :: Operation,
+    _data :: a,
+    _latency :: Int,
+    _model :: Text,
+    _cpuLatency :: Integer,
+    _source :: Source,
+    _apiTag :: Maybe Text,
+    _merchant_id :: Maybe Text,
+    _whereDiffCheckRes :: Maybe [[Text]]
   }
   deriving stock (Generic)
-  -- deriving anyclass (ToJSON)
+
+-- deriving anyclass (ToJSON)
 instance (ToJSON a) => ToJSON (DBLogEntry a) where
-  toJSON val = A.object [ "log_type" .= _log_type val
-                        , "action" .= _action val
-                        , "operation" .= _operation val
-                        , "latency" .= _latency val
-                        , "model" .= _model val
-                        , "cpuLatency" .= _cpuLatency val
-                        , "data" .= _data val
-                        , "source" .= _source val
-                        , "api_tag" .= _apiTag val
-                        , "merchant_id" .= _merchant_id val
-                        , "whereDiffCheckRes" .= _whereDiffCheckRes val
-                      ]
+  toJSON val =
+    A.object
+      [ "log_type" .= _log_type val,
+        "action" .= _action val,
+        "operation" .= _operation val,
+        "latency" .= _latency val,
+        "model" .= _model val,
+        "cpuLatency" .= _cpuLatency val,
+        "data" .= _data val,
+        "source" .= _source val,
+        "api_tag" .= _apiTag val,
+        "merchant_id" .= _merchant_id val,
+        "whereDiffCheckRes" .= _whereDiffCheckRes val
+      ]

@@ -1,69 +1,67 @@
 {-# LANGUAGE TypeOperators #-}
 
 module EulerHS.Extra.Combinators
-( toDomain
-, toDomainAll
-, throwOnDBError
-, throwOnParseError
-, extractDBResult
-)
+  ( toDomain,
+    toDomainAll,
+    throwOnDBError,
+    throwOnParseError,
+    extractDBResult,
+  )
 where
 
-import           Control.Exception (Exception)
-import           Control.Monad (void)
-import           Data.Text (Text, pack)
-import           Juspay.Extra.Parsing (Parsed (Failed, Result))
-import           EulerHS.Language (MonadFlow, logError, throwException)
-import           GHC.Generics (Generic)
-import           GHC.Stack (HasCallStack)
-import           Named (NamedF (Arg), type (:!))
-import           Prelude hiding (id)
+import Control.Exception (Exception)
+import Control.Monad (void)
+import Data.Text (Text, pack)
+import EulerHS.Language (MonadFlow, logError, throwException)
+import GHC.Generics (Generic)
+import GHC.Stack (HasCallStack)
+import Juspay.Extra.Parsing (Parsed (Failed, Result))
+import Named (NamedF (Arg), type (:!))
+import Prelude hiding (id)
 
-{- |
-Parse a loaded DB result and throw errors.
-
-  * In case of a database error, throws `Euler.Types.Errors.DatabaseError`.
-  * In case of a domain type parsing error, throws
-    `Euler.Types.Errors.DomainTypeParseError`
--}
-toDomain
-  :: (HasCallStack, MonadFlow m, Show err)
-  => Either err a
-  -> (a -> Parsed b)
-  -> "function_name" :! Text -- Name of query function for error log
-  -> "parser_name" :! Text
-  -> m b
+-- |
+-- Parse a loaded DB result and throw errors.
+--
+--   * In case of a database error, throws `Euler.Types.Errors.DatabaseError`.
+--   * In case of a domain type parsing error, throws
+--     `Euler.Types.Errors.DomainTypeParseError`
+toDomain ::
+  (HasCallStack, MonadFlow m, Show err) =>
+  Either err a ->
+  (a -> Parsed b) ->
+  "function_name" :! Text -> -- Name of query function for error log
+  "parser_name" :! Text ->
+  m b
 toDomain eitherRes parser functionName parserName = do
   res <- extractDBResult eitherRes functionName
   throwOnParseError (parser res) parserName
 
-{- | For traversable responses.
-Maybe a, [a], etc.
--}
-toDomainAll
-  :: (HasCallStack, MonadFlow m, Traversable f, Show err)
-  => Either err (f a)
-  -> (a -> Parsed b)
-  -> "function_name" :! Text
-  -> "parser_name" :! Text
-  -> m (f b)
+-- | For traversable responses.
+-- Maybe a, [a], etc.
+toDomainAll ::
+  (HasCallStack, MonadFlow m, Traversable f, Show err) =>
+  Either err (f a) ->
+  (a -> Parsed b) ->
+  "function_name" :! Text ->
+  "parser_name" :! Text ->
+  m (f b)
 toDomainAll eitherRes parser functionName parserName = do
   res <- extractDBResult eitherRes functionName
   throwOnParseError (traverse parser res) parserName
 
-{- | What the name says silly! -}
-throwOnDBError
-  :: (HasCallStack, MonadFlow m, Show err)
-  => Either err ()
-  -> "function_name" :! Text
-  -> m ()
+-- | What the name says silly!
+throwOnDBError ::
+  (HasCallStack, MonadFlow m, Show err) =>
+  Either err () ->
+  "function_name" :! Text ->
+  m ()
 throwOnDBError res = void . extractDBResult res
 
-throwOnParseError
-  :: (HasCallStack, MonadFlow m)
-  => Parsed a
-  -> "parser_name" :! Text
-  -> m a
+throwOnParseError ::
+  (HasCallStack, MonadFlow m) =>
+  Parsed a ->
+  "parser_name" :! Text ->
+  m a
 throwOnParseError parseResult (Arg parserName) = case parseResult of
   Result c -> pure c
   Failed e -> do
@@ -75,11 +73,11 @@ throwOnParseError parseResult (Arg parserName) = case parseResult of
 -- Helpers
 -----------------------------------------------------------------------------
 
-extractDBResult
-  :: (HasCallStack, MonadFlow m, Show err)
-  => Either err a
-  -> "function_name" :! Text
-  -> m a
+extractDBResult ::
+  (HasCallStack, MonadFlow m, Show err) =>
+  Either err a ->
+  "function_name" :! Text ->
+  m a
 extractDBResult eitherResult (Arg functionName) = case eitherResult of
   Right res -> pure res
   Left err -> do
@@ -92,15 +90,15 @@ extractDBResult eitherResult (Arg functionName) = case eitherResult of
 -----------------------------------------------------------------------------
 
 newtype DatabaseError = DatabaseError
-   { errorMessage :: Text
-   }
+  { errorMessage :: Text
+  }
   deriving (Eq, Show, Generic)
 
 instance Exception DatabaseError
 
 newtype DomainTypeParseError = DomainTypeParseError
-   { errorMessage :: Text
-   }
+  { errorMessage :: Text
+  }
   deriving (Eq, Show, Generic)
 
 instance Exception DomainTypeParseError

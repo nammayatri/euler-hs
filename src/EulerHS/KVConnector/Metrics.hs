@@ -6,12 +6,12 @@ module EulerHS.KVConnector.Metrics where
 
 import Data.Time.Clock (NominalDiffTime)
 import Euler.Events.MetricApi.MetricApi
+import EulerHS.Api (ApiTag (..))
 import EulerHS.KVConnector.Types (DBLogEntry (..), Operation (..), Source (..))
 import qualified EulerHS.Language as L
 import EulerHS.Options (OptionEntity)
 import EulerHS.Prelude
 import qualified Juspay.Extra.Config as Conf
-import EulerHS.Api (ApiTag(..))
 
 nominalDiffTimeToMilliseconds :: NominalDiffTime -> Double
 nominalDiffTimeToMilliseconds latency = realToFrac latency * 1000
@@ -71,7 +71,7 @@ mkKVMetricHandler = do
       ( \case
           (action, model, findResult) -> do
             case findResult of
-              KVHit    -> inc (metrics </> #kv_hit_counter) action model
+              KVHit -> inc (metrics </> #kv_hit_counter) action model
               MissInKV -> inc (metrics </> #kv_miss_in_kv_counter) action model
               MissInDB -> inc (metrics </> #kv_miss_in_db_counter) action model
       )
@@ -179,7 +179,6 @@ collectionLock =
     .> kv_jsonb_fallback_counter
     .> MNil
 
-
 kv_handler_latency_observe =
   histogram #kv_handler_latency
     .& lbl @"handler" @Text
@@ -256,7 +255,7 @@ incrementJsonbFallbackMetric schema model err = do
   env <- L.getOption KVMetricCfg
   case env of
     Just val -> L.runIO $ jsonbFallback val (schema, model, err)
-    Nothing  -> pure ()
+    Nothing -> pure ()
 
 withKVLatencyMetric :: (HasCallStack, L.MonadFlow m) => Text -> Text -> Text -> m a -> m a
 withKVLatencyMetric handler model redisCluster action = do

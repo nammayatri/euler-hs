@@ -1,52 +1,67 @@
-{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# OPTIONS_GHC -Wno-error=unused-top-binds #-}
 
 module EulerHS.CachedSqlDBQuery
-  ( create
-  , createSql
-  , createSqlWoReturing
-  , updateOne
-  , updateOneWoReturning
-  , updateOneSql
-  , updateOneSqlWoReturning
-  , updateAllSql
-  , updateExtended
-  , findOne
-  , findOneSql
-  , findAll
-  , findAllSql
-  , findAllExtended
-  , deleteSql
-  , deleteExtended
-  , deleteWithReturningPG
-  , createMultiSql
-  , createMultiSqlWoReturning
-  , runQuery
-  , countRows
-  , SqlReturning(..)
+  ( create,
+    createSql,
+    createSqlWoReturing,
+    updateOne,
+    updateOneWoReturning,
+    updateOneSql,
+    updateOneSqlWoReturning,
+    updateAllSql,
+    updateExtended,
+    findOne,
+    findOneSql,
+    findAll,
+    findAllSql,
+    findAllExtended,
+    deleteSql,
+    deleteExtended,
+    deleteWithReturningPG,
+    createMultiSql,
+    createMultiSqlWoReturning,
+    runQuery,
+    countRows,
+    SqlReturning (..),
   )
 where
 
-import           Data.Aeson (encode)
+import Data.Aeson (encode)
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Text as T
 import qualified Database.Beam as B
+import qualified Database.Beam.Backend.SQL.BeamExtensions as BExt
 import qualified Database.Beam.MySQL as BM
 import qualified Database.Beam.Postgres as BP
 import qualified Database.Beam.Sqlite as BS
-import qualified Database.Beam.Backend.SQL.BeamExtensions as BExt
-import           EulerHS.Extra.Language (getOrInitSqlConn, rGet, rSetB, rDel)
+import EulerHS.Extra.Language (getOrInitSqlConn, rDel, rGet, rSetB)
 import qualified EulerHS.Framework.Language as L
 import qualified EulerHS.JsonbFallback as JF
-import           EulerHS.Prelude
+import EulerHS.Prelude
 import qualified EulerHS.SqlDB.Language as DB
-import           EulerHS.SqlDB.Types (BeamRunner, BeamRuntime, DBConfig(..),
-                                      DBError (DBError),
-                                      DBErrorType (UnexpectedResult), DBResult)
-import           Named (defaults, (!))
-import           Sequelize (Model, Set, Where, mkExprWithDefault,  mkMultiExprWithDefault,
-                            modelTableEntity, sqlSelect, sqlUpdate, sqlDelete, sqlCount)
+import EulerHS.SqlDB.Types
+  ( BeamRunner,
+    BeamRuntime,
+    DBConfig (..),
+    DBError (DBError),
+    DBErrorType (UnexpectedResult),
+    DBResult,
+  )
+import Named (defaults, (!))
+import Sequelize
+  ( Model,
+    Set,
+    Where,
+    mkExprWithDefault,
+    mkMultiExprWithDefault,
+    modelTableEntity,
+    sqlCount,
+    sqlDelete,
+    sqlSelect,
+    sqlUpdate,
+  )
 
 -- TODO: What KVDB should be used
 cacheName :: String
@@ -56,11 +71,11 @@ cacheName = "eulerKVDB"
 
 -- | Create a new database entry with the given value.
 --   Cache the value if the DB insert succeeds.
-
 class SqlReturning (beM :: Type -> Type) (be :: Type) where
   createReturning ::
-    forall (table :: (Type -> Type) -> Type)
-           m.
+    forall
+      (table :: (Type -> Type) -> Type)
+      m.
     ( HasCallStack,
       BeamRuntime be beM,
       BeamRunner beM,
@@ -77,8 +92,9 @@ class SqlReturning (beM :: Type -> Type) (be :: Type) where
     m (Either DBError (table Identity))
 
   deleteAllReturning ::
-    forall (table :: (Type -> Type) -> Type)
-          m.
+    forall
+      (table :: (Type -> Type) -> Type)
+      m.
     ( HasCallStack,
       BeamRuntime be beM,
       BeamRunner beM,
@@ -93,7 +109,6 @@ class SqlReturning (beM :: Type -> Type) (be :: Type) where
     Where be table ->
     m (Either DBError [table Identity])
 
-
 instance SqlReturning BM.MySQLM BM.MySQL where
   createReturning = createMySQL
   deleteAllReturning = deleteAllMySQL
@@ -106,12 +121,12 @@ instance SqlReturning BS.SqliteM BS.Sqlite where
   createReturning = create
   deleteAllReturning = deleteAll
 
-
 create ::
-  forall (be :: Type)
-         (beM :: Type -> Type)
-         (table :: (Type -> Type) -> Type)
-         m.
+  forall
+    (be :: Type)
+    (beM :: Type -> Type)
+    (table :: (Type -> Type) -> Type)
+    m.
   ( HasCallStack,
     BeamRuntime be beM,
     BeamRunner beM,
@@ -134,8 +149,9 @@ create dbConf value mCacheKey = do
     Left e -> return $ Left e
 
 createMySQL ::
-  forall (table :: (Type -> Type) -> Type)
-         m.
+  forall
+    (table :: (Type -> Type) -> Type)
+    m.
   ( HasCallStack,
     Model BM.MySQL table,
     ToJSON (table Identity),
@@ -208,18 +224,20 @@ updateOneSqlWoReturning ::
   Where be table ->
   m (DBResult ())
 updateOneSqlWoReturning dbConf newVals whereClause = do
-  let updateQuery = DB.updateRows $ sqlUpdate
-        ! #set newVals
-        ! #where_ whereClause
+  let updateQuery =
+        DB.updateRows $
+          sqlUpdate
+            ! #set newVals
+            ! #where_ whereClause
   res <- runQuery dbConf updateQuery
   case res of
     Right x -> do
       L.logDebug @Text "updateOneSqlWoReturning" "query executed"
       return $ Right x
-   -- Right xs -> do
-   --   let message = "DB returned \"" <> show xs <> "\" after update"
-   --   L.logError @Text "create" message
-   --   return $ Left $ DBError UnexpectedResult message
+    -- Right xs -> do
+    --   let message = "DB returned \"" <> show xs <> "\" after update"
+    --   L.logError @Text "create" message
+    --   return $ Left $ DBError UnexpectedResult message
     Left e -> return $ Left e
 
 updateOneSql ::
@@ -237,9 +255,11 @@ updateOneSql ::
   Where be table ->
   m (DBResult (table Identity))
 updateOneSql dbConf newVals whereClause = do
-  let updateQuery = DB.updateRowsReturningList $ sqlUpdate
-        ! #set newVals
-        ! #where_ whereClause
+  let updateQuery =
+        DB.updateRowsReturningList $
+          sqlUpdate
+            ! #set newVals
+            ! #where_ whereClause
   res <- runQuery dbConf updateQuery
   case res of
     Right [x] -> return $ Right x
@@ -263,14 +283,20 @@ updateAllSql ::
   Where be table ->
   m (DBResult ())
 updateAllSql dbConf newVals whereClause = do
-  let updateQuery = DB.updateRows $ sqlUpdate
-        ! #set newVals
-        ! #where_ whereClause
+  let updateQuery =
+        DB.updateRows $
+          sqlUpdate
+            ! #set newVals
+            ! #where_ whereClause
   runQuery dbConf updateQuery
 
 -- | Perform an arbitrary 'SqlUpdate'. This will cache if successful.
-updateExtended :: (HasCallStack, L.MonadFlow m, BeamRunner beM, BeamRuntime be beM) =>
-  DBConfig beM -> Maybe Text -> B.SqlUpdate be table -> m (Either DBError ())
+updateExtended ::
+  (HasCallStack, L.MonadFlow m, BeamRunner beM, BeamRuntime be beM) =>
+  DBConfig beM ->
+  Maybe Text ->
+  B.SqlUpdate be table ->
+  m (Either DBError ())
 updateExtended dbConf mKey upd = do
   res <- runQuery dbConf . DB.updateRows $ upd
   maybe (pure ()) (`cacheWithKey` res) mKey
@@ -347,14 +373,16 @@ findAll dbConf (Just cacheKey) whereClause = do
 findAll dbConf Nothing whereClause = findAllSql dbConf whereClause
 
 -- | Like 'findAll', but takes an explicit 'SqlSelect'.
-findAllExtended :: forall beM be table m .
-  (HasCallStack,
-   L.MonadFlow m,
-   B.FromBackendRow be (table Identity),
-   BeamRunner beM,
-   BeamRuntime be beM,
-   FromJSON (table Identity),
-   ToJSON (table Identity)) =>
+findAllExtended ::
+  forall beM be table m.
+  ( HasCallStack,
+    L.MonadFlow m,
+    B.FromBackendRow be (table Identity),
+    BeamRunner beM,
+    BeamRuntime be beM,
+    FromJSON (table Identity),
+    ToJSON (table Identity)
+  ) =>
   DBConfig beM ->
   Maybe Text ->
   B.SqlSelect be (table Identity) ->
@@ -378,11 +406,13 @@ findAllExtended dbConf mKey sel = case mKey of
         Left err -> L.incrementDbMetric err dbConf *> pure rows
         Right _ -> pure rows
 
-deleteExtended :: forall beM be table m .
-  (HasCallStack,
-   L.MonadFlow m,
-   BeamRunner beM,
-   BeamRuntime be beM) =>
+deleteExtended ::
+  forall beM be table m.
+  ( HasCallStack,
+    L.MonadFlow m,
+    BeamRunner beM,
+    BeamRuntime be beM
+  ) =>
   DBConfig beM ->
   Maybe Text ->
   B.SqlDelete be table ->
@@ -394,11 +424,13 @@ deleteExtended dbConf mKey delQuery = case mKey of
   where
     go = runQuery dbConf (DB.deleteRows delQuery)
 
-deleteWithReturningPG :: forall table m .
-  (HasCallStack,
-   B.Beamable table,
-   B.FromBackendRow BP.Postgres (table Identity),
-   L.MonadFlow m) =>
+deleteWithReturningPG ::
+  forall table m.
+  ( HasCallStack,
+    B.Beamable table,
+    B.FromBackendRow BP.Postgres (table Identity),
+    L.MonadFlow m
+  ) =>
   DBConfig BP.Pg ->
   Maybe Text ->
   B.SqlDelete BP.Postgres table ->
@@ -413,10 +445,13 @@ deleteWithReturningPG dbConf mKey delQuery = case mKey of
 ------------ Helper functions ------------
 runQuery ::
   ( HasCallStack,
-    BeamRuntime be beM, BeamRunner beM,
+    BeamRuntime be beM,
+    BeamRunner beM,
     L.MonadFlow m
   ) =>
-  DBConfig beM -> DB.SqlDB beM a -> m (Either DBError a)
+  DBConfig beM ->
+  DB.SqlDB beM a ->
+  m (Either DBError a)
 runQuery dbConf query = do
   conn <- getOrInitSqlConn dbConf
   case conn of
@@ -427,13 +462,15 @@ runQuery dbConf query = do
         Left err -> do
           L.incrementDbMetric err dbConf
           pure result
-    Left  e -> return $ Left e
+    Left e -> return $ Left e
 
 runQueryMySQL ::
   ( HasCallStack,
     L.MonadFlow m
   ) =>
-  DBConfig BM.MySQLM -> DB.SqlDB BM.MySQLM a -> m (Either DBError a)
+  DBConfig BM.MySQLM ->
+  DB.SqlDB BM.MySQLM a ->
+  m (Either DBError a)
 runQueryMySQL dbConf query = do
   conn <- getOrInitSqlConn dbConf
   case conn of
@@ -442,7 +479,7 @@ runQueryMySQL dbConf query = do
       case rows of
         Left err -> L.incrementDbMetric err dbConf *> pure rows
         Right _ -> pure rows
-    Left  e -> return $ Left e
+    Left e -> return $ Left e
 
 sqlCreate ::
   forall be table.
@@ -475,7 +512,7 @@ createSql dbConf value = do
     Left e -> return $ Left e
 
 createSqlMySQL ::
-  forall m  table.
+  forall m table.
   ( HasCallStack,
     Model BM.MySQL table,
     Show (table Identity),
@@ -520,7 +557,8 @@ countSql ::
   Where be table ->
   m (Either DBError Int)
 countSql dbConf whereClause = runQuery dbConf findQuery
-  where findQuery = DB.countRows (sqlCount ! #where_ whereClause ! defaults)
+  where
+    findQuery = DB.countRows (sqlCount ! #where_ whereClause ! defaults)
 
 -- Postgres "42703 column does not exist".
 is42703DBError :: DBError -> Bool
@@ -547,11 +585,11 @@ findOneSql dbConf whereClause = do
     Right _ -> pure result
     Left err
       | is42703DBError err -> do
-          mFallback <- JF.tryJsonbFallback @beM @be @table dbConf whereClause (T.pack (show err))
-          pure $ case mFallback of
-            Just (r:_) -> Right (Just r)
-            Just []    -> Right Nothing
-            Nothing    -> result
+        mFallback <- JF.tryJsonbFallback @beM @be @table dbConf whereClause (T.pack (show err))
+        pure $ case mFallback of
+          Just (r : _) -> Right (Just r)
+          Just [] -> Right Nothing
+          Nothing -> result
       | otherwise -> pure result
 
 findAllSql ::
@@ -586,7 +624,6 @@ cacheWithKey :: (HasCallStack, ToJSON table, L.MonadFlow m) => Text -> table -> 
 cacheWithKey key row = do
   -- TODO: Should we log errors here?
   void $ rSetB (T.pack cacheName) (encodeUtf8 key) (BSL.toStrict $ encode row)
-
 
 sqlMultiCreate ::
   forall be table.
@@ -677,12 +714,12 @@ deleteAllSqlMySQL ::
 deleteAllSqlMySQL dbConf value = do
   findRes <- findAllSql dbConf value
   case findRes of
-    Left err  -> return $ Left err
+    Left err -> return $ Left err
     Right res -> do
-      delRes  <- runQuery dbConf $ DB.deleteRows (sqlDelete ! #where_ value ! defaults)
+      delRes <- runQuery dbConf $ DB.deleteRows (sqlDelete ! #where_ value ! defaults)
       case delRes of
         Left err -> return $ Left err
-        Right _  -> return $ Right res
+        Right _ -> return $ Right res
 
 deleteAllMySQL ::
   forall m be beM table.

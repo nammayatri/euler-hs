@@ -1,20 +1,27 @@
 module EulerHS.Extra.Time
-  ( readToLocalTime
-  , convertLocalToUTC
-  , junkUTC
-  , getCurrentTimeUTC
-  , getCurrentDateInMillis
-  , getCurrentDateInSeconds
-  ) where
+  ( readToLocalTime,
+    convertLocalToUTC,
+    junkUTC,
+    getCurrentTimeUTC,
+    getCurrentDateInMillis,
+    getCurrentDateInSeconds,
+  )
+where
 
-import           Data.Time (Day (ModifiedJulianDay), LocalTime,
-                            UTCTime (UTCTime), localTimeToUTC, utc,
-                            utcToLocalTime, zonedTimeToLocalTime, getCurrentTime, utcToZonedTime)
-import           Data.Time.Clock.POSIX (getPOSIXTime)
-
-import           EulerHS.Prelude
-import           EulerHS.Language (MonadFlow, runIO)
-
+import Data.Time
+  ( Day (ModifiedJulianDay),
+    LocalTime,
+    UTCTime (UTCTime),
+    getCurrentTime,
+    localTimeToUTC,
+    utc,
+    utcToLocalTime,
+    utcToZonedTime,
+    zonedTimeToLocalTime,
+  )
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import EulerHS.Language (MonadFlow, runIO)
+import EulerHS.Prelude
 
 readToLocalTime :: Maybe UTCTime -> Maybe LocalTime
 readToLocalTime = fmap (utcToLocalTime utc)
@@ -33,8 +40,8 @@ getCurrentTimeUTC = runIO go
 
 getCurrentDateInMillis :: (MonadFlow m) => m Int
 getCurrentDateInMillis = runIO $ do
-   t <- (* 1000) <$> getPOSIXTime
-   pure . floor $ t
+  t <- (* 1000) <$> getPOSIXTime
+  pure . floor $ t
 
 getCurrentDateInSeconds :: (MonadFlow m) => m Int
 getCurrentDateInSeconds = runIO $ floor <$> getPOSIXTime

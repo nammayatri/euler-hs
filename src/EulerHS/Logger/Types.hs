@@ -1,67 +1,69 @@
 {-# LANGUAGE DeriveAnyClass #-}
 
 module EulerHS.Logger.Types
-    (
-    -- * Core Logger
-    -- ** Types
-      LogLevel(..)
-    , BufferSize
-    , MessageBuilder (..)
-    , MessageFormatter
-    , FlowFormatter
-    , LoggerConfig(..)
-    , Message(..)
-    , Tag
-    , PendingMsg(..)
-    , ShouldLogSQL(..)
-    , LogEntry (..)
-    , Log
-    , LogContext
-    , LogCounter
-    , LogMaskingConfig (..)
-    , MaskKeyType (..)
-    , ExceptionEntry (..)
-    , VersionLoggerMessage(..)
-    , Action
-    , Category
-    , Entity
-    , Latency
-    , RespCode
-    , ErrorL(..)
-    -- ** defaults
-    , defaultLoggerConfig
-    , defaultMessageFormatter
-    , showingMessageFormatter
-    , defaultFlowFormatter
-    , builderToByteString
-    , getFlowGuuid
-    , getLogLevel
-    , getLogContext
-    , getMessageNumber
-    , convertToPendingMsg
-    ) where
+  ( -- * Core Logger
 
-import qualified EulerHS.Common as T
-import           EulerHS.Prelude
+    -- ** Types
+    LogLevel (..),
+    BufferSize,
+    MessageBuilder (..),
+    MessageFormatter,
+    FlowFormatter,
+    LoggerConfig (..),
+    Message (..),
+    Tag,
+    PendingMsg (..),
+    ShouldLogSQL (..),
+    LogEntry (..),
+    Log,
+    LogContext,
+    LogCounter,
+    LogMaskingConfig (..),
+    MaskKeyType (..),
+    ExceptionEntry (..),
+    VersionLoggerMessage (..),
+    Action,
+    Category,
+    Entity,
+    Latency,
+    RespCode,
+    ErrorL (..),
+
+    -- ** defaults
+    defaultLoggerConfig,
+    defaultMessageFormatter,
+    showingMessageFormatter,
+    defaultFlowFormatter,
+    builderToByteString,
+    getFlowGuuid,
+    getLogLevel,
+    getLogContext,
+    getMessageNumber,
+    convertToPendingMsg,
+  )
+where
+
 -- Currently, TinyLogger is highly coupled with the interface.
 -- Reason: unclear current practice of logging that affects design and performance.
 import qualified Data.Aeson as A
-import qualified Data.Text.Lazy.Encoding as TE
-import Data.Text.Lazy.Builder
 import qualified Data.ByteString.Lazy as LBS
-import Formatting.Buildable (Buildable(..))
+import Data.Text.Lazy.Builder
+import qualified Data.Text.Lazy.Encoding as TE
+import qualified EulerHS.Common as T
+import EulerHS.Prelude
+import Formatting.Buildable (Buildable (..))
 import qualified System.Logger.Message as LogMsg
 
 -- | Logging level.
 data LogLevel = Debug | Info | Warning | Error
-    deriving (Generic, Eq, Ord, Show, Read, Enum, ToJSON, FromJSON)
+  deriving (Generic, Eq, Ord, Show, Read, Enum, ToJSON, FromJSON)
 
-data LogMaskingConfig =
-  LogMaskingConfig
-    { _maskKeys :: HashSet Text -- Check : Better to make this case insensitive
-    , _maskText :: Maybe Text
-    , _keyType  :: MaskKeyType
-    } deriving (Generic, Show, Read)
+data LogMaskingConfig = LogMaskingConfig
+  { _maskKeys :: HashSet Text, -- Check : Better to make this case insensitive
+    _maskText :: Maybe Text,
+    _keyType :: MaskKeyType
+  }
+  deriving (Generic, Show, Read)
 
 data MessageBuilder
   = SimpleString String
@@ -71,24 +73,24 @@ data MessageBuilder
   | MsgBuilder LogMsg.Builder
   | MsgTransformer (LogMsg.Msg -> LogMsg.Msg)
 
-data MaskKeyType =
-    WhiteListKey
+data MaskKeyType
+  = WhiteListKey
   | BlackListKey
   deriving (Generic, Show, Read)
 
 data ShouldLogSQL
-  -- | Log SQL queries, including sensitive data and API keys. Do NOT PR code
-  -- with this enabled, and make sure this doesn't make it into production
-  = UnsafeLogSQL_DO_NOT_USE_IN_PRODUCTION
-  -- | omit SQL logs
-  | SafelyOmitSqlLogs
+  = -- | Log SQL queries, including sensitive data and API keys. Do NOT PR code
+    -- with this enabled, and make sure this doesn't make it into production
+    UnsafeLogSQL_DO_NOT_USE_IN_PRODUCTION
+  | -- | omit SQL logs
+    SafelyOmitSqlLogs
   deriving (Generic, Show, Read)
 
-type LogCounter = IORef Int         -- No race condition: atomicModifyIORef' is used.
+type LogCounter = IORef Int -- No race condition: atomicModifyIORef' is used.
 
 data Message = Message
-  { msgMessage :: Maybe A.Value
-  , msgValue :: Maybe A.Value
+  { msgMessage :: Maybe A.Value,
+    msgValue :: Maybe A.Value
   }
   deriving (Show)
 
@@ -104,52 +106,65 @@ instance Buildable Message where
   {-# INLINE build #-}
 
 type Tag = Text
+
 type MessageNumber = Int
+
 type BufferSize = Int
+
 type MessageFormatter = PendingMsg -> MessageBuilder
+
 type FlowFormatter = Maybe T.FlowGUID -> IO MessageFormatter
+
 type LogContext = HashMap Text Text
 
-data LoggerConfig
-  = LoggerConfig
-    { _isAsync          :: Bool
-    , _logLevel         :: LogLevel
-    , _logFilePath      :: FilePath
-    , _logToConsole     :: Bool
-    , _logToFile        :: Bool
-    , _maxQueueSize     :: Word
-    , _logRawSql        :: ShouldLogSQL
-    , _logAPI           :: Bool
-    , _logMaskingConfig :: Maybe LogMaskingConfig
-    } deriving (Generic, Show, Read)
+data LoggerConfig = LoggerConfig
+  { _isAsync :: Bool,
+    _logLevel :: LogLevel,
+    _logFilePath :: FilePath,
+    _logToConsole :: Bool,
+    _logToFile :: Bool,
+    _maxQueueSize :: Word,
+    _logRawSql :: ShouldLogSQL,
+    _logAPI :: Bool,
+    _logMaskingConfig :: Maybe LogMaskingConfig
+  }
+  deriving (Generic, Show, Read)
 
-data PendingMsg =
-  V1 !(Maybe T.FlowGUID) !LogLevel !Tag !Message !MessageNumber !LogContext
+data PendingMsg
+  = V1 !(Maybe T.FlowGUID) !LogLevel !Tag !Message !MessageNumber !LogContext
   | V2 !(Maybe T.FlowGUID) !LogLevel !Category !(Maybe Action) !(Maybe Entity) !(Maybe ErrorL) !(Maybe Latency) !(Maybe RespCode) !Message !MessageNumber !LogContext
   deriving (Show)
 
 type Category = Text
+
 type Action = Text
+
 type Entity = Text
 
-data ErrorL  = ErrorL !(Maybe ErrCode) ErrCategory ErrReason -- kept as maybe till unifiction is done
-    deriving Show
+data ErrorL = ErrorL !(Maybe ErrCode) ErrCategory ErrReason -- kept as maybe till unifiction is done
+  deriving (Show)
 
 type ErrCode = Text
+
 type ErrCategory = Text
+
 type ErrReason = Text
+
 type Latency = Integer
+
 type RespCode = Int
 
 data LogEntry = LogEntry !LogLevel !Message
+
 type Log = [LogEntry]
 
 data ExceptionEntry = ExceptionEntry
-  { error_code    :: Text
-  , error_message :: String
-  , jp_error_code :: Text
-  , source        :: Text
-  } deriving (Generic, ToJSON)
+  { error_code :: Text,
+    error_message :: String,
+    jp_error_code :: Text,
+    source :: Text
+  }
+  deriving (Generic, ToJSON)
 
 defaultMessageFormatter :: MessageFormatter
 defaultMessageFormatter (V1 _ lvl tag msg _ _) =
@@ -161,16 +176,17 @@ showingMessageFormatter :: MessageFormatter
 showingMessageFormatter = SimpleString . show
 
 defaultLoggerConfig :: LoggerConfig
-defaultLoggerConfig = LoggerConfig
-    { _isAsync = False
-    , _logLevel = Debug
-    , _logFilePath = ""
-    , _logToConsole = True
-    , _logToFile = False
-    , _maxQueueSize = 1000
-    , _logRawSql = SafelyOmitSqlLogs
-    , _logAPI = True
-    , _logMaskingConfig = Nothing
+defaultLoggerConfig =
+  LoggerConfig
+    { _isAsync = False,
+      _logLevel = Debug,
+      _logFilePath = "",
+      _logToConsole = True,
+      _logToFile = False,
+      _maxQueueSize = 1000,
+      _logRawSql = SafelyOmitSqlLogs,
+      _logAPI = True,
+      _logMaskingConfig = Nothing
     }
 
 defaultFlowFormatter :: FlowFormatter
@@ -179,13 +195,12 @@ defaultFlowFormatter _ = pure defaultMessageFormatter
 builderToByteString :: LogMsg.Builder -> LBS.ByteString
 builderToByteString = LogMsg.eval
 
-
-data VersionLoggerMessage = 
-    Ver1 !Tag !Message
+data VersionLoggerMessage
+  = Ver1 !Tag !Message
   | Ver2 !Category !(Maybe Action) !(Maybe Entity) !(Maybe ErrorL) !(Maybe Latency) !(Maybe RespCode) !Message
 
 getFlowGuuid :: PendingMsg -> Maybe T.FlowGUID
-getFlowGuuid (V1 mbFlowGuid _ _ _ _ _)           = mbFlowGuid
+getFlowGuuid (V1 mbFlowGuid _ _ _ _ _) = mbFlowGuid
 getFlowGuuid (V2 mbFlowGuid _ _ _ _ _ _ _ _ _ _) = mbFlowGuid
 
 getLogLevel :: PendingMsg -> LogLevel
@@ -202,6 +217,6 @@ getMessageNumber (V2 _ _ _ _ _ _ _ _ _ msgNumber _) = msgNumber
 
 convertToPendingMsg :: Maybe T.FlowGUID -> LogLevel -> MessageNumber -> LogContext -> VersionLoggerMessage -> PendingMsg
 convertToPendingMsg mbFlowGuid logLevel msgNum lContext (Ver1 tag msg) =
-    V1 mbFlowGuid logLevel tag msg msgNum lContext
+  V1 mbFlowGuid logLevel tag msg msgNum lContext
 convertToPendingMsg mbFlowGuid logLevel msgNum lContext (Ver2 category action entity maybeEror maybeLatency maybeRespCode msg) =
-    V2 mbFlowGuid logLevel category action entity maybeEror maybeLatency maybeRespCode msg msgNum lContext
+  V2 mbFlowGuid logLevel category action entity maybeEror maybeLatency maybeRespCode msg msgNum lContext

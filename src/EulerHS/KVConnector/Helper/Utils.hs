@@ -20,15 +20,15 @@ measureFunctionLatencyAndReturn :: (L.MonadFlow m) => m a -> Text -> Text -> m a
 measureFunctionLatencyAndReturn action actionName tableName'
   | not shouldLogLocalLatency = action
   | otherwise = do
-      localLatencyId <- L.getOptionLocal LocalLatencyId
-      case localLatencyId of
-        Just (Just localId) -> do
-          startTime <- L.runIO getCurrentTime
-          result <- action
-          latency <- L.runIO $ measureLatency startTime
-          L.logError (localId :: Text) ("Latency for " <> actionName <> " in " <> tableName' <> " is " <> show latency)
-          return result
-        _ -> action
+    localLatencyId <- L.getOptionLocal LocalLatencyId
+    case localLatencyId of
+      Just (Just localId) -> do
+        startTime <- L.runIO getCurrentTime
+        result <- action
+        latency <- L.runIO $ measureLatency startTime
+        L.logError (localId :: Text) ("Latency for " <> actionName <> " in " <> tableName' <> " is " <> show latency)
+        return result
+      _ -> action
 
 callKVDBAsync :: (L.MonadFlow m) => m (MeshResult a) -> m (Either DBError b) -> m (MeshResult a, Either DBError b)
 callKVDBAsync kvAction dbAction = do

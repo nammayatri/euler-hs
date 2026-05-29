@@ -1,40 +1,40 @@
-{-# LANGUAGE DeriveAnyClass      #-}
-{-# LANGUAGE DerivingStrategies  #-}
-{-# LANGUAGE RecordWildCards  #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module EulerHS.Extra.Monitoring.Types where
 
-import           EulerHS.Prelude
 import qualified Data.Aeson as A
-import           EulerHS.Types (OptionEntity)
+import EulerHS.Prelude
+import EulerHS.Types (OptionEntity)
 
-
-data DBMetricInfo = DBMetricInfo {
-    _latencyInfo :: LatencyInfo 
-}
+data DBMetricInfo = DBMetricInfo
+  { _latencyInfo :: LatencyInfo
+  }
   deriving stock (Show)
 
-data RedisMetricInfo = RedisMetricInfo {
-    _latencyInfo :: LatencyInfo 
-}
+data RedisMetricInfo = RedisMetricInfo
+  { _latencyInfo :: LatencyInfo
+  }
   deriving stock (Show)
 
-data APIMetricInfo = APIMetricInfo {
-    _latencyInfo :: LatencyInfo 
-}
+data APIMetricInfo = APIMetricInfo
+  { _latencyInfo :: LatencyInfo
+  }
   deriving stock (Show)
 
-data LatencyInfo = LatencyInfo {
-    _latency    :: Double
-,   _requests   :: Int
-}
+data LatencyInfo = LatencyInfo
+  { _latency :: Double,
+    _requests :: Int
+  }
   deriving stock (Show)
 
 instance ToJSON LatencyInfo where
-  toJSON (LatencyInfo {..}) = A.object [
-      ("latency", A.toJSON _latency)
-    , ("requests", A.toJSON _requests)
-    ]
+  toJSON (LatencyInfo {..}) =
+    A.object
+      [ ("latency", A.toJSON _latency),
+        ("requests", A.toJSON _requests)
+      ]
 
 data DBMetricInfoKey = DBMetricInfoKey
   deriving stock (Eq, Show, Generic, Ord)
@@ -43,7 +43,6 @@ data DBMetricInfoKey = DBMetricInfoKey
 data LocalLatencyId = LocalLatencyId
   deriving stock (Eq, Show, Generic, Ord)
   deriving anyclass (FromJSON, ToJSON)
-
 
 data RedisMetricInfoKey = RedisMetricInfoKey
   deriving stock (Eq, Show, Generic, Ord)

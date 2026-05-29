@@ -1,96 +1,97 @@
-{-# LANGUAGE StandaloneDeriving  #-}
-{-# LANGUAGE DerivingVia     #-}
-{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE StandaloneDeriving #-}
 
 module EulerHS.Framework.Runtime
-  (
-    -- * Framework Runtime
-    FlowRuntime(..)
-  , ConfigEntry(..)
-  , mkConfigEntry
-  , createFlowRuntime
-  , createFlowRuntime'
-  , withFlowRuntime
-  , kvDisconnect
-  , runPubSubWorker
-  , shouldFlowLogRawSql
-  -- * Registration for self-signed certs
-  , CertificateRegistrationError(..)
-  , withSelfSignedFlowRuntime
-  ) where
+  ( -- * Framework Runtime
+    FlowRuntime (..),
+    ConfigEntry (..),
+    mkConfigEntry,
+    createFlowRuntime,
+    createFlowRuntime',
+    withFlowRuntime,
+    kvDisconnect,
+    runPubSubWorker,
+    shouldFlowLogRawSql,
 
-import           Control.Monad.Trans.Except (throwE)
+    -- * Registration for self-signed certs
+    CertificateRegistrationError (..),
+    withSelfSignedFlowRuntime,
+  )
+where
+
 import qualified Control.Concurrent.Map as CMap
-import qualified Data.Map as Map (empty)
-import qualified Data.LruCache as LRU
+import Control.Monad.Trans.Except (throwE)
 import qualified Data.Cache.LRU as SimpleLRU
+import qualified Data.LruCache as LRU
+import qualified Data.Map as Map (empty)
 import qualified Data.Pool as DP (destroyAllResources)
-import           Data.Time (LocalTime)
-import           Data.X509.CertificateStore (readCertificateStore)
+import Data.Time (LocalTime)
+import Data.X509.CertificateStore (readCertificateStore)
 import qualified Database.Redis as RD
-import           EulerHS.KVDB.Types (NativeKVDBConn (NativeKVDB))
+import EulerHS.HttpAPI
+import EulerHS.KVDB.Types (NativeKVDBConn (NativeKVDB))
 import qualified EulerHS.Logger.Runtime as R
-import           EulerHS.Prelude
-import           EulerHS.SqlDB.Types (ConnTag,
-                                      NativeSqlPool (NativeMySQLPool, NativePGPool, NativeSQLitePool))
-import           GHC.Conc (labelThread)
-import           Juspay.Extra.Config (lookupEnvT)
-import           Network.Connection (TLSSettings (TLSSettings))
-import           Network.HTTP.Client (Manager, newManager)
-import           Network.HTTP.Client.TLS (mkManagerSettings)
-import           Network.TLS (ClientParams (clientShared, clientSupported),
-                              defaultParamsClient, sharedCAStore,
-                              supportedCiphers)
-import           Network.TLS.Extra.Cipher (ciphersuite_default)
-import           System.IO.Unsafe (unsafePerformIO)
+import EulerHS.Prelude
+import EulerHS.SqlDB.Types
+  ( ConnTag,
+    NativeSqlPool (NativeMySQLPool, NativePGPool, NativeSQLitePool),
+  )
+import GHC.Conc (labelThread)
+import Juspay.Extra.Config (lookupEnvT)
+import Network.Connection (TLSSettings (TLSSettings))
+import Network.HTTP.Client (Manager, newManager)
+import Network.HTTP.Client.TLS (mkManagerSettings)
+import Network.TLS
+  ( ClientParams (clientShared, clientSupported),
+    defaultParamsClient,
+    sharedCAStore,
+    supportedCiphers,
+  )
+import Network.TLS.Extra.Cipher (ciphersuite_default)
+import System.IO.Unsafe (unsafePerformIO)
 import qualified System.Mem as SYSM (performGC)
-import           EulerHS.HttpAPI
-import           Unsafe.Coerce (unsafeCoerce)
+import Unsafe.Coerce (unsafeCoerce)
 
 -- | FlowRuntime state and options.
 data FlowRuntime = FlowRuntime
-  { _coreRuntime              :: R.CoreRuntime
-  -- ^ Contains logger settings
-  , _defaultHttpClientManager :: Manager
-  -- ^ Http default manager, used for external api calls
-  , _httpClientManagers       :: HashMap Text Manager
-  -- ^ Http managers, used for external api calls
-  , _dynHttpClientManagers    :: MVar (LRU.LruCache HTTPClientSettings Manager)
-  -- ^ LRU cache of Managers.
-  , _options                  :: MVar (Map Text Any)
-  -- ^ Typed key-value storage
-  , _optionsLocal             :: MVar (Map Text Any)
-  -- ^ Typed key-value storage - New Ref for every api call
-  , _kvdbConnections          :: MVar (Map Text NativeKVDBConn)
-  -- ^ Connections for key-value databases
-  , _sqldbConnections         :: MVar (Map ConnTag NativeSqlPool)
-  -- ^ Connections for SQL databases
-  , _pubSubController         :: RD.PubSubController
-  -- ^ Subscribe controller
-  , _pubSubConnection         :: Maybe RD.Connection
-  -- ^ Connection being used for Publish
-  , _configCache              :: IORef (SimpleLRU.LRU Text ConfigEntry)
-
-  , _configCacheLock          :: MVar (CMap.Map Text ())
-  
+  { -- | Contains logger settings
+    _coreRuntime :: R.CoreRuntime,
+    -- | Http default manager, used for external api calls
+    _defaultHttpClientManager :: Manager,
+    -- | Http managers, used for external api calls
+    _httpClientManagers :: HashMap Text Manager,
+    -- | LRU cache of Managers.
+    _dynHttpClientManagers :: MVar (LRU.LruCache HTTPClientSettings Manager),
+    -- | Typed key-value storage
+    _options :: MVar (Map Text Any),
+    -- | Typed key-value storage - New Ref for every api call
+    _optionsLocal :: MVar (Map Text Any),
+    -- | Connections for key-value databases
+    _kvdbConnections :: MVar (Map Text NativeKVDBConn),
+    -- | Connections for SQL databases
+    _sqldbConnections :: MVar (Map ConnTag NativeSqlPool),
+    -- | Subscribe controller
+    _pubSubController :: RD.PubSubController,
+    -- | Connection being used for Publish
+    _pubSubConnection :: Maybe RD.Connection,
+    _configCache :: IORef (SimpleLRU.LRU Text ConfigEntry),
+    _configCacheLock :: MVar (CMap.Map Text ())
   }
 
-data ConfigEntry =   ConfigEntry
-  {
-      ttl :: LocalTime
-    , entry :: Any
+data ConfigEntry = ConfigEntry
+  { ttl :: LocalTime,
+    entry :: Any
   }
 
 deriving instance Show ConfigEntry
 
 configCacheSize :: Integer
 configCacheSize =
-  let
-    mbSize :: Maybe Integer
-    mbSize = readMaybe =<< lookupEnvT @String "CONFIG_CACHE_SIZE"
-
-  in fromMaybe 4096 mbSize
+  let mbSize :: Maybe Integer
+      mbSize = readMaybe =<< lookupEnvT @String "CONFIG_CACHE_SIZE"
+   in fromMaybe 4096 mbSize
 
 mkConfigEntry :: LocalTime -> a -> ConfigEntry
 mkConfigEntry valTtl val = ConfigEntry valTtl (unsafeCoerce @_ @Any val)
@@ -116,7 +117,6 @@ instance Exception CertificateRegistrationError
 -- it.
 --
 -- @since 2.0.4.3
-
 {-# DEPRECATED withSelfSignedFlowRuntime "use manager builders instead, see HttpAPI.hs" #-}
 withSelfSignedFlowRuntime ::
   HashMap Text FilePath ->
@@ -126,12 +126,13 @@ withSelfSignedFlowRuntime ::
 withSelfSignedFlowRuntime certPathMap mRTF handler = do
   res <- runExceptT . traverse go $ certPathMap
   case res of
-    Left err         -> handler . Left $ err
+    Left err -> handler . Left $ err
     Right managerMap ->
       bracket (fromMaybe R.createVoidLoggerRuntime mRTF) R.clearLoggerRuntime $
         \loggerRT -> bracket (R.createCoreRuntime loggerRT) R.clearCoreRuntime $
-          \coreRT -> bracket (mkFlowRT coreRT managerMap) clearFlowRuntime $
-            handler . Right
+          \coreRT ->
+            bracket (mkFlowRT coreRT managerMap) clearFlowRuntime $
+              handler . Right
   where
     go ::
       FilePath ->
@@ -139,53 +140,56 @@ withSelfSignedFlowRuntime certPathMap mRTF handler = do
     go certPath = do
       mCertStore <- lift . readCertificateStore $ certPath
       case mCertStore of
-        Nothing    -> throwE . NoCertificatesAtPath $ certPath
+        Nothing -> throwE . NoCertificatesAtPath $ certPath
         Just store -> do
           let defs = defaultParamsClient "localhost" ""
-          let clientParams = defs {
-            clientShared = (clientShared defs) { sharedCAStore = store },
-            clientSupported = (clientSupported defs) { supportedCiphers = ciphersuite_default }}
+          let clientParams =
+                defs
+                  { clientShared = (clientShared defs) {sharedCAStore = store},
+                    clientSupported = (clientSupported defs) {supportedCiphers = ciphersuite_default}
+                  }
           lift . newManager . mkManagerSettings (TLSSettings clientParams) $ Nothing
     mkFlowRT :: R.CoreRuntime -> HashMap Text Manager -> IO FlowRuntime
     mkFlowRT coreRT managers = do
       frt <- createFlowRuntime coreRT
-      pure frt { _httpClientManagers = managers }
+      pure frt {_httpClientManagers = managers}
 
 -- | Create default FlowRuntime.
 createFlowRuntime :: R.CoreRuntime -> IO FlowRuntime
 createFlowRuntime coreRt = do
-  defaultManagerVar     <- newManager $ buildSettings mempty
-  optionsVar            <- newMVar mempty
-  optionsLocalVar       <- newMVar mempty
-  configCacheVar        <- newIORef $ SimpleLRU.newLRU $ Just configCacheSize
-  configCacheLockVar    <- newMVar =<< CMap.empty
-  kvdbConnections       <- newMVar Map.empty
-  sqldbConnections      <- newMVar Map.empty
+  defaultManagerVar <- newManager $ buildSettings mempty
+  optionsVar <- newMVar mempty
+  optionsLocalVar <- newMVar mempty
+  configCacheVar <- newIORef $ SimpleLRU.newLRU $ Just configCacheSize
+  configCacheLockVar <- newMVar =<< CMap.empty
+  kvdbConnections <- newMVar Map.empty
+  sqldbConnections <- newMVar Map.empty
   dynHttpClientManagers <- newMVar $ LRU.empty 100
-  pubSubController  <- RD.newPubSubController [] []
-  pure $ FlowRuntime
-    { _coreRuntime              = coreRt
-    , _defaultHttpClientManager = defaultManagerVar
-    , _httpClientManagers       = mempty
-    , _options                  = optionsVar
-    , _optionsLocal             = optionsLocalVar
-    , _configCache              = configCacheVar
-    , _configCacheLock          = configCacheLockVar
-    , _kvdbConnections          = kvdbConnections
-    -- , _runMode                  = T.RegularMode
-    , _sqldbConnections         = sqldbConnections
-    , _pubSubController         = pubSubController
-    , _pubSubConnection         = Nothing
-    , _dynHttpClientManagers    = dynHttpClientManagers
-    }
+  pubSubController <- RD.newPubSubController [] []
+  pure $
+    FlowRuntime
+      { _coreRuntime = coreRt,
+        _defaultHttpClientManager = defaultManagerVar,
+        _httpClientManagers = mempty,
+        _options = optionsVar,
+        _optionsLocal = optionsLocalVar,
+        _configCache = configCacheVar,
+        _configCacheLock = configCacheLockVar,
+        _kvdbConnections = kvdbConnections,
+        -- , _runMode                  = T.RegularMode
+        _sqldbConnections = sqldbConnections,
+        _pubSubController = pubSubController,
+        _pubSubConnection = Nothing,
+        _dynHttpClientManagers = dynHttpClientManagers
+      }
 
 createFlowRuntime' :: Maybe (IO R.LoggerRuntime) -> IO FlowRuntime
 createFlowRuntime' Nothing = R.createVoidLoggerRuntime >>= R.createCoreRuntime >>= createFlowRuntime
 createFlowRuntime' (Just loggerRtCreator) = loggerRtCreator >>= R.createCoreRuntime >>= createFlowRuntime
 
 -- | Clear resources in given 'FlowRuntime'
-clearFlowRuntime :: FlowRuntime  -> IO ()
-clearFlowRuntime FlowRuntime{..} = do
+clearFlowRuntime :: FlowRuntime -> IO ()
+clearFlowRuntime FlowRuntime {..} = do
   _ <- takeMVar _options
   putMVar _options mempty
   _ <- takeMVar _optionsLocal
@@ -204,8 +208,8 @@ shouldFlowLogRawSql = R.shouldLogRawSql . R._loggerRuntime . _coreRuntime
 
 sqlDisconnect :: NativeSqlPool -> IO ()
 sqlDisconnect = \case
-  NativePGPool connPool     -> DP.destroyAllResources connPool
-  NativeMySQLPool connPool  -> DP.destroyAllResources connPool
+  NativePGPool connPool -> DP.destroyAllResources connPool
+  NativeMySQLPool connPool -> DP.destroyAllResources connPool
   NativeSQLitePool connPool -> DP.destroyAllResources connPool
 
 kvDisconnect :: NativeKVDBConn -> IO ()
@@ -215,12 +219,12 @@ kvDisconnect (NativeKVDB conn) = RD.disconnect conn
 withFlowRuntime :: Maybe (IO R.LoggerRuntime) -> (FlowRuntime -> IO a) -> IO a
 withFlowRuntime Nothing actionF =
   bracket R.createVoidLoggerRuntime R.clearLoggerRuntime $ \loggerRt ->
-  bracket (R.createCoreRuntime loggerRt) R.clearCoreRuntime $ \coreRt ->
-  bracket (createFlowRuntime coreRt) clearFlowRuntime actionF
+    bracket (R.createCoreRuntime loggerRt) R.clearCoreRuntime $ \coreRt ->
+      bracket (createFlowRuntime coreRt) clearFlowRuntime actionF
 withFlowRuntime (Just loggerRuntimeCreator) actionF =
   bracket loggerRuntimeCreator R.clearLoggerRuntime $ \loggerRt ->
-  bracket (R.createCoreRuntime loggerRt) R.clearCoreRuntime $ \coreRt ->
-  bracket (createFlowRuntime coreRt) clearFlowRuntime actionF
+    bracket (R.createCoreRuntime loggerRt) R.clearCoreRuntime $ \coreRt ->
+      bracket (createFlowRuntime coreRt) clearFlowRuntime actionF
 
 -- Use {-# NOINLINE foo #-} as a pragma on any function foo that calls unsafePerformIO.
 -- If the call is inlined, the I/O may be performed more than once.
@@ -230,42 +234,43 @@ pubSubWorkerLock = unsafePerformIO $ newMVar ()
 
 runPubSubWorker :: FlowRuntime -> (Text -> IO ()) -> IO (IO ())
 runPubSubWorker rt log = do
-    let tsecond = 10 ^ (6 :: Int)
+  let tsecond = 10 ^ (6 :: Int)
 
-    lock <- tryTakeMVar pubSubWorkerLock
-    case lock of
-      Nothing -> error "Unable to run Publish/Subscribe worker: Only one worker allowed"
-      Just _  -> pure ()
+  lock <- tryTakeMVar pubSubWorkerLock
+  case lock of
+    Nothing -> error "Unable to run Publish/Subscribe worker: Only one worker allowed"
+    Just _ -> pure ()
 
-    let mconnection = _pubSubConnection rt
+  let mconnection = _pubSubConnection rt
 
-    delayRef <- newIORef tsecond
+  delayRef <- newIORef tsecond
 
-    threadId <- case mconnection of
-      Nothing   -> do
-        putMVar pubSubWorkerLock ()
-        error "Unable to run Publish/Subscribe worker: No connection to Redis provided"
-
-      Just conn -> do
-        tid <- forkIO $ forever $ do
-            res <- try @_ @SomeException $ RD.pubSubForever conn (_pubSubController rt) $ do
+  threadId <- case mconnection of
+    Nothing -> do
+      putMVar pubSubWorkerLock ()
+      error "Unable to run Publish/Subscribe worker: No connection to Redis provided"
+    Just conn -> do
+      tid <- forkIO $
+        forever $ do
+          res <- try @_ @SomeException $
+            RD.pubSubForever conn (_pubSubController rt) $ do
               writeIORef delayRef tsecond
               log "Publish/Subscribe worker: Run successfuly"
 
-            case res of
-              Left e -> do
-                  delay <- readIORef delayRef
+          case res of
+            Left e -> do
+              delay <- readIORef delayRef
 
-                  log $ "Publish/Subscribe worker: Got error: " <> show e
-                  log $ "Publish/Subscribe worker: Restart in " <> show (delay `div` tsecond) <> " sec"
+              log $ "Publish/Subscribe worker: Got error: " <> show e
+              log $ "Publish/Subscribe worker: Restart in " <> show (delay `div` tsecond) <> " sec"
 
-                  modifyIORef' delayRef (\d -> d + d `div` 2) -- (* 1.5)
-                  threadDelay delay
-              Right _ -> pure ()
-        labelThread tid "euler-runPubSubWorker"
-        return tid
+              modifyIORef' delayRef (\d -> d + d `div` 2) -- (* 1.5)
+              threadDelay delay
+            Right _ -> pure ()
+      labelThread tid "euler-runPubSubWorker"
+      return tid
 
-    pure $ do
-      killThread threadId
-      putMVar pubSubWorkerLock ()
-      log "Publish/Subscribe worker: Killed"
+  pure $ do
+    killThread threadId
+    putMVar pubSubWorkerLock ()
+    log "Publish/Subscribe worker: Killed"
