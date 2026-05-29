@@ -7,6 +7,13 @@
     flake-parts.follows = "common/flake-parts";
     haskell-flake.follows = "common/haskell-flake";
 
+    # Formatting / pre-commit (same toolchain as nammayatri/Backend).
+    flake-root.follows = "common/flake-root";
+    treefmt-nix.follows = "common/treefmt-nix";
+    pre-commit-hooks-nix.follows = "common/pre-commit-hooks-nix";
+    nixpkgs-21_11.url = "github:nixos/nixpkgs/nixos-21.11";
+    nixpkgs-140774-workaround.url = "github:srid/nixpkgs-140774-workaround";
+
     cereal.url = "github:juspay/cereal";
     cereal.flake = false;
 
@@ -37,14 +44,57 @@
       imports = [
         inputs.common.flakeModules.ghc927
         inputs.haskell-flake.flakeModule
+        inputs.flake-root.flakeModule
+        inputs.treefmt-nix.flakeModule
+        inputs.pre-commit-hooks-nix.flakeModule
       ];
       perSystem = { self', pkgs, lib, config, ... }: {
+        # treefmt + pre-commit, mirroring nammayatri/Backend.
+        # Run on demand inside `nix develop` with `treefmt`; the pre-commit
+        # hook enforces it on every commit.
+        treefmt.config = {
+          inherit (config.flake-root) projectRootFile;
+          flakeCheck = false; # pre-commit-hooks.nix runs the check
+          programs.nixpkgs-fmt.enable = true;
+          programs.ormolu.enable = true;
+          programs.ormolu.package =
+            let pkgs-21_11 = import inputs.nixpkgs-21_11 { inherit (pkgs) system; };
+            in inputs.nixpkgs-140774-workaround.patch pkgs-21_11 pkgs-21_11.haskellPackages.ormolu;
+          settings.formatter.ormolu = {
+            options = [
+              "--ghc-opt"
+              "-XTypeApplications"
+              "--ghc-opt"
+              "-fplugin=RecordDotPreprocessor"
+            ];
+            excludes = [
+              "dist-newstyle/**"
+              "test-jsonb-live/Main.hs"
+              # ormolu 0.1.4.1 chokes on these (Haddock-mode parser
+              # bugs + idempotency bug on record-update syntax). Same
+              # pattern as nammayatri/Backend excluding `vira.hs`.
+              "src/EulerHS/Framework/Interpreter.hs"
+              "src/EulerHS/HttpAPI.hs"
+              "test/language/Common.hs"
+              "test/language/KV/TestSchema/ServiceConfiguration.hs"
+              "testDB/SQLDB/TestData/Scenarios/SQLite.hs"
+            ];
+          };
+        };
+
+        pre-commit.settings.hooks.treefmt.enable = lib.mkForce true;
+
         packages.default = self'.packages.euler-hs;
         haskellProjects.default = {
-          devShell.tools = _: lib.mkForce {
-          haskell-language-server = null;
-          ormolu = pkgs.haskellPackages.ormolu;
-        };
+          devShell.tools = _: lib.mkForce ({
+            haskell-language-server = null;
+            ormolu = pkgs.haskellPackages.ormolu;
+            treefmt = config.treefmt.build.wrapper;
+          } // config.treefmt.build.programs);
+          # Auto-install .git/hooks/pre-commit when entering `nix develop`.
+          # `config.pre-commit.installationScript` is provided by
+          # pre-commit-hooks-nix.flakeModule.
+          devShell.mkShellArgs.shellHook = config.pre-commit.installationScript;
           projectFlakeName = "euler-hs";
           imports = [
             inputs.euler-events-hs.haskellFlakeProjectModules.output
@@ -79,7 +129,7 @@
               jailbreak = true;
             };
           };
-          autoWire = [ "packages" "checks" "devShells" "apps"];
+          autoWire = [ "packages" "checks" "devShells" "apps" ];
         };
       };
     };
