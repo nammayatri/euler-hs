@@ -34,7 +34,8 @@ data KVMetricHandler = KVMetricHandler
     compressionLatency :: (Text, Text, Text, NominalDiffTime) -> IO (),
     handlerLatency :: (Text, Text, Double, Text, Text) -> IO (),
     kvHitMiss :: (Text, Text, KVFindResult) -> IO (),
-    jsonbFallback :: (Text, Text, Text) -> IO ()
+    jsonbFallback :: (Text, Text, Text) -> IO (),
+    secondaryKeyElements :: (Text, Text, Text, Int) -> IO ()
   }
 
 data KVFindResult = KVHit | MissInKV | MissInDB
@@ -78,6 +79,10 @@ mkKVMetricHandler = do
       ( \case
           (schema, model, _err) ->
             inc (metrics </> #kv_jsonb_fallback_counter) schema model
+      )
+      ( \case
+          (model, field, cluster, count) ->
+            observe (metrics </> #kvRedis_secondary_key_elements) (fromIntegral count) model field cluster
       )
 
 kv_compression_latency_observer =
@@ -167,6 +172,13 @@ kv_jsonb_fallback_counter =
     .& lbl @"model" @Text
     .& build
 
+kvRedis_secondary_key_elements =
+  histogram #kvRedis_secondary_key_elements
+    .& lbl @"model" @Text
+    .& lbl @"field" @Text
+    .& lbl @"cluster" @Text
+    .& build
+
 collectionLock =
   kv_sql_error_counter
     .> kvRedis_soft_db_limit_exceeded
@@ -177,6 +189,7 @@ collectionLock =
     .> kv_miss_in_kv_counter
     .> kv_miss_in_db_counter
     .> kv_jsonb_fallback_counter
+    .> kvRedis_secondary_key_elements
     .> MNil
 
 kv_handler_latency_observe =
@@ -265,3 +278,10 @@ withKVLatencyMetric handler model redisCluster action = do
   let totalLatency = fromIntegral (endTime - startTime)
   incrementKVHandlerLatencyMetric handler model totalLatency redisCluster
   pure result
+
+observeSecondaryKeyElements :: (HasCallStack, L.MonadFlow m) => Text -> Text -> Text -> Int -> m ()
+observeSecondaryKeyElements model field cluster count = when isKVMetricEnabled $ do
+  env <- L.getOption KVMetricCfg
+  case env of
+    Just val -> L.runIO $ secondaryKeyElements val (model, field, cluster, count)
+    Nothing -> pure ()
