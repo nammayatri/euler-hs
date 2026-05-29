@@ -1,22 +1,26 @@
 {-# LANGUAGE FunctionalDependencies #-}
-{-# LANGUAGE ScopedTypeVariables    #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module EulerHS.Options
-  (
-    -- * Options
+  ( -- * Options
+
     -- | Determine the relationship between key & value
-    OptionEntity
+    OptionEntity,
+
     -- * Make option key
-  , mkOptionKey
-  ) where
+    mkOptionKey,
+  )
+where
 
-import           Data.Aeson (encode)
+import Data.Aeson (encode)
 import qualified Data.ByteString.Lazy as BSL
-import           EulerHS.Prelude
-import           Type.Reflection (typeRep)
+import EulerHS.Prelude
+import Type.Reflection (typeRep)
 
-class (Typeable k, ToJSON k)
-  => OptionEntity k v |  k -> v
+class
+  (Typeable k, ToJSON k) =>
+  OptionEntity k v
+    | k -> v
 
 mkOptionKey :: forall k v. OptionEntity k v => k -> Text
 mkOptionKey k = show (typeRep @k) <> decodeUtf8 (BSL.toStrict $ encode k)

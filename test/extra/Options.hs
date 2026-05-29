@@ -1,15 +1,13 @@
-{-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DerivingStrategies #-}
 
 module Options where
 
-import           EulerHS.Extra.Aeson
-import           EulerHS.Prelude
-
-import           Data.Aeson
+import Data.Aeson
 import qualified Data.ByteString.Lazy as BSL
-import           Test.Hspec
-
+import EulerHS.Extra.Aeson
+import EulerHS.Prelude
+import Test.Hspec
 
 spec :: Spec
 spec = do
@@ -25,7 +23,7 @@ spec = do
 
   describe "unaryRecordOptions" $ do
     it "Default option. Complete json" $ do
-      decode enc_planet  `shouldBe` Just lunar
+      decode enc_planet `shouldBe` Just lunar
     it "Default option. Incomplete json" $ do
       eitherDecode @Cosmos enc_planetIncomplete `shouldBe` Left decode_error
     it "With unary option. Complete unary json" $ do
@@ -57,16 +55,14 @@ spec = do
     it "With strip option. Long not equal prefix" $ do
       encode wulf `shouldBe` enc_wulf
 
-
-
 -------------------------------------------------------------------------------
 -- aesonOmitNothingFields option
 -------------------------------------------------------------------------------
 
 -- Default option
 data Person = Person
-  { name :: Text
-  , age  :: Maybe Int
+  { name :: Text,
+    age :: Maybe Int
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
@@ -85,14 +81,14 @@ enc_person = "{\"age\":33,\"name\":\"Omar\"}"
 
 -- omit field option
 data PersonOmit = PersonOmit
-  { name :: Text
-  , age  :: Maybe Int
+  { name :: Text,
+    age :: Maybe Int
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON)
 
 instance ToJSON PersonOmit where
-  toJSON     = genericToJSON aesonOmitNothingFields
+  toJSON = genericToJSON aesonOmitNothingFields
   toEncoding = genericToEncoding aesonOmitNothingFields
 
 personOmitNull :: PersonOmit
@@ -107,21 +103,20 @@ personOmit = PersonOmit "Omar" (Just 33)
 enc_personOmit :: BSL.ByteString
 enc_personOmit = "{\"name\":\"Omar\",\"age\":33}"
 
-
 -------------------------------------------------------------------------------
 -- unaryRecordOptions option
 -------------------------------------------------------------------------------
 
 data Space = Space
-  { name :: Text
-  , distance :: Maybe Int
+  { name :: Text,
+    distance :: Maybe Int
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
 data Planet = Planet
-  { name :: Text
-  , weight :: Maybe Int
+  { name :: Text,
+    weight :: Maybe Int
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
@@ -153,10 +148,10 @@ data CosmosUnary
   deriving anyclass (ToJSON)
 
 instance FromJSON CosmosUnary where
-  parseJSON val
-    =   (SolarU <$> parseJSON val)
-    <|> (LunarU <$> parseJSON val)
-    <|> genericParseJSON unaryRecordOptions val
+  parseJSON val =
+    (SolarU <$> parseJSON val)
+      <|> (LunarU <$> parseJSON val)
+      <|> genericParseJSON unaryRecordOptions val
 
 unarySpace :: CosmosUnary
 unarySpace = SolarU $ Space "Sirius" (Just 8910)
@@ -172,15 +167,15 @@ enc_unarySpaceIncomplete = "{\"distance\":8910,\"name\":\"Sirius\"}"
 -------------------------------------------------------------------------------
 
 data Apple = Apple
-  { weight :: Int
-  , colour :: Maybe Text
+  { weight :: Int,
+    colour :: Maybe Text
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
 data Strawberry = Strawberry
-  { weight :: Int
-  , colour :: Maybe Text
+  { weight :: Int,
+    colour :: Maybe Text
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
@@ -205,7 +200,7 @@ data PlantUnTag
   deriving anyclass (FromJSON)
 
 instance ToJSON PlantUnTag where
-  toJSON     = genericToJSON untaggedOptions
+  toJSON = genericToJSON untaggedOptions
   toEncoding = genericToEncoding untaggedOptions
 
 berry :: PlantUnTag
@@ -219,8 +214,8 @@ enc_plantUntag = "{\"colour\":\"red\",\"weight\":2}"
 -------------------------------------------------------------------------------
 
 data Cat = Cat
-  { cName :: Text
-  , cColour :: Maybe Text
+  { cName :: Text,
+    cColour :: Maybe Text
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
@@ -232,14 +227,14 @@ enc_cat :: BSL.ByteString
 enc_cat = "{\"cColour\":\"grey\",\"cName\":\"Kita\"}"
 
 data Dog = Dog
-  { cName :: Text
-  , cColour :: Maybe Text
+  { cName :: Text,
+    cColour :: Maybe Text
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON)
 
 instance ToJSON Dog where
-  toJSON     = genericToJSON stripLensPrefixOptions
+  toJSON = genericToJSON stripLensPrefixOptions
   toEncoding = genericToEncoding stripLensPrefixOptions
 
 dog :: Dog
@@ -249,14 +244,14 @@ enc_dog :: BSL.ByteString
 enc_dog = "{\"Name\":\"Buddy\",\"Colour\":\"white\"}"
 
 data Bull = Bull
-  { bbulName :: Text
-  , bbulColour :: Maybe Text
+  { bbulName :: Text,
+    bbulColour :: Maybe Text
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON)
 
 instance ToJSON Bull where
-  toJSON     = genericToJSON stripLensPrefixOptions
+  toJSON = genericToJSON stripLensPrefixOptions
   toEncoding = genericToEncoding stripLensPrefixOptions
 
 bull :: Bull
@@ -270,8 +265,8 @@ enc_bull = "{\"bulName\":\"Bully\",\"bulColour\":\"white\"}"
 -------------------------------------------------------------------------------
 
 data Cow = Cow
-  { cName :: Text
-  , cColour :: Maybe Text
+  { cName :: Text,
+    cColour :: Maybe Text
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
@@ -283,14 +278,14 @@ enc_cow :: BSL.ByteString
 enc_cow = "{\"cColour\":\"white-nd-black\",\"cName\":\"Mu\"}"
 
 data Wolf = Wolf
-  { cName :: Text
-  , cColour :: Maybe Text
+  { cName :: Text,
+    cColour :: Maybe Text
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON)
 
 instance ToJSON Wolf where
-  toJSON     = genericToJSON stripAllLensPrefixOptions
+  toJSON = genericToJSON stripAllLensPrefixOptions
   toEncoding = genericToEncoding stripAllLensPrefixOptions
 
 wolf :: Wolf
@@ -300,14 +295,14 @@ enc_wolf :: BSL.ByteString
 enc_wolf = "{\"Name\":\"Boss\",\"Colour\":\"grey\"}"
 
 data Wooolf = Wooolf
-  { cccName :: Text
-  , cccColour :: Maybe Text
+  { cccName :: Text,
+    cccColour :: Maybe Text
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON)
 
 instance ToJSON Wooolf where
-  toJSON     = genericToJSON stripAllLensPrefixOptions
+  toJSON = genericToJSON stripAllLensPrefixOptions
   toEncoding = genericToEncoding stripAllLensPrefixOptions
 
 wooolf :: Wooolf
@@ -317,14 +312,14 @@ enc_wooolf :: BSL.ByteString
 enc_wooolf = "{\"Name\":\"Boooss\",\"Colour\":\"grey\"}"
 
 data Wulf = Wulf
-  { cucName :: Text
-  , cucColour :: Maybe Text
+  { cucName :: Text,
+    cucColour :: Maybe Text
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON)
 
 instance ToJSON Wulf where
-  toJSON     = genericToJSON stripAllLensPrefixOptions
+  toJSON = genericToJSON stripAllLensPrefixOptions
   toEncoding = genericToEncoding stripAllLensPrefixOptions
 
 wulf :: Wulf

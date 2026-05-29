@@ -3,64 +3,86 @@
 
 module FlowSpec (spec) where
 
-import           Client (externalServerPort, getBook, getUser,
-                         port)
-import           Common (clientHttpCert, initRTWithManagers,
-                         withCertV1SecureServer, withClientTlsAuthServer,
-                         withSecureServer, withServer)
+import Client
+  ( externalServerPort,
+    getBook,
+    getUser,
+    port,
+  )
+import Common
+  ( clientHttpCert,
+    initRTWithManagers,
+    withCertV1SecureServer,
+    withClientTlsAuthServer,
+    withSecureServer,
+    withServer,
+  )
 import qualified Control.Exception as E
-import           Data.Either.Extra (fromLeft')
-import           Data.Maybe (fromJust)
+import Data.Either.Extra (fromLeft')
+import Data.Maybe (fromJust)
 import qualified Data.Text as Text
 import qualified Data.UUID as UUID (fromText)
-import           Data.X509.CertificateStore (readCertificateStore)
-import           Servant.Client (BaseUrl (..), ClientError (..), Scheme (..))
-import           Servant.Server (err403, errBody)
-import           Test.Hspec (Spec, around, around_, describe, it, shouldBe,
-                             shouldSatisfy)
-
-import           EulerHS.Interpreters (runFlow)
-import           EulerHS.Language as L
-import           EulerHS.Prelude hiding (get)
-import           EulerHS.Runtime (createLoggerRuntime, withFlowRuntime)
-import           EulerHS.TestData.Types (NTTestKeyWithIntPayload (NTTestKeyWithIntPayload),
-                                         NTTestKeyWithIntPayloadAnotherEnc (NTTestKeyWithIntPayloadAnotherEnc),
-                                         NTTestKeyWithStringPayload (NTTestKeyWithStringPayload),
-                                         NTTestKeyWithStringPayloadAnotherEnc (NTTestKeyWithStringPayloadAnotherEnc),
-                                         TestIntKey (TestIntKey),
-                                         TestIntKey2 (TestIntKey2),
-                                         TestKVals (TestKVals),
-                                         TestKeyWithIntPayload (TestKeyWithIntPayload),
-                                         TestKeyWithIntPayloadAnotherEnc (TestKeyWithIntPayloadAnotherEnc),
-                                         TestKeyWithStringPayload (TestKeyWithStringPayload),
-                                         TestKeyWithStringPayloadAnotherEnc (TestKeyWithStringPayloadAnotherEnc),
-                                         TestStringKey (TestStringKey),
-                                         TestStringKey2 (TestStringKey2),
-                                         TestStringKey2AnotherEnc (TestStringKey2AnotherEnc),
-                                         TestStringKeyAnotherEnc (TestStringKeyAnotherEnc),
-                                         mbNTTestKeyWithIntPayloadAnotherEncS1,
-                                         mbNTTestKeyWithIntPayloadAnotherEncS2,
-                                         mbNTTestKeyWithIntPayloadS1,
-                                         mbNTTestKeyWithIntPayloadS2,
-                                         mbNTTestKeyWithStringPayloadAnotherEncS1,
-                                         mbNTTestKeyWithStringPayloadAnotherEncS2,
-                                         mbNTTestKeyWithStringPayloadS1,
-                                         mbNTTestKeyWithStringPayloadS2,
-                                         mbTestIntKey, mbTestIntKey2,
-                                         mbTestKeyWithIntPayloadAnotherEncS1,
-                                         mbTestKeyWithIntPayloadAnotherEncS2,
-                                         mbTestKeyWithIntPayloadS1,
-                                         mbTestKeyWithIntPayloadS2,
-                                         mbTestKeyWithStringPayloadAnotherEncS1,
-                                         mbTestKeyWithStringPayloadAnotherEncS2,
-                                         mbTestKeyWithStringPayloadS1,
-                                         mbTestKeyWithStringPayloadS2,
-                                         mbTestStringKey, mbTestStringKey2,
-                                         mbTestStringKey2AnotherEnc,
-                                         mbTestStringKeyAnotherEnc)
-import           EulerHS.Types (HttpManagerNotFound (..), defaultFlowFormatter,
-                                getResponseCode)
+import Data.X509.CertificateStore (readCertificateStore)
+import EulerHS.Interpreters (runFlow)
+import EulerHS.Language as L
+import EulerHS.Prelude hiding (get)
+import EulerHS.Runtime (createLoggerRuntime, withFlowRuntime)
+import EulerHS.TestData.Types
+  ( NTTestKeyWithIntPayload (NTTestKeyWithIntPayload),
+    NTTestKeyWithIntPayloadAnotherEnc (NTTestKeyWithIntPayloadAnotherEnc),
+    NTTestKeyWithStringPayload (NTTestKeyWithStringPayload),
+    NTTestKeyWithStringPayloadAnotherEnc (NTTestKeyWithStringPayloadAnotherEnc),
+    TestIntKey (TestIntKey),
+    TestIntKey2 (TestIntKey2),
+    TestKVals (TestKVals),
+    TestKeyWithIntPayload (TestKeyWithIntPayload),
+    TestKeyWithIntPayloadAnotherEnc (TestKeyWithIntPayloadAnotherEnc),
+    TestKeyWithStringPayload (TestKeyWithStringPayload),
+    TestKeyWithStringPayloadAnotherEnc (TestKeyWithStringPayloadAnotherEnc),
+    TestStringKey (TestStringKey),
+    TestStringKey2 (TestStringKey2),
+    TestStringKey2AnotherEnc (TestStringKey2AnotherEnc),
+    TestStringKeyAnotherEnc (TestStringKeyAnotherEnc),
+    mbNTTestKeyWithIntPayloadAnotherEncS1,
+    mbNTTestKeyWithIntPayloadAnotherEncS2,
+    mbNTTestKeyWithIntPayloadS1,
+    mbNTTestKeyWithIntPayloadS2,
+    mbNTTestKeyWithStringPayloadAnotherEncS1,
+    mbNTTestKeyWithStringPayloadAnotherEncS2,
+    mbNTTestKeyWithStringPayloadS1,
+    mbNTTestKeyWithStringPayloadS2,
+    mbTestIntKey,
+    mbTestIntKey2,
+    mbTestKeyWithIntPayloadAnotherEncS1,
+    mbTestKeyWithIntPayloadAnotherEncS2,
+    mbTestKeyWithIntPayloadS1,
+    mbTestKeyWithIntPayloadS2,
+    mbTestKeyWithStringPayloadAnotherEncS1,
+    mbTestKeyWithStringPayloadAnotherEncS2,
+    mbTestKeyWithStringPayloadS1,
+    mbTestKeyWithStringPayloadS2,
+    mbTestStringKey,
+    mbTestStringKey2,
+    mbTestStringKey2AnotherEnc,
+    mbTestStringKeyAnotherEnc,
+  )
+import EulerHS.Types
+  ( HttpManagerNotFound (..),
+    defaultFlowFormatter,
+    getResponseCode,
+  )
 import qualified EulerHS.Types as T
+import Servant.Client (BaseUrl (..), ClientError (..), Scheme (..))
+import Servant.Server (err403, errBody)
+import Test.Hspec
+  ( Spec,
+    around,
+    around_,
+    describe,
+    it,
+    shouldBe,
+    shouldSatisfy,
+  )
 
 -- import           EulerHS.Testing.Types (FlowMockedValues' (..))
 -- import           EulerHS.Testing.Flow.Interpreter (runFlowWithTestInterpreter)
@@ -69,12 +91,10 @@ import qualified EulerHS.Types as T
 
 -- import Debug.Trace
 
-
 spec :: Maybe T.LoggerConfig -> Spec
 spec loggerCfg = do
   describe "EulerHS flow language tests" $ do
     around (withFlowRuntime (map (createLoggerRuntime defaultFlowFormatter Nothing) loggerCfg)) $ do
-
       -- describe "TestInterpreters" $ do
       --   xit "testScenario1" $ \rt -> do
       --     mv <- newMVar scenario1MockedValues
@@ -83,7 +103,7 @@ spec loggerCfg = do
 
       around_ withCertV1SecureServer $ do
         describe "support for V1 certificates" $ do
-          it "manager with V1 support connects well" $ \ _ -> do
+          it "manager with V1 support connects well" $ \_ -> do
             rt <- initRTWithManagers
             let req = T.httpGet $ "https://localhost:" <> show port
             -- TODO use correct manager
@@ -91,7 +111,7 @@ spec loggerCfg = do
             resEither `shouldSatisfy` isRight
             let code = getResponseCode $ fromRight (error "res is left") resEither
             code `shouldBe` 404
-          it "by default there is no support for V1 certificates" $ \ rt -> do
+          it "by default there is no support for V1 certificates" $ \rt -> do
             let req = T.httpGet $ "https://localhost:" <> show port
             resEither <- runFlow rt $ callHTTP req
             resEither `shouldSatisfy` isLeft
@@ -122,7 +142,7 @@ spec loggerCfg = do
             let err = displayException (ConnectionError (toException $ HttpManagerNotFound "notexist"))
             userEither <- runFlow rt $ callAPI' (Just "notexist") url getUser
             case userEither of
-              Left e  -> displayException e `shouldBe` err
+              Left e -> displayException e `shouldBe` err
               Right _ -> fail "Success result not expected"
 
       describe "callAPI tests without server" $ do
@@ -137,18 +157,18 @@ spec loggerCfg = do
 
       describe "calling external TLS services with untyped API" $ do
         around_ withSecureServer $ do
-          it "calling secure service using unsecured protocol fails" $ \ rt -> do
+          it "calling secure service using unsecured protocol fails" $ \rt -> do
             let req = T.httpGet $ "http://localhost:" <> show port
             resEither <- runFlow rt $ callHTTP req
             resEither `shouldSatisfy` isRight
             let code = getResponseCode $ fromRight (error "res is left") resEither
             code `shouldBe` 426
-          it "server certificates with unknown CA gets rejected" $ \ rt -> do
+          it "server certificates with unknown CA gets rejected" $ \rt -> do
             let req = T.httpGet $ "https://localhost:" <> show port
             resEither <- runFlow rt $ callHTTP req
             resEither `shouldSatisfy` isLeft
             (fromLeft' resEither) `shouldSatisfy` (\m -> Text.count "certificate has unknown CA" m == 1)
-          it "validate server certificate with custom CA" $ \ _ -> do
+          it "validate server certificate with custom CA" $ \_ -> do
             rt <- initRTWithManagers
             let req = T.httpGet $ "https://localhost:" <> show port
             resEither <- runFlow rt $ callHTTP' (Just "tlsWithCustomCA") req Nothing
@@ -158,32 +178,32 @@ spec loggerCfg = do
 
       describe "TLS client authentication with untyped API" $ do
         around_ withClientTlsAuthServer $ do
-          it "server rejects clients without a certificate" $ \ _ -> do
+          it "server rejects clients without a certificate" $ \_ -> do
             rt <- initRTWithManagers
             let req = T.httpGet $ "https://localhost:" <> show port
             resEither <- runFlow rt $ callHTTP' (Just "manager1") req Nothing
             resEither `shouldSatisfy` isLeft
-          it "authenticate client by a certificate" $ \ _ -> do
+          it "authenticate client by a certificate" $ \_ -> do
             rt <- initRTWithManagers
             let req = T.httpGet $ "https://localhost:" <> show port
-            resEither <- runFlow rt $ callHTTP' (Just "tlsWithClientCertAndCustomCA")  req Nothing
+            resEither <- runFlow rt $ callHTTP' (Just "tlsWithClientCertAndCustomCA") req Nothing
             resEither `shouldSatisfy` isRight
             let code = getResponseCode $ fromRight (error "res is left") resEither
             code `shouldBe` 404
 
       describe "calling external TLS services with well-typed API" $ do
         around_ withSecureServer $ do
-          it "calling secure service using unsecured protocol fails" $ \ _ -> do
+          it "calling secure service using unsecured protocol fails" $ \_ -> do
             rt <- initRTWithManagers
             let url = BaseUrl Http "localhost" port ""
             bookEither <- runFlow rt $ callAPI' (Just "manager1") url getBook
             bookEither `shouldSatisfy` isLeft
-          it "server certificates with unknown CA gets rejected" $ \ _ -> do
+          it "server certificates with unknown CA gets rejected" $ \_ -> do
             rt <- initRTWithManagers
             let url = BaseUrl Https "localhost" port ""
             bookEither <- runFlow rt $ callAPI' (Just "manager1") url getBook
             bookEither `shouldSatisfy` isLeft
-          it "validate server certificate with custom CA" $ \ _ -> do
+          it "validate server certificate with custom CA" $ \_ -> do
             rt <- initRTWithManagers
             let url = BaseUrl Https "localhost" port ""
             bookEither <- runFlow rt $ callAPI' (Just "tlsWithCustomCA") url getBook
@@ -191,33 +211,33 @@ spec loggerCfg = do
 
       describe "TLS client authentication" $ do
         around_ withClientTlsAuthServer $ do
-          it "server rejects clients without a certificate" $ \ _ -> do
+          it "server rejects clients without a certificate" $ \_ -> do
             rt <- initRTWithManagers
             let url = BaseUrl Https "localhost" externalServerPort ""
             bookEither <- runFlow rt $ callAPI' (Just "manager1") url getBook
             bookEither `shouldSatisfy` isLeft
-          it "authenticate client by a certificate" $ \ _ -> do
+          it "authenticate client by a certificate" $ \_ -> do
             rt <- initRTWithManagers
             let url = BaseUrl Https "localhost" externalServerPort ""
             bookEither <- runFlow rt $ callAPI' (Just "tlsWithClientCertAndCustomCA") url getBook
             bookEither `shouldSatisfy` isRight
 
-          it "authenticate client by a ad-hoc certificate using callHTTPWithCert without custom CA store, with cert" $ \ rt -> do
+          it "authenticate client by a ad-hoc certificate using callHTTPWithCert without custom CA store, with cert" $ \rt -> do
             let req = T.httpGet $ "https://localhost:" <> show externalServerPort
-            cert  <- clientHttpCert
+            cert <- clientHttpCert
             resEither <- runFlow rt $ L.callHTTPWithCert req $ Just cert
             resEither `shouldSatisfy` isLeft
             (fromLeft' resEither) `shouldSatisfy` (\m -> Text.count "certificate has unknown CA" m == 1)
 
-          it "authenticate client by a ad-hoc certificate using callHTTPWithCert without custom CA store, without cert" $ \ rt -> do
+          it "authenticate client by a ad-hoc certificate using callHTTPWithCert without custom CA store, without cert" $ \rt -> do
             let req = T.httpGet $ "https://localhost:" <> show externalServerPort
             resEither <- runFlow rt $ L.callHTTPWithCert req Nothing
             resEither `shouldSatisfy` isLeft
             (fromLeft' resEither) `shouldSatisfy` (\m -> Text.count "certificate has unknown CA" m == 1)
 
-          it "authenticate client by an ad-hoc certificate with callHTTP" $ \ rt -> do
+          it "authenticate client by an ad-hoc certificate with callHTTP" $ \rt -> do
             let req = T.httpGet $ "https://localhost:" <> show externalServerPort
-            cert  <- clientHttpCert
+            cert <- clientHttpCert
             store <- fromJust <$> readCertificateStore "test/tls/ca-certificates"
             resEither <- runFlow rt $ do
               -- Here we call getHTTPManager twice as a smoke test for LRU cache,
@@ -228,8 +248,8 @@ spec loggerCfg = do
               L.callHTTPUsingManager' mgr req Nothingjj
             resEither `shouldSatisfy` isRight
 
-          it "authenticate client by an ad-hoc certificate with callAPI" $ \ rt -> do
-            cert  <- clientHttpCert
+          it "authenticate client by an ad-hoc certificate with callAPI" $ \rt -> do
+            cert <- clientHttpCert
             store <- fromJust <$> readCertificateStore "test/tls/ca-certificates"
             resEither <- runFlow rt $ do
               -- Here we call getHTTPManager twice as a smoke test for LRU cache,
@@ -246,20 +266,26 @@ spec loggerCfg = do
           result <- runFlow rt $ runIO (pure ("hi" :: String))
           result `shouldBe` "hi"
         it "RunIO with exception" $ \rt -> do
-          result <- E.catch
-            (runFlow rt $ do
-              _ <- runIO ioActWithException
-              pure ("Never returned" :: Text))
-            (\e -> do let err = show (e :: E.AssertionFailed)
-                      pure err)
+          result <-
+            E.catch
+              ( runFlow rt $ do
+                  _ <- runIO ioActWithException
+                  pure ("Never returned" :: Text)
+              )
+              ( \e -> do
+                  let err = show (e :: E.AssertionFailed)
+                  pure err
+              )
           result `shouldBe` ("Exception from IO" :: Text)
         it "RunIO with catched exception" $ \rt -> do
-          result <-runFlow rt $ do
-              runIO $
-                E.catch
-                  ioActWithException
-                  (\e -> do let err = show (e :: E.AssertionFailed)
-                            pure err)
+          result <- runFlow rt $ do
+            runIO $
+              E.catch
+                ioActWithException
+                ( \e -> do
+                    let err = show (e :: E.AssertionFailed)
+                    pure err
+                )
           result `shouldBe` ("Exception from IO" :: Text)
         it "RunUntracedIO" $ \rt -> do
           result <- runFlow rt $ runIO (pure ("hi" :: String))
@@ -284,17 +310,15 @@ spec loggerCfg = do
         it "STM Test" $ \rt -> do
           result <- runFlow rt $ do
             countVar <- runIO $ newTVarIO (0 :: Int)
-            let
-              updateCount = do
-                count <- readTVar countVar
-                when (count < 100) (writeTVar countVar (count + 1))
-                readTVar countVar
-            let
-              countTo100 = do
-                count <- atomically updateCount
-                if count < 100
-                  then countTo100
-                  else return count
+            let updateCount = do
+                  count <- readTVar countVar
+                  when (count < 100) (writeTVar countVar (count + 1))
+                  readTVar countVar
+            let countTo100 = do
+                  count <- atomically updateCount
+                  if count < 100
+                    then countTo100
+                    else return count
             awaitable1 <- forkFlow' "counter1" $ runIO $ void countTo100
             awaitable2 <- forkFlow' "counter2" $ runIO $ void countTo100
             _ <- await Nothing awaitable1 >> await Nothing awaitable2
@@ -318,7 +342,7 @@ spec loggerCfg = do
             _ <- setOption TestStringKey2 "lore ipsum2"
             s1 <- getOption TestStringKey
             s2 <- getOption TestStringKey2
-            pure (s1,s2)
+            pure (s1, s2)
           result `shouldBe` (Just "lore ipsum", Just "lore ipsum2")
         it "Delete Key" $ \rt -> do
           result <- runFlow rt $ do
@@ -330,97 +354,105 @@ spec loggerCfg = do
           result `shouldBe` (Just "lorem ipsum", Nothing)
         it "Different encoding, types & payload" $ \rt -> do
           testKVals <- runFlow rt $ do
-            _     <- setOption TestStringKey "mbTestStringKey"
-            _     <- setOption TestStringKey2 "mbTestStringKey2"
-            _     <- setOption TestIntKey 1001
-            _     <- setOption TestIntKey2 2002
-            _     <- setOption TestStringKeyAnotherEnc "mbTestStringKeyAnotherEnc"
-            _     <- setOption TestStringKey2AnotherEnc "mbTestStringKey2AnotherEnc"
-            _     <- setOption (TestKeyWithStringPayload "SP1") "mbTestKeyWithStringPayloadS1"
-            _     <- setOption (TestKeyWithStringPayload "SP2") "mbTestKeyWithStringPayloadS2"
-            _     <- setOption (TestKeyWithIntPayload 1001) "mbTestKeyWithIntPayloadS1"
-            _     <- setOption (TestKeyWithIntPayload 2002) "mbTestKeyWithIntPayloadS2"
-            _     <- setOption (TestKeyWithStringPayloadAnotherEnc "SP1") "mbTestKeyWithStringPayloadAnotherEncS1"
-            _     <- setOption (TestKeyWithStringPayloadAnotherEnc "SP2") "mbTestKeyWithStringPayloadAnotherEncS2"
-            _     <- setOption (TestKeyWithIntPayloadAnotherEnc 1001) "mbTestKeyWithIntPayloadAnotherEncS1"
-            _     <- setOption (TestKeyWithIntPayloadAnotherEnc 2002) "mbTestKeyWithIntPayloadAnotherEncS2"
-            _     <- setOption (NTTestKeyWithStringPayload "SP1") "mbNTTestKeyWithStringPayloadS1"
-            _     <- setOption (NTTestKeyWithStringPayload "SP2") "mbNTTestKeyWithStringPayloadS2"
-            _     <- setOption (NTTestKeyWithIntPayload 1001) 2333
-            _     <- setOption (NTTestKeyWithIntPayload 2002) 3322
-            _     <- setOption (NTTestKeyWithStringPayloadAnotherEnc "SP1") "mbNTTestKeyWithStringPayloadAnotherEncS1"
-            _     <- setOption (NTTestKeyWithStringPayloadAnotherEnc "SP2") "mbNTTestKeyWithStringPayloadAnotherEncS2"
-            _     <- setOption (NTTestKeyWithIntPayloadAnotherEnc 1001) 9009
-            _     <- setOption (NTTestKeyWithIntPayloadAnotherEnc 2002) 1001
+            _ <- setOption TestStringKey "mbTestStringKey"
+            _ <- setOption TestStringKey2 "mbTestStringKey2"
+            _ <- setOption TestIntKey 1001
+            _ <- setOption TestIntKey2 2002
+            _ <- setOption TestStringKeyAnotherEnc "mbTestStringKeyAnotherEnc"
+            _ <- setOption TestStringKey2AnotherEnc "mbTestStringKey2AnotherEnc"
+            _ <- setOption (TestKeyWithStringPayload "SP1") "mbTestKeyWithStringPayloadS1"
+            _ <- setOption (TestKeyWithStringPayload "SP2") "mbTestKeyWithStringPayloadS2"
+            _ <- setOption (TestKeyWithIntPayload 1001) "mbTestKeyWithIntPayloadS1"
+            _ <- setOption (TestKeyWithIntPayload 2002) "mbTestKeyWithIntPayloadS2"
+            _ <- setOption (TestKeyWithStringPayloadAnotherEnc "SP1") "mbTestKeyWithStringPayloadAnotherEncS1"
+            _ <- setOption (TestKeyWithStringPayloadAnotherEnc "SP2") "mbTestKeyWithStringPayloadAnotherEncS2"
+            _ <- setOption (TestKeyWithIntPayloadAnotherEnc 1001) "mbTestKeyWithIntPayloadAnotherEncS1"
+            _ <- setOption (TestKeyWithIntPayloadAnotherEnc 2002) "mbTestKeyWithIntPayloadAnotherEncS2"
+            _ <- setOption (NTTestKeyWithStringPayload "SP1") "mbNTTestKeyWithStringPayloadS1"
+            _ <- setOption (NTTestKeyWithStringPayload "SP2") "mbNTTestKeyWithStringPayloadS2"
+            _ <- setOption (NTTestKeyWithIntPayload 1001) 2333
+            _ <- setOption (NTTestKeyWithIntPayload 2002) 3322
+            _ <- setOption (NTTestKeyWithStringPayloadAnotherEnc "SP1") "mbNTTestKeyWithStringPayloadAnotherEncS1"
+            _ <- setOption (NTTestKeyWithStringPayloadAnotherEnc "SP2") "mbNTTestKeyWithStringPayloadAnotherEncS2"
+            _ <- setOption (NTTestKeyWithIntPayloadAnotherEnc 1001) 9009
+            _ <- setOption (NTTestKeyWithIntPayloadAnotherEnc 2002) 1001
             TestKVals
-               <$> getOption TestStringKey
-               <*> getOption TestStringKey2
-               <*> getOption TestIntKey
-               <*> getOption TestIntKey2
-               <*> getOption TestStringKeyAnotherEnc
-               <*> getOption TestStringKey2AnotherEnc
-               <*> getOption (TestKeyWithStringPayload "SP1")
-               <*> getOption (TestKeyWithStringPayload "SP2")
-               <*> getOption (TestKeyWithIntPayload 1001)
-               <*> getOption (TestKeyWithIntPayload 2002)
-               <*> getOption (TestKeyWithStringPayloadAnotherEnc "SP1")
-               <*> getOption (TestKeyWithStringPayloadAnotherEnc "SP2")
-               <*> getOption (TestKeyWithIntPayloadAnotherEnc 1001)
-               <*> getOption (TestKeyWithIntPayloadAnotherEnc 2002)
-               <*> getOption (NTTestKeyWithStringPayload "SP1")
-               <*> getOption (NTTestKeyWithStringPayload "SP2")
-               <*> getOption (NTTestKeyWithIntPayload 1001)
-               <*> getOption (NTTestKeyWithIntPayload 2002)
-               <*> getOption (NTTestKeyWithStringPayloadAnotherEnc "SP1")
-               <*> getOption (NTTestKeyWithStringPayloadAnotherEnc "SP2")
-               <*> getOption (NTTestKeyWithIntPayloadAnotherEnc 1001)
-               <*> getOption (NTTestKeyWithIntPayloadAnotherEnc 2002)
+              <$> getOption TestStringKey
+              <*> getOption TestStringKey2
+              <*> getOption TestIntKey
+              <*> getOption TestIntKey2
+              <*> getOption TestStringKeyAnotherEnc
+              <*> getOption TestStringKey2AnotherEnc
+              <*> getOption (TestKeyWithStringPayload "SP1")
+              <*> getOption (TestKeyWithStringPayload "SP2")
+              <*> getOption (TestKeyWithIntPayload 1001)
+              <*> getOption (TestKeyWithIntPayload 2002)
+              <*> getOption (TestKeyWithStringPayloadAnotherEnc "SP1")
+              <*> getOption (TestKeyWithStringPayloadAnotherEnc "SP2")
+              <*> getOption (TestKeyWithIntPayloadAnotherEnc 1001)
+              <*> getOption (TestKeyWithIntPayloadAnotherEnc 2002)
+              <*> getOption (NTTestKeyWithStringPayload "SP1")
+              <*> getOption (NTTestKeyWithStringPayload "SP2")
+              <*> getOption (NTTestKeyWithIntPayload 1001)
+              <*> getOption (NTTestKeyWithIntPayload 2002)
+              <*> getOption (NTTestKeyWithStringPayloadAnotherEnc "SP1")
+              <*> getOption (NTTestKeyWithStringPayloadAnotherEnc "SP2")
+              <*> getOption (NTTestKeyWithIntPayloadAnotherEnc 1001)
+              <*> getOption (NTTestKeyWithIntPayloadAnotherEnc 2002)
 
-          testKVals `shouldBe` TestKVals
-                  { mbTestStringKey                          = Just "mbTestStringKey"
-                  , mbTestStringKey2                         = Just "mbTestStringKey2"
-                  , mbTestIntKey                             = Just 1001
-                  , mbTestIntKey2                            = Just 2002
-                  , mbTestStringKeyAnotherEnc                = Just "mbTestStringKeyAnotherEnc"
-                  , mbTestStringKey2AnotherEnc               = Just "mbTestStringKey2AnotherEnc"
-                  , mbTestKeyWithStringPayloadS1             = Just "mbTestKeyWithStringPayloadS1"
-                  , mbTestKeyWithStringPayloadS2             = Just "mbTestKeyWithStringPayloadS2"
-                  , mbTestKeyWithIntPayloadS1                = Just "mbTestKeyWithIntPayloadS1"
-                  , mbTestKeyWithIntPayloadS2                = Just "mbTestKeyWithIntPayloadS2"
-                  , mbTestKeyWithStringPayloadAnotherEncS1   = Just "mbTestKeyWithStringPayloadAnotherEncS1"
-                  , mbTestKeyWithStringPayloadAnotherEncS2   = Just "mbTestKeyWithStringPayloadAnotherEncS2"
-                  , mbTestKeyWithIntPayloadAnotherEncS1      = Just "mbTestKeyWithIntPayloadAnotherEncS1"
-                  , mbTestKeyWithIntPayloadAnotherEncS2      = Just "mbTestKeyWithIntPayloadAnotherEncS2"
-                  , mbNTTestKeyWithStringPayloadS1           = Just "mbNTTestKeyWithStringPayloadS1"
-                  , mbNTTestKeyWithStringPayloadS2           = Just "mbNTTestKeyWithStringPayloadS2"
-                  , mbNTTestKeyWithIntPayloadS1              = Just 2333
-                  , mbNTTestKeyWithIntPayloadS2              = Just 3322
-                  , mbNTTestKeyWithStringPayloadAnotherEncS1 = Just "mbNTTestKeyWithStringPayloadAnotherEncS1"
-                  , mbNTTestKeyWithStringPayloadAnotherEncS2 = Just "mbNTTestKeyWithStringPayloadAnotherEncS2"
-                  , mbNTTestKeyWithIntPayloadAnotherEncS1    = Just 9009
-                  , mbNTTestKeyWithIntPayloadAnotherEncS2    = Just 1001
-                  }
+          testKVals
+            `shouldBe` TestKVals
+              { mbTestStringKey = Just "mbTestStringKey",
+                mbTestStringKey2 = Just "mbTestStringKey2",
+                mbTestIntKey = Just 1001,
+                mbTestIntKey2 = Just 2002,
+                mbTestStringKeyAnotherEnc = Just "mbTestStringKeyAnotherEnc",
+                mbTestStringKey2AnotherEnc = Just "mbTestStringKey2AnotherEnc",
+                mbTestKeyWithStringPayloadS1 = Just "mbTestKeyWithStringPayloadS1",
+                mbTestKeyWithStringPayloadS2 = Just "mbTestKeyWithStringPayloadS2",
+                mbTestKeyWithIntPayloadS1 = Just "mbTestKeyWithIntPayloadS1",
+                mbTestKeyWithIntPayloadS2 = Just "mbTestKeyWithIntPayloadS2",
+                mbTestKeyWithStringPayloadAnotherEncS1 = Just "mbTestKeyWithStringPayloadAnotherEncS1",
+                mbTestKeyWithStringPayloadAnotherEncS2 = Just "mbTestKeyWithStringPayloadAnotherEncS2",
+                mbTestKeyWithIntPayloadAnotherEncS1 = Just "mbTestKeyWithIntPayloadAnotherEncS1",
+                mbTestKeyWithIntPayloadAnotherEncS2 = Just "mbTestKeyWithIntPayloadAnotherEncS2",
+                mbNTTestKeyWithStringPayloadS1 = Just "mbNTTestKeyWithStringPayloadS1",
+                mbNTTestKeyWithStringPayloadS2 = Just "mbNTTestKeyWithStringPayloadS2",
+                mbNTTestKeyWithIntPayloadS1 = Just 2333,
+                mbNTTestKeyWithIntPayloadS2 = Just 3322,
+                mbNTTestKeyWithStringPayloadAnotherEncS1 = Just "mbNTTestKeyWithStringPayloadAnotherEncS1",
+                mbNTTestKeyWithStringPayloadAnotherEncS2 = Just "mbNTTestKeyWithStringPayloadAnotherEncS2",
+                mbNTTestKeyWithIntPayloadAnotherEncS1 = Just 9009,
+                mbNTTestKeyWithIntPayloadAnotherEncS2 = Just 1001
+              }
       it "RunSysCmd" $ \rt -> do
         result <- runFlow rt $ runSysCmd "echo test"
         result `shouldBe` "test\n"
       it "RunSysCmd with bad command" $ \rt -> do
         putStrLn ("" :: Text)
-        result <- E.catch
-          (runFlow rt $ runSysCmd "badEcho test")
-          (\e -> do let err = show (e :: E.SomeException)
-                    pure err)
+        result <-
+          E.catch
+            (runFlow rt $ runSysCmd "badEcho test")
+            ( \e -> do
+                let err = show (e :: E.SomeException)
+                pure err
+            )
         result `shouldBe` ("readCreateProcess: badEcho test (exit 127): failed" :: String)
       it "GenerateGUID" $ \rt -> do
         guid <- runFlow rt generateGUID
         let maybeGUID = UUID.fromText guid
         maybeGUID `shouldSatisfy` isJust
       it "ThrowException" $ \rt -> do
-        result <- E.catch
-          (runFlow rt $ do
-            _ <- throwException (E.AssertionFailed "Exception message")
-            pure @_ @Text "Never returned")
-          (\e -> do let err = show (e :: E.AssertionFailed)
-                    pure err)
+        result <-
+          E.catch
+            ( runFlow rt $ do
+                _ <- throwException (E.AssertionFailed "Exception message")
+                pure @_ @Text "Never returned"
+            )
+            ( \e -> do
+                let err = show (e :: E.AssertionFailed)
+                pure err
+            )
         result `shouldBe` "Exception message"
 
       describe "ForkFlow" $ do
@@ -475,7 +507,7 @@ spec loggerCfg = do
         it "Fork and successful await for 2 flows" $ \rt -> do
           let flow = do
                 awaitable1 <- forkFlow' "101" (runIO (threadDelay 10000) >> pure i)
-                awaitable2 <- forkFlow' "102" (runIO (threadDelay 100000) >> pure (i+1))
+                awaitable2 <- forkFlow' "102" (runIO (threadDelay 100000) >> pure (i + 1))
                 mbRes1 <- await Nothing awaitable1
                 mbRes2 <- await Nothing awaitable2
                 pure (mbRes1, mbRes2)
@@ -484,7 +516,7 @@ spec loggerCfg = do
         it "Fork and successful await 1 of 2 flows" $ \rt -> do
           let flow = do
                 awaitable1 <- forkFlow' "101" (runIO (threadDelay 10000) >> pure i)
-                awaitable2 <- forkFlow' "102" (runIO (threadDelay 1000000) >> pure (i+1))
+                awaitable2 <- forkFlow' "102" (runIO (threadDelay 1000000) >> pure (i + 1))
                 mbRes1 <- await Nothing awaitable1
                 mbRes2 <- await (Just $ T.Microseconds 1000) awaitable2
                 pure (mbRes1, mbRes2)

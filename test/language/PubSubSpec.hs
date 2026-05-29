@@ -1,7 +1,9 @@
 module PubSubSpec
   (
-    -- spec
-  ) where
+  )
+where
+
+-- spec
 
 -- import           Common (emptyMVarWithWatchDog, replayRecording)
 -- import           Data.Aeson
@@ -35,31 +37,31 @@ module PubSubSpec
 --         L.runIO watch
 --       result `shouldBe` Just testMsg
 
-    -- TODO: This test is brittle if replayed with pre-recorded ART-traces,
-    --       as this ties it deeply to the implementation; instead we should
-    --       test the externally-observable behaviour only
-    --
-    -- TODO: rework this test
-    -- it "Pub/Sub works the same way if run in fork" $ do
-    --   let testMsg = "Hello, Tests"
-    --   let testCh  = "test"
-    --   (targetMVar, watch, _) <- emptyMVarWithWatchDog 1
+-- TODO: This test is brittle if replayed with pre-recorded ART-traces,
+--       as this ties it deeply to the implementation; instead we should
+--       test the externally-observable behaviour only
+--
+-- TODO: rework this test
+-- it "Pub/Sub works the same way if run in fork" $ do
+--   let testMsg = "Hello, Tests"
+--   let testCh  = "test"
+--   (targetMVar, watch, _) <- emptyMVarWithWatchDog 1
 
-    --   waitSubscribe <- newEmptyMVar
-    --   result <- runWithRedisConn_ rr2 $ do
-    --   -- result <- runWithRedisConn connectInfo rr2 $ do
-    --     L.forkFlow "Fork" $ do
-    --       void $ subscribe [Channel testCh] $ \msg -> L.runIO $
-    --         putMVar targetMVar msg
-    --       void $ L.runIO $ putMVar waitSubscribe ()
+--   waitSubscribe <- newEmptyMVar
+--   result <- runWithRedisConn_ rr2 $ do
+--   -- result <- runWithRedisConn connectInfo rr2 $ do
+--     L.forkFlow "Fork" $ do
+--       void $ subscribe [Channel testCh] $ \msg -> L.runIO $
+--         putMVar targetMVar msg
+--       void $ L.runIO $ putMVar waitSubscribe ()
 
-    --     void $ L.runIO $ takeMVar waitSubscribe
+--     void $ L.runIO $ takeMVar waitSubscribe
 
-    --     publish (Channel testCh) $ Payload testMsg
+--     publish (Channel testCh) $ Payload testMsg
 
-    --     L.runIO watch
+--     L.runIO watch
 
-    --   result `shouldBe` Just testMsg
+--   result `shouldBe` Just testMsg
 
 --     it "Callback does not receive messages from channel after unsubscribe (subscribe method)" $ do
 --       let testMsg = "Hello, Tests"
@@ -163,7 +165,6 @@ module PubSubSpec
 --         pure (result0, result1)
 
 --       result `shouldBe` (Nothing, Nothing)
-
 
 -- -- Callback receives messages from channel it subscribed to
 -- rr1 :: ResultRecording

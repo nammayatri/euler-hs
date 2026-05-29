@@ -1,26 +1,32 @@
 {-# LANGUAGE PartialTypeSignatures #-}
-{-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module SQLDB.Tests.SQLiteDBSpec where
 
 import qualified Database.Beam.Sqlite as BS
-import           EulerHS.Interpreters (runFlow)
+import EulerHS.Interpreters (runFlow)
 import qualified EulerHS.Language as L
-import           EulerHS.Prelude
-import           EulerHS.Types (DBConfig, DBError (DBError),
-                                DBErrorType (SQLError), SQLError (SqliteError),
-                                SqliteError (SqliteErrorConstraint))
+import EulerHS.Prelude
+import EulerHS.Types
+  ( DBConfig,
+    DBError (DBError),
+    DBErrorType (SQLError),
+    SQLError (SqliteError),
+    SqliteError (SqliteErrorConstraint),
+  )
 import qualified EulerHS.Types as T
-import           Prelude (head, (!!))
-import           SQLDB.TestData.Connections (testDBName, withEmptyDB)
-import           SQLDB.TestData.Scenarios.SQLite (insertReturningScript,
-                                                  insertTestValues,
-                                                  selectOneDbScript,
-                                                  selectUnknownDbScript,
-                                                  uniqueConstraintViolationDbScript,
-                                                  updateAndSelectDbScript)
-import           SQLDB.TestData.Types (someUser, _userFirstName, _userLastName)
-import           Test.Hspec hiding (runIO)
+import SQLDB.TestData.Connections (testDBName, withEmptyDB)
+import SQLDB.TestData.Scenarios.SQLite
+  ( insertReturningScript,
+    insertTestValues,
+    selectOneDbScript,
+    selectUnknownDbScript,
+    uniqueConstraintViolationDbScript,
+    updateAndSelectDbScript,
+  )
+import SQLDB.TestData.Types (someUser, _userFirstName, _userLastName)
+import Test.Hspec hiding (runIO)
+import Prelude (head, (!!))
 
 -- Configurations
 
@@ -28,11 +34,12 @@ sqliteCfg :: DBConfig BS.SqliteM
 sqliteCfg = T.mkSQLiteConfig "eulerSQliteDB" testDBName
 
 poolConfig :: T.PoolConfig
-poolConfig = T.PoolConfig
-  { stripes = 1
-  , keepAlive = 10
-  , resourcesPerStripe = 50
-  }
+poolConfig =
+  T.PoolConfig
+    { stripes = 1,
+      keepAlive = 10,
+      resourcesPerStripe = 50
+    }
 
 sqlitePoolCfg :: T.DBConfig BS.SqliteM
 sqlitePoolCfg = T.mkSQLitePoolConfig "eulerSQliteDB" testDBName poolConfig
@@ -41,8 +48,7 @@ sqlitePoolCfg = T.mkSQLitePoolConfig "eulerSQliteDB" testDBName poolConfig
 
 spec :: Spec
 spec = do
-  let
-      test sqliteCfg' = do
+  let test sqliteCfg' = do
         it "Double connection initialization should fail" $ \rt -> do
           eRes <- runFlow rt $ do
             eConn1 <- L.initSqlDBConnection sqliteCfg'
@@ -72,7 +78,7 @@ spec = do
             case (eConn1, eConn2) of
               (Left err, _) -> pure $ Left $ "Failed to connect: " <> show @Text err
               (_, Left err) -> pure $ Left $ "Unexpected error on get connection: " <> show err
-              _             -> pure $ Right ()
+              _ -> pure $ Right ()
           eRes `shouldBe` Right ()
 
         it "Init and double get connection should succeed" $ \rt -> do
@@ -84,7 +90,7 @@ spec = do
               (Left err, _, _) -> pure $ Left $ "Failed to connect: " <> show @Text err
               (_, Left err, _) -> pure $ Left $ "Unexpected error on 1st get connection: " <> show err
               (_, _, Left err) -> pure $ Left $ "Unexpected error on 2nd get connection: " <> show err
-              _                -> pure $ Right ()
+              _ -> pure $ Right ()
           eRes `shouldBe` Right ()
 
         it "getOrInitSqlConn should succeed" $ \rt -> do
@@ -92,30 +98,34 @@ spec = do
             eConn <- L.getOrInitSqlConn sqliteCfg'
             case eConn of
               Left err -> pure $ Left $ "Failed to connect: " <> show @Text err
-              _        -> pure $ Right ()
+              _ -> pure $ Right ()
           eRes `shouldBe` Right ()
 
         it "Prepared connection should be available" $ \rt -> do
-          void $ runFlow rt $ do
-            eConn <- L.initSqlDBConnection sqliteCfg'
-            when (isLeft eConn) $ error "Failed to prepare connection."
-          void $ runFlow rt $ do
-            eConn <- L.getSqlDBConnection sqliteCfg'
-            when (isLeft eConn) $ error "Failed to get prepared connection."
+          void $
+            runFlow rt $ do
+              eConn <- L.initSqlDBConnection sqliteCfg'
+              when (isLeft eConn) $ error "Failed to prepare connection."
+          void $
+            runFlow rt $ do
+              eConn <- L.getSqlDBConnection sqliteCfg'
+              when (isLeft eConn) $ error "Failed to get prepared connection."
 
         it "Unique Constraint Violation" $ \rt -> do
           eRes <- runFlow rt (uniqueConstraintViolationDbScript sqliteCfg')
-          eRes `shouldBe`
-            Left (DBError
-                ( SQLError $ SqliteError $
-                    T.SqliteSqlError
-                      { sqlError        = SqliteErrorConstraint
-                      , sqlErrorDetails = "UNIQUE constraint failed: users.id"
-                      , sqlErrorContext = "step"
-                      }
-                )
-                "SQLite3 returned ErrorConstraint while attempting to perform step: UNIQUE constraint failed: users.id"
-            )
+          eRes
+            `shouldBe` Left
+              ( DBError
+                  ( SQLError $
+                      SqliteError $
+                        T.SqliteSqlError
+                          { sqlError = SqliteErrorConstraint,
+                            sqlErrorDetails = "UNIQUE constraint failed: users.id",
+                            sqlErrorContext = "step"
+                          }
+                  )
+                  "SQLite3 returned ErrorConstraint while attempting to perform step: UNIQUE constraint failed: users.id"
+              )
 
         it "Select one, row not found" $ \rt -> do
           eRes <- runFlow rt (selectUnknownDbScript sqliteCfg')
@@ -133,17 +143,17 @@ spec = do
           eRes <- runFlow rt (insertReturningScript sqliteCfg')
 
           case eRes of
-            Left  _  -> expectationFailure "Left DBResult"
+            Left _ -> expectationFailure "Left DBResult"
             Right us -> do
               length us `shouldBe` 2
               let u1 = head us
               let u2 = us !! 1
 
               _userFirstName u1 `shouldBe` "John"
-              _userLastName  u1 `shouldBe` "Doe"
+              _userLastName u1 `shouldBe` "Doe"
 
               _userFirstName u2 `shouldBe` "Doe"
-              _userLastName  u2 `shouldBe` "John"
+              _userLastName u2 `shouldBe` "John"
 
   around (withEmptyDB insertTestValues sqliteCfg) $
     describe "EulerHS SQLite DB tests" $ test sqliteCfg

@@ -1,27 +1,28 @@
 module KV.TestSchema.Mesh where
 
-import           Data.Map.Strict (Map)
+import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import           Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
-import           Data.Text (Text)
-import           Prelude
-import           EulerHS.KVConnector.Types (MeshConfig(..))
-import           System.Environment (getEnvironment)
-import           System.IO.Unsafe (unsafePerformIO)
-import           Text.Read (readMaybe)
+import Data.Text (Text)
+import EulerHS.KVConnector.Types (MeshConfig (..))
+import System.Environment (getEnvironment)
+import System.IO.Unsafe (unsafePerformIO)
+import Text.Read (readMaybe)
+import Prelude
 
 meshConfig :: MeshConfig
-meshConfig = MeshConfig
-  { meshEnabled = dbMeshEnabledEnvVar
-  , memcacheEnabled = memCacheEnabledEnvVar
-  , cerealEnabled = cerealEnabledEnvVar
-  , meshDBName = "ECRDB"
-  , ecRedisDBStream = "db-sync-stream"
-  , kvRedis = "KVRedis"
-  , redisTtl = 43200
-  , kvHardKilled = False
-  }
+meshConfig =
+  MeshConfig
+    { meshEnabled = dbMeshEnabledEnvVar,
+      memcacheEnabled = memCacheEnabledEnvVar,
+      cerealEnabled = cerealEnabledEnvVar,
+      meshDBName = "ECRDB",
+      ecRedisDBStream = "db-sync-stream",
+      kvRedis = "KVRedis",
+      redisTtl = 43200,
+      kvHardKilled = False
+    }
 
 dbMeshTrackerTables :: Set.Set Text
 dbMeshTrackerTables = Set.fromList []

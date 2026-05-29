@@ -1,410 +1,401 @@
-{-# OPTIONS_GHC -fclear-plugins #-}
-{-# LANGUAGE AllowAmbiguousTypes        #-}
-{-# LANGUAGE DerivingVia                #-}
-{-# LANGUAGE GADTs                      #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE InstanceSigs               #-}
-{-# LANGUAGE RankNTypes                 #-}
-{-# LANGUAGE ScopedTypeVariables        #-}
-
-{-# OPTIONS_GHC -Wno-missing-signatures -Wno-orphans #-}
+{-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE OverloadedLabels #-}
-{-# LANGUAGE DeriveAnyClass      #-}
-{-# LANGUAGE DerivingStrategies  #-}
-{-# LANGUAGE StandaloneDeriving  #-}
-{-# LANGUAGE DeriveDataTypeable  #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# OPTIONS_GHC -Wno-missing-signatures -Wno-orphans #-}
+{-# OPTIONS_GHC -fclear-plugins #-}
 
 module EulerHS.Framework.Language
-  (
-  -- * Flow language
-    Flow(..)
-  , FlowMethod(..)
-  , MonadFlow(..)
-  , ReaderFlow
-  , HttpManagerNotFound(..)
-  -- ** Extra methods
-  -- *** Logging
-  , logCallStack
-  , logExceptionCallStack
-  , logInfo
-  , logError
-  , logDebug
-  , logWarning
-  , logM
-  , log
-  , logV
-  , logInfoM
-  , logInfoV
-  , logErrorM
-  , logErrorV
-  , logDebugM
-  , logDebugV
-  , logWarningM
-  , logWarningV
-  , logException
-  -- *** PublishSubscribe
-  , unpackLanguagePubSub
-  -- *** Working with external services
-  , callAPI
-  , callAPI'
-  , callHTTP
-  , callHTTP'
-  -- *** Legacy
-  , callHTTPWithCert
-  , callHTTPWithManager
-  , callHTTPWithCert' 
-  , callHTTPWithManager'
-  -- *** Others
-  , runIO
-  , withRunFlow
-  , forkFlow
-  , forkFlow'
-  -- ** Interpretation
-  , foldFlow
-  -- ** DBAndRedisMetric
-  , incrementDbAndRedisMetric
-  , DBAndRedisMetricHandler
-  , DBAndRedisMetric (..)
-  , mkDBAndRedisMetricHandler
-  , isDBMetricEnabled
-  , DBMetricCfg (..)
-  , incrementDbMetric
-  , logErrorWithCategory
-  ) where
+  ( -- * Flow language
+    Flow (..),
+    FlowMethod (..),
+    MonadFlow (..),
+    ReaderFlow,
+    HttpManagerNotFound (..),
 
-import           Control.Monad.Catch (ExitCase, MonadCatch (catch),
-                                      MonadThrow (throwM))
+    -- ** Extra methods
+
+    -- *** Logging
+    logCallStack,
+    logExceptionCallStack,
+    logInfo,
+    logError,
+    logDebug,
+    logWarning,
+    logM,
+    log,
+    logV,
+    logInfoM,
+    logInfoV,
+    logErrorM,
+    logErrorV,
+    logDebugM,
+    logDebugV,
+    logWarningM,
+    logWarningV,
+    logException,
+
+    -- *** PublishSubscribe
+    unpackLanguagePubSub,
+
+    -- *** Working with external services
+    callAPI,
+    callAPI',
+    callHTTP,
+    callHTTP',
+
+    -- *** Legacy
+    callHTTPWithCert,
+    callHTTPWithManager,
+    callHTTPWithCert',
+    callHTTPWithManager',
+
+    -- *** Others
+    runIO,
+    withRunFlow,
+    forkFlow,
+    forkFlow',
+
+    -- ** Interpretation
+    foldFlow,
+
+    -- ** DBAndRedisMetric
+    incrementDbAndRedisMetric,
+    DBAndRedisMetricHandler,
+    DBAndRedisMetric (..),
+    mkDBAndRedisMetricHandler,
+    isDBMetricEnabled,
+    DBMetricCfg (..),
+    incrementDbMetric,
+    logErrorWithCategory,
+  )
+where
+
 import qualified Control.Exception as Exception
-import           Control.Monad.Free.Church (MonadFree)
-import           Control.Monad.Trans.Except (withExceptT)
-import           Control.Monad.Trans.RWS.Strict (RWST)
-import           Control.Monad.Trans.Writer (WriterT)
+import Control.Monad.Catch
+  ( ExitCase,
+    MonadCatch (catch),
+    MonadThrow (throwM),
+  )
+import Control.Monad.Free.Church (MonadFree)
+import Control.Monad.Trans.Except (withExceptT)
+import Control.Monad.Trans.RWS.Strict (RWST)
+import Control.Monad.Trans.Writer (WriterT)
 import qualified Data.Aeson as A
-import           Data.Data (Data, toConstr)
-import           Data.Maybe (fromJust)
+import Data.Data (Data, toConstr)
+import Data.Maybe (fromJust)
 import qualified Data.Text as Text
-import           Data.Typeable (typeOf)
-import           Network.HTTP.Client (Manager)
-import           Servant.Client (BaseUrl, ClientError (ConnectionError))
-
-import           EulerHS.Api (EulerClient)
-import           EulerHS.Common (Awaitable, Description, ForkGUID,
-                                 ManagerSelector (ManagerSelector),
-                                 Microseconds, SafeFlowGUID)
-import           EulerHS.Framework.Runtime (FlowRuntime, ConfigEntry)
-import           EulerHS.HttpAPI (HTTPCert, HTTPClientSettings, HTTPRequest,
-                                  HTTPResponse, withClientTls, HttpManagerNotFound(..), AwaitingError, MaskReqRespBody)
-import           EulerHS.KVDB.Language (KVDB)
-import           EulerHS.KVDB.Types (KVDBAnswer, KVDBConfig, KVDBConn,
-                                     KVDBReply)
-import qualified EulerHS.KVDB.Types as T
-import           EulerHS.Logger.Language (Logger, masterLogger)
-import           EulerHS.Logger.Types (LogLevel (Debug, Error, Info, Warning),
-                                       Message (Message), ExceptionEntry(..))
-import           EulerHS.Options (OptionEntity, mkOptionKey)
-import           EulerHS.Prelude hiding (throwM)
-import qualified EulerHS.PubSub.Language as PSL
-import           EulerHS.SqlDB.Language (SqlDB)
-import           EulerHS.SqlDB.Types (BeamRunner, BeamRuntime, DBConfig,
-                                      DBResult, SqlConn)
-import qualified EulerHS.SqlDB.Types as T
-import           Euler.Events.MetricApi.MetricApi
-import qualified Juspay.Extra.Config as Conf
+import Data.Typeable (typeOf)
+import Euler.Events.MetricApi.MetricApi
+import EulerHS.Api (EulerClient)
+import EulerHS.Common
+  ( Awaitable,
+    Description,
+    ForkGUID,
+    ManagerSelector (ManagerSelector),
+    Microseconds,
+    SafeFlowGUID,
+  )
+import EulerHS.Framework.Runtime (ConfigEntry, FlowRuntime)
+import EulerHS.HttpAPI
+  ( AwaitingError,
+    HTTPCert,
+    HTTPClientSettings,
+    HTTPRequest,
+    HTTPResponse,
+    HttpManagerNotFound (..),
+    MaskReqRespBody,
+    withClientTls,
+  )
 import EulerHS.KVConnector.Types
+import EulerHS.KVDB.Language (KVDB)
+import EulerHS.KVDB.Types
+  ( KVDBAnswer,
+    KVDBConfig,
+    KVDBConn,
+    KVDBReply,
+  )
+import qualified EulerHS.KVDB.Types as T
+import EulerHS.Logger.Language (Logger, masterLogger)
+import EulerHS.Logger.Types
+  ( ExceptionEntry (..),
+    LogLevel (Debug, Error, Info, Warning),
+    Message (Message),
+  )
+import EulerHS.Options (OptionEntity, mkOptionKey)
+import EulerHS.Prelude hiding (throwM)
+import qualified EulerHS.PubSub.Language as PSL
+import EulerHS.SqlDB.Language (SqlDB)
+import EulerHS.SqlDB.Types
+  ( BeamRunner,
+    BeamRuntime,
+    DBConfig,
+    DBResult,
+    SqlConn,
+  )
+import qualified EulerHS.SqlDB.Types as T
+import qualified Juspay.Extra.Config as Conf
+import Network.HTTP.Client (Manager)
+import Servant.Client (BaseUrl, ClientError (ConnectionError))
 
 -- | Flow language.
 data FlowMethod (next :: Type) where
-  LookupHTTPManager
-    :: HasCallStack
-    => (Maybe ManagerSelector)
-    -> (Maybe Manager -> next)
-    -> FlowMethod next
-
-  GetHTTPManager
-    :: HasCallStack
-    => HTTPClientSettings
-    -> (Manager -> next)
-    -> FlowMethod next
-
-  CallServantAPI
-    :: HasCallStack
-    => Manager
-    -> BaseUrl
-    -> EulerClient a
-    -> (Either ClientError a -> next)
-    -> FlowMethod next
-
-  CallHTTP
-    :: HasCallStack
-    => HTTPRequest
-    -> Manager
-    -> Maybe MaskReqRespBody
-    -> (Either Text HTTPResponse -> next)
-    -> FlowMethod next
-
-  EvalLogger
-    :: HasCallStack
-    => Logger a
-    -> (a -> next)
-    -> FlowMethod next
-
-  RunIO
-    :: HasCallStack
-    => Text
-    -> IO a
-    -> (a -> next)
-    -> FlowMethod next
-
-  WithRunFlow
-    :: HasCallStack
-    => ((forall x. Flow x -> IO x) -> IO next)
-    -> FlowMethod next
-
-  GetOption
-    :: HasCallStack
-    => Text
-    -> (Maybe a -> next)
-    -> FlowMethod next
-
-  SetOption
-    :: HasCallStack
-    => Text
-    -> a
-    -> (() -> next)
-    -> FlowMethod next
-
-  SetLoggerContext
-    :: HasCallStack
-     => Text
-    -> Text
-    -> (() -> next)
-    -> FlowMethod next
-  
-  GetLoggerContext
-    :: HasCallStack
-     => Text
-    -> ((Maybe Text) -> next)
-    -> FlowMethod next
-
-  SetLoggerContextMap
-    :: HasCallStack
-    => HashMap Text Text
-    -> (() -> next)
-    -> FlowMethod next
-  
-  ModifyOption
-    :: HasCallStack
-    => Text
-    -> ( a -> a )
-    -> ((Maybe a, Maybe a) -> next)
-    -> FlowMethod next
-
-  DelOption
-    :: HasCallStack
-    => Text
-    -> (() -> next)
-    -> FlowMethod next
-
-  GetOptionLocal
-    :: HasCallStack
-    => Text
-    -> (Maybe a -> next)
-    -> FlowMethod next
-
-  SetOptionLocal
-    :: HasCallStack
-    => Text
-    -> a
-    -> (() -> next)
-    -> FlowMethod next
-
-  DelOptionLocal
-    :: HasCallStack
-    => Text
-    -> (() -> next)
-    -> FlowMethod next
-
-  GetConfig
-    :: HasCallStack
-    => Text
-    -> (Maybe ConfigEntry -> next)
-    -> FlowMethod next
-
-  SetConfig
-    :: HasCallStack
-    => Text
-    -> ConfigEntry
-    -> (() -> next)
-    -> FlowMethod next
-
-  ModifyConfig
-    :: HasCallStack
-    => Text
-    -> (ConfigEntry -> ConfigEntry)
-    -> (() -> next)
-    -> FlowMethod next
-
-  TrySetConfig
-    :: HasCallStack
-    => Text
-    -> ConfigEntry
-    -> (Maybe () -> next)
-    -> FlowMethod next
-
-  DelConfig
-    :: HasCallStack
-    => Text
-    -> (() -> next)
-    -> FlowMethod next
-
-  AcquireConfigLock
-    :: HasCallStack
-    => Text
-    -> (Bool -> next)
-    -> FlowMethod next
-  
-  ReleaseConfigLock
-    :: HasCallStack
-    => Text
-    -> (Bool -> next)
-    -> FlowMethod next
-
-  GenerateGUID
-    ::  HasCallStack
-    => (Text -> next)
-    -> FlowMethod next
-
-  RunSysCmd
-    :: HasCallStack
-    => String
-    -> (String -> next)
-    -> FlowMethod next
-
-  Fork
-    :: HasCallStack
-    => Description
-    -> ForkGUID
-    -> Flow a
-    -> (Awaitable (Either Text a) -> next)
-    -> FlowMethod next
-
-  Await
-    :: HasCallStack
-    => Maybe Microseconds
-    -> Awaitable (Either Text a)
-    -> (Either AwaitingError a -> next)
-    -> FlowMethod next
-
-  ThrowException
-    :: forall a e next
-     . (HasCallStack, Exception e)
-    => e
-    -> (a -> next)
-    -> FlowMethod next
-
-  CatchException
-    :: forall a e next
-     . (HasCallStack, Exception e)
-    => Flow a
-    -> (e -> Flow a)
-    -> (a -> next)
-    -> FlowMethod next
-
-  Mask
-    :: forall b next
-     . HasCallStack
-    => ((forall a . Flow a -> Flow a) -> Flow b)
-    -> (b -> next)
-    -> FlowMethod next
-
-  UninterruptibleMask
-    :: forall b next
-     . HasCallStack
-    => ((forall a . Flow a -> Flow a) -> Flow b)
-    -> (b -> next)
-    -> FlowMethod next
-
-  GeneralBracket
-    :: forall a b c next
-     . HasCallStack
-    => Flow a
-    -> (a -> ExitCase b -> Flow c)
-    -> (a -> Flow b)
-    -> ((b, c) -> next)
-    -> FlowMethod next
-
+  LookupHTTPManager ::
+    HasCallStack =>
+    (Maybe ManagerSelector) ->
+    (Maybe Manager -> next) ->
+    FlowMethod next
+  GetHTTPManager ::
+    HasCallStack =>
+    HTTPClientSettings ->
+    (Manager -> next) ->
+    FlowMethod next
+  CallServantAPI ::
+    HasCallStack =>
+    Manager ->
+    BaseUrl ->
+    EulerClient a ->
+    (Either ClientError a -> next) ->
+    FlowMethod next
+  CallHTTP ::
+    HasCallStack =>
+    HTTPRequest ->
+    Manager ->
+    Maybe MaskReqRespBody ->
+    (Either Text HTTPResponse -> next) ->
+    FlowMethod next
+  EvalLogger ::
+    HasCallStack =>
+    Logger a ->
+    (a -> next) ->
+    FlowMethod next
+  RunIO ::
+    HasCallStack =>
+    Text ->
+    IO a ->
+    (a -> next) ->
+    FlowMethod next
+  WithRunFlow ::
+    HasCallStack =>
+    ((forall x. Flow x -> IO x) -> IO next) ->
+    FlowMethod next
+  GetOption ::
+    HasCallStack =>
+    Text ->
+    (Maybe a -> next) ->
+    FlowMethod next
+  SetOption ::
+    HasCallStack =>
+    Text ->
+    a ->
+    (() -> next) ->
+    FlowMethod next
+  SetLoggerContext ::
+    HasCallStack =>
+    Text ->
+    Text ->
+    (() -> next) ->
+    FlowMethod next
+  GetLoggerContext ::
+    HasCallStack =>
+    Text ->
+    ((Maybe Text) -> next) ->
+    FlowMethod next
+  SetLoggerContextMap ::
+    HasCallStack =>
+    HashMap Text Text ->
+    (() -> next) ->
+    FlowMethod next
+  ModifyOption ::
+    HasCallStack =>
+    Text ->
+    (a -> a) ->
+    ((Maybe a, Maybe a) -> next) ->
+    FlowMethod next
+  DelOption ::
+    HasCallStack =>
+    Text ->
+    (() -> next) ->
+    FlowMethod next
+  GetOptionLocal ::
+    HasCallStack =>
+    Text ->
+    (Maybe a -> next) ->
+    FlowMethod next
+  SetOptionLocal ::
+    HasCallStack =>
+    Text ->
+    a ->
+    (() -> next) ->
+    FlowMethod next
+  DelOptionLocal ::
+    HasCallStack =>
+    Text ->
+    (() -> next) ->
+    FlowMethod next
+  GetConfig ::
+    HasCallStack =>
+    Text ->
+    (Maybe ConfigEntry -> next) ->
+    FlowMethod next
+  SetConfig ::
+    HasCallStack =>
+    Text ->
+    ConfigEntry ->
+    (() -> next) ->
+    FlowMethod next
+  ModifyConfig ::
+    HasCallStack =>
+    Text ->
+    (ConfigEntry -> ConfigEntry) ->
+    (() -> next) ->
+    FlowMethod next
+  TrySetConfig ::
+    HasCallStack =>
+    Text ->
+    ConfigEntry ->
+    (Maybe () -> next) ->
+    FlowMethod next
+  DelConfig ::
+    HasCallStack =>
+    Text ->
+    (() -> next) ->
+    FlowMethod next
+  AcquireConfigLock ::
+    HasCallStack =>
+    Text ->
+    (Bool -> next) ->
+    FlowMethod next
+  ReleaseConfigLock ::
+    HasCallStack =>
+    Text ->
+    (Bool -> next) ->
+    FlowMethod next
+  GenerateGUID ::
+    HasCallStack =>
+    (Text -> next) ->
+    FlowMethod next
+  RunSysCmd ::
+    HasCallStack =>
+    String ->
+    (String -> next) ->
+    FlowMethod next
+  Fork ::
+    HasCallStack =>
+    Description ->
+    ForkGUID ->
+    Flow a ->
+    (Awaitable (Either Text a) -> next) ->
+    FlowMethod next
+  Await ::
+    HasCallStack =>
+    Maybe Microseconds ->
+    Awaitable (Either Text a) ->
+    (Either AwaitingError a -> next) ->
+    FlowMethod next
+  ThrowException ::
+    forall a e next.
+    (HasCallStack, Exception e) =>
+    e ->
+    (a -> next) ->
+    FlowMethod next
+  CatchException ::
+    forall a e next.
+    (HasCallStack, Exception e) =>
+    Flow a ->
+    (e -> Flow a) ->
+    (a -> next) ->
+    FlowMethod next
+  Mask ::
+    forall b next.
+    HasCallStack =>
+    ((forall a. Flow a -> Flow a) -> Flow b) ->
+    (b -> next) ->
+    FlowMethod next
+  UninterruptibleMask ::
+    forall b next.
+    HasCallStack =>
+    ((forall a. Flow a -> Flow a) -> Flow b) ->
+    (b -> next) ->
+    FlowMethod next
+  GeneralBracket ::
+    forall a b c next.
+    HasCallStack =>
+    Flow a ->
+    (a -> ExitCase b -> Flow c) ->
+    (a -> Flow b) ->
+    ((b, c) -> next) ->
+    FlowMethod next
   -- This is technically redundant - we can implement this using something like
   -- bracket, but better. - Koz
-  RunSafeFlow
-    :: HasCallStack
-    => SafeFlowGUID
-    -> Flow a
-    -> (Either Text a -> next)
-    -> FlowMethod next
-
-  InitSqlDBConnection
-    :: HasCallStack
-    => DBConfig beM
-    -> (DBResult (SqlConn beM) -> next)
-    -> FlowMethod next
-
-  DeInitSqlDBConnection
-    :: HasCallStack
-    => SqlConn beM
-    -> (() -> next)
-    -> FlowMethod next
-
-  GetSqlDBConnection
-    :: HasCallStack
-    => DBConfig beM
-    -> (DBResult (SqlConn beM) -> next)
-    -> FlowMethod next
-
-  InitKVDBConnection
-    :: HasCallStack
-    => KVDBConfig
-    -> (KVDBAnswer KVDBConn -> next)
-    -> FlowMethod next
-
-  DeInitKVDBConnection
-    :: HasCallStack
-    => KVDBConn
-    -> (() -> next)
-    -> FlowMethod next
-
-  GetKVDBConnection
-    :: HasCallStack
-    => KVDBConfig
-    -> (KVDBAnswer KVDBConn -> next)
-    -> FlowMethod next
-
-  RunDB
-    :: HasCallStack
-    => SqlConn beM
-    -> SqlDB beM a
-    -> Bool
-    -> (DBResult a -> next)
-    -> FlowMethod next
-
-  RunKVDB
-    :: HasCallStack
-    => Text
-    -> KVDB a
-    -> (KVDBAnswer a -> next)
-    -> FlowMethod next
-
-  RunPubSub
-    :: HasCallStack
-    => PubSub a
-    -> (a -> next)
-    -> FlowMethod next
-
-  WithModifiedRuntime
-    :: HasCallStack
-    => (FlowRuntime -> FlowRuntime)
-    -> Flow a
-    -> (a -> next)
-    -> FlowMethod next
+  RunSafeFlow ::
+    HasCallStack =>
+    SafeFlowGUID ->
+    Flow a ->
+    (Either Text a -> next) ->
+    FlowMethod next
+  InitSqlDBConnection ::
+    HasCallStack =>
+    DBConfig beM ->
+    (DBResult (SqlConn beM) -> next) ->
+    FlowMethod next
+  DeInitSqlDBConnection ::
+    HasCallStack =>
+    SqlConn beM ->
+    (() -> next) ->
+    FlowMethod next
+  GetSqlDBConnection ::
+    HasCallStack =>
+    DBConfig beM ->
+    (DBResult (SqlConn beM) -> next) ->
+    FlowMethod next
+  InitKVDBConnection ::
+    HasCallStack =>
+    KVDBConfig ->
+    (KVDBAnswer KVDBConn -> next) ->
+    FlowMethod next
+  DeInitKVDBConnection ::
+    HasCallStack =>
+    KVDBConn ->
+    (() -> next) ->
+    FlowMethod next
+  GetKVDBConnection ::
+    HasCallStack =>
+    KVDBConfig ->
+    (KVDBAnswer KVDBConn -> next) ->
+    FlowMethod next
+  RunDB ::
+    HasCallStack =>
+    SqlConn beM ->
+    SqlDB beM a ->
+    Bool ->
+    (DBResult a -> next) ->
+    FlowMethod next
+  RunKVDB ::
+    HasCallStack =>
+    Text ->
+    KVDB a ->
+    (KVDBAnswer a -> next) ->
+    FlowMethod next
+  RunPubSub ::
+    HasCallStack =>
+    PubSub a ->
+    (a -> next) ->
+    FlowMethod next
+  WithModifiedRuntime ::
+    HasCallStack =>
+    (FlowRuntime -> FlowRuntime) ->
+    Flow a ->
+    (a -> next) ->
+    FlowMethod next
 
 -- Needed due to lack of impredicative instantiation (for stuff like Mask). -
 -- Koz
@@ -458,7 +449,6 @@ instance Functor FlowMethod where
     WithModifiedRuntime g innerFlow cont ->
       WithModifiedRuntime g innerFlow (f . cont)
 
-
 newtype Flow (a :: Type) = Flow (F FlowMethod a)
   deriving newtype (Functor, Applicative, Monad, MonadFree FlowMethod)
 
@@ -478,7 +468,6 @@ instance MonadMask Flow where
   {-# INLINEABLE generalBracket #-}
   generalBracket acquire release act =
     liftFC . GeneralBracket acquire release act $ id
-
 
 -- | MonadFlow implementation for the `Flow` Monad. This allows implementation of MonadFlow for
 -- `ReaderT` and other monad transformers.
@@ -517,39 +506,43 @@ class (MonadMask m) => MonadFlow m where
   -- > myFlow = do
   -- >   book <- callServantAPI url getBook
   -- >   user <- callServantAPI url getUser
-  callServantAPI
-    :: HasCallStack
-    => Maybe ManagerSelector     -- ^ name of the connection manager to be used
-    -> BaseUrl                   -- ^ remote url 'BaseUrl'
-    -> EulerClient a             -- ^ servant client 'EulerClient'
-    -> m (Either ClientError a)  -- ^ result
+  callServantAPI ::
+    HasCallStack =>
+    -- | name of the connection manager to be used
+    Maybe ManagerSelector ->
+    -- | remote url 'BaseUrl'
+    BaseUrl ->
+    -- | servant client 'EulerClient'
+    EulerClient a ->
+    -- | result
+    m (Either ClientError a)
 
-  callAPIUsingManager
-    :: HasCallStack
-    => Manager
-    -> BaseUrl
-    -> EulerClient a
-    -> m (Either ClientError a)
+  callAPIUsingManager ::
+    HasCallStack =>
+    Manager ->
+    BaseUrl ->
+    EulerClient a ->
+    m (Either ClientError a)
 
-  lookupHTTPManager
-    :: (HasCallStack, MonadFlow m)
-    => Maybe ManagerSelector
-    -> m (Maybe Manager)
+  lookupHTTPManager ::
+    (HasCallStack, MonadFlow m) =>
+    Maybe ManagerSelector ->
+    m (Maybe Manager)
 
-  getHTTPManager
-    :: HasCallStack
-    => HTTPClientSettings
-    -> m Manager
+  getHTTPManager ::
+    HasCallStack =>
+    HTTPClientSettings ->
+    m Manager
 
   -- | Method for calling external HTTP APIs without bothering with types.
   --
   -- Thread safe, exception free.
-  callHTTPUsingManager
-    :: HasCallStack
-    => Manager
-    -> HTTPRequest
-    -> Maybe MaskReqRespBody
-    -> m (Either Text.Text HTTPResponse)
+  callHTTPUsingManager ::
+    HasCallStack =>
+    Manager ->
+    HTTPRequest ->
+    Maybe MaskReqRespBody ->
+    m (Either Text.Text HTTPResponse)
 
   -- | Evaluates a logging action.
   evalLogger' :: HasCallStack => Logger a -> m a
@@ -597,7 +590,7 @@ class (MonadMask m) => MonadFlow m where
 
   setLoggerContextMap :: (HasCallStack) => HashMap Text Text -> m ()
 
-  modifyOption :: forall k v. (HasCallStack, OptionEntity k v) => k -> (v -> v) -> m (Maybe v,Maybe v)
+  modifyOption :: forall k v. (HasCallStack, OptionEntity k v) => k -> (v -> v) -> m (Maybe v, Maybe v)
 
   -- | Deletes a typed option using a typed key.
   delOption :: forall k v. (HasCallStack, OptionEntity k v) => k -> m ()
@@ -621,6 +614,7 @@ class (MonadMask m) => MonadFlow m where
   acquireConfigLock :: HasCallStack => Text -> m Bool
 
   releaseConfigLock :: HasCallStack => Text -> m Bool
+
   -- | Generate a version 4 UUIDs as specified in RFC 4122
   -- e.g. 25A8FC2A-98F2-4B86-98F6-84324AF28611.
   --
@@ -714,26 +708,24 @@ class (MonadMask m) => MonadFlow m where
   -- >
   -- >   L.deinitSqlDBConnection connection
   -- >   pure res
-  runDB
-    ::
-      ( HasCallStack
-      , BeamRunner beM
-      , BeamRuntime be beM
-      )
-    => SqlConn beM
-    -> SqlDB beM a
-    -> m (DBResult a)
+  runDB ::
+    ( HasCallStack,
+      BeamRunner beM,
+      BeamRuntime be beM
+    ) =>
+    SqlConn beM ->
+    SqlDB beM a ->
+    m (DBResult a)
 
   -- | Like `runDB` but runs inside a SQL transaction.
-  runTransaction
-    ::
-      ( HasCallStack
-      , BeamRunner beM
-      , BeamRuntime be beM
-      )
-    => SqlConn beM
-    -> SqlDB beM a
-    -> m (DBResult a)
+  runTransaction ::
+    ( HasCallStack,
+      BeamRunner beM,
+      BeamRuntime be beM
+    ) =>
+    SqlConn beM ->
+    SqlDB beM a ->
+    m (DBResult a)
 
   -- | Await for some a result from the flow.
   -- If the timeout is Nothing than the operation is blocking.
@@ -756,11 +748,11 @@ class (MonadMask m) => MonadFlow m where
   -- > myFlow2 = do
   -- >   awaitable <- forkFlow' "myFlow1 fork" myFlow1
   -- >   await Nothing awaitable
-  await
-    :: HasCallStack
-    => Maybe Microseconds
-    -> Awaitable (Either Text a)
-    -> m (Either AwaitingError a)
+  await ::
+    HasCallStack =>
+    Maybe Microseconds ->
+    Awaitable (Either Text a) ->
+    m (Either AwaitingError a)
 
   -- | Throw a given exception.
   --
@@ -806,61 +798,75 @@ class (MonadMask m) => MonadFlow m where
   -- >     res <- get "aaa"
   -- >     del ["aaa"]
   -- >     pure res
-  runKVDB
-    :: HasCallStack
-    => Text
-    -> KVDB a -- ^ KVDB action
-    -> m (KVDBAnswer a)
+  runKVDB ::
+    HasCallStack =>
+    Text ->
+    -- | KVDB action
+    KVDB a ->
+    m (KVDBAnswer a)
 
   ---- Experimental Pub Sub implementation using Redis Pub Sub.
 
-  runPubSub
-    :: HasCallStack
-    => PubSub a
-    -> m a
+  runPubSub ::
+    HasCallStack =>
+    PubSub a ->
+    m a
 
   -- | Publish payload to channel.
-  publish
-    :: HasCallStack
-    => PSL.Channel                        -- ^ Channel in which payload will be send
-    -> PSL.Payload                        -- ^ Payload
-    -> m (Either KVDBReply Integer)  -- ^ Number of subscribers received payload
+  publish ::
+    HasCallStack =>
+    -- | Channel in which payload will be send
+    PSL.Channel ->
+    -- | Payload
+    PSL.Payload ->
+    -- | Number of subscribers received payload
+    m (Either KVDBReply Integer)
 
   -- | Subscribe to all channels from list.
   -- Note: Subscription won't be unsubscribed automatically on thread end.
   -- Use canceller explicitly to cancel subscription
-  subscribe
-    :: HasCallStack
-    => [PSL.Channel]    -- ^ List of channels to subscribe
-    -> MessageCallback  -- ^ Callback function.
-    -> m (Flow ())   -- ^ Inner flow is a canceller of current subscription
+  subscribe ::
+    HasCallStack =>
+    -- | List of channels to subscribe
+    [PSL.Channel] ->
+    -- | Callback function.
+    MessageCallback ->
+    -- | Inner flow is a canceller of current subscription
+    m (Flow ())
 
   -- | Subscribe to all channels from list. Respects redis pattern syntax.
   -- Note: Subscription won't be unsubscribed automatically on thread end.
   -- Use canceller explicitly to cancel subscription
-  psubscribe
-    :: HasCallStack
-    => [PSL.ChannelPattern] -- ^ List of channels to subscribe (wit respect to patterns supported by redis)
-    -> PMessageCallback     -- ^ Callback function
-    -> m (Flow ())       -- ^ Inner flow is a canceller of current subscription
+  psubscribe ::
+    HasCallStack =>
+    -- | List of channels to subscribe (wit respect to patterns supported by redis)
+    [PSL.ChannelPattern] ->
+    -- | Callback function
+    PMessageCallback ->
+    -- | Inner flow is a canceller of current subscription
+    m (Flow ())
 
   -- | Run a flow with a modified runtime. The runtime will be restored after
   -- the computation finishes.
   --
   -- @since 2.0.3.1
-  withModifiedRuntime
-    :: HasCallStack
-    => (FlowRuntime -> FlowRuntime) -- ^ Temporary modification function for runtime
-    -> Flow a -- ^ Computation to run with modified runtime
-    -> m a
+  withModifiedRuntime ::
+    HasCallStack =>
+    -- | Temporary modification function for runtime
+    (FlowRuntime -> FlowRuntime) ->
+    -- | Computation to run with modified runtime
+    Flow a ->
+    m a
 
-  fork
-    :: HasCallStack
-    => m a -> m ()
+  fork ::
+    HasCallStack =>
+    m a ->
+    m ()
 
-  awaitableFork
-    :: HasCallStack
-    => m a -> m (Awaitable (Either Text a)) 
+  awaitableFork ::
+    HasCallStack =>
+    m a ->
+    m (Awaitable (Either Text a))
 
 instance MonadFlow Flow where
   {-# INLINEABLE callServantAPI #-}
@@ -895,8 +901,8 @@ instance MonadFlow Flow where
   setLoggerContextMap :: (HasCallStack) => HashMap Text Text -> Flow ()
   setLoggerContextMap v = liftFC $ SetLoggerContextMap v id
   {-# INLINEABLE modifyOption #-}
-  modifyOption :: forall k v. (HasCallStack, OptionEntity k v) => k -> (v -> v) -> Flow (Maybe v,Maybe v)
-  modifyOption k fn = liftFC $ ModifyOption  (mkOptionKey @k @v k) fn id
+  modifyOption :: forall k v. (HasCallStack, OptionEntity k v) => k -> (v -> v) -> Flow (Maybe v, Maybe v)
+  modifyOption k fn = liftFC $ ModifyOption (mkOptionKey @k @v k) fn id
   {-# INLINEABLE delOption #-}
   delOption :: forall k v. (HasCallStack, OptionEntity k v) => k -> Flow ()
   delOption k = liftFC $ DelOption (mkOptionKey @k @v k) id
@@ -1439,16 +1445,11 @@ instance (MonadFlow m, Monoid w) => MonadFlow (RWST r w s m) where
   {-# INLINEABLE awaitableFork #-}
   awaitableFork = error "Not implemented"
 
-
-
 --
 --
 -- Additional actions
 --
 --
-
-
-
 
 --
 -- HTTP managers
@@ -1463,13 +1464,15 @@ getDefaultManager = fromJust <$> lookupHTTPManager Nothing
 getMgr :: MonadFlow m => Maybe ManagerSelector -> ExceptT ClientError m Manager
 getMgr mgrSel =
   ExceptT $ case mgrSel of
-    Nothing  -> Right <$> getDefaultManager
+    Nothing -> Right <$> getDefaultManager
     Just sel@(ManagerSelector name) -> do
       mmgr <- selectManager sel
       case mmgr of
         Just mgr -> pure $ Right mgr
-        Nothing  -> pure $ Left $
-          ConnectionError $ toException $ HttpManagerNotFound name
+        Nothing ->
+          pure $
+            Left $
+              ConnectionError $ toException $ HttpManagerNotFound name
 
 --
 -- Untyped HTTP calls
@@ -1483,30 +1486,39 @@ getMgr mgrSel =
 --
 -- > myFlow = do
 -- >   book <- callHTTPWithManager url mSel
-callHTTP'
-  :: (HasCallStack, MonadFlow m)
-  => Maybe ManagerSelector              -- ^ Selector
-  -> HTTPRequest                        -- ^ remote url 'Text'
-  -> Maybe MaskReqRespBody
-  -> m (Either Text.Text HTTPResponse)  -- ^ result
+callHTTP' ::
+  (HasCallStack, MonadFlow m) =>
+  -- | Selector
+  Maybe ManagerSelector ->
+  -- | remote url 'Text'
+  HTTPRequest ->
+  Maybe MaskReqRespBody ->
+  -- | result
+  m (Either Text.Text HTTPResponse)
 callHTTP' mSel req mbMskReqRespBody = do
-    runExceptT $ withExceptT show (getMgr mSel) >>= (\mngr -> ExceptT $ callHTTPUsingManager mngr req mbMskReqRespBody)
-    
+  runExceptT $ withExceptT show (getMgr mSel) >>= (\mngr -> ExceptT $ callHTTPUsingManager mngr req mbMskReqRespBody)
+
 {-# DEPRECATED callHTTPWithManager "Use callHTTP' instead. This method has a confusing name, as it accepts a selector not a manager." #-}
-callHTTPWithManager
-  :: (HasCallStack, MonadFlow m)
-  => Maybe ManagerSelector              -- ^ Selector
-  -> HTTPRequest                        -- ^ remote url 'Text'
-  -> m (Either Text.Text HTTPResponse)  -- ^ result
+callHTTPWithManager ::
+  (HasCallStack, MonadFlow m) =>
+  -- | Selector
+  Maybe ManagerSelector ->
+  -- | remote url 'Text'
+  HTTPRequest ->
+  -- | result
+  m (Either Text.Text HTTPResponse)
 callHTTPWithManager mSel req = callHTTP' mSel req Nothing
 
 -- applies custom masking function while logging outgoing request
-callHTTPWithManager'
-  :: (HasCallStack, MonadFlow m)
-  => Maybe ManagerSelector              -- ^ Selector
-  -> HTTPRequest                        -- ^ remote url 'Text'
-  -> Maybe MaskReqRespBody
-  -> m (Either Text.Text HTTPResponse)  -- ^ result
+callHTTPWithManager' ::
+  (HasCallStack, MonadFlow m) =>
+  -- | Selector
+  Maybe ManagerSelector ->
+  -- | remote url 'Text'
+  HTTPRequest ->
+  Maybe MaskReqRespBody ->
+  -- | result
+  m (Either Text.Text HTTPResponse)
 callHTTPWithManager' = callHTTP'
 
 -- | The same as callHTTP' but uses the default HTTP manager.
@@ -1517,18 +1529,20 @@ callHTTPWithManager' = callHTTP'
 --
 -- > myFlow = do
 -- >   book <- callHTTP url
-callHTTP :: (HasCallStack, MonadFlow m) =>
-  HTTPRequest -> m (Either Text.Text HTTPResponse)
+callHTTP ::
+  (HasCallStack, MonadFlow m) =>
+  HTTPRequest ->
+  m (Either Text.Text HTTPResponse)
 callHTTP url = callHTTPWithManager Nothing url
 
-{-# DEPRECATED callHTTPWithCert    "Use getHTTPManager/callHTTPUsingManager instead. This method does not allow custom CA store." #-}
+{-# DEPRECATED callHTTPWithCert "Use getHTTPManager/callHTTPUsingManager instead. This method does not allow custom CA store." #-}
 callHTTPWithCert :: MonadFlow m => HTTPRequest -> Maybe HTTPCert -> m (Either Text HTTPResponse)
-callHTTPWithCert req cert  = do
+callHTTPWithCert req cert = do
   mgr <- maybe getDefaultManager (getHTTPManager . withClientTls) cert
   callHTTPUsingManager mgr req Nothing
 
 -- applies custom masking function while logging outgoing request
-callHTTPWithCert' :: MonadFlow m => HTTPRequest -> Maybe HTTPCert -> Maybe MaskReqRespBody-> m (Either Text HTTPResponse)
+callHTTPWithCert' :: MonadFlow m => HTTPRequest -> Maybe HTTPCert -> Maybe MaskReqRespBody -> m (Either Text HTTPResponse)
 callHTTPWithCert' req cert mskReqRespBody = do
   mgr <- maybe getDefaultManager (getHTTPManager . withClientTls) cert
   callHTTPUsingManager mgr req mskReqRespBody
@@ -1570,16 +1584,21 @@ callHTTPWithCert' req cert mskReqRespBody = do
 -- > myFlow = do
 -- >   book <- callAPI url getBook
 -- >   user <- callAPI url getUser
-callAPI' :: (HasCallStack, MonadFlow m) =>
-  Maybe ManagerSelector -> BaseUrl -> EulerClient a -> m (Either ClientError a)
+callAPI' ::
+  (HasCallStack, MonadFlow m) =>
+  Maybe ManagerSelector ->
+  BaseUrl ->
+  EulerClient a ->
+  m (Either ClientError a)
 callAPI' = callServantAPI
 
 -- | The same as `callAPI'` but with default manager to be used.
-callAPI :: (HasCallStack, MonadFlow m) =>
-  BaseUrl -> EulerClient a -> m (Either ClientError a)
+callAPI ::
+  (HasCallStack, MonadFlow m) =>
+  BaseUrl ->
+  EulerClient a ->
+  m (Either ClientError a)
 callAPI = callServantAPI Nothing
-
-
 
 -- TODO: save a builder in some state for using `hPutBuilder`?
 --
@@ -1598,23 +1617,26 @@ logCallStack = logDebug ("CALLSTACK" :: Text) $ Text.pack $ prettyCallStack call
 logExceptionCallStack :: (HasCallStack, Exception e, MonadFlow m) => e -> m ()
 logExceptionCallStack ex = logError ("EXCEPTION" :: Text) $ Text.pack $ displayException ex
 
-foldFlow :: (Monad m) => (forall b . FlowMethod b -> m b) -> Flow a -> m a
+foldFlow :: (Monad m) => (forall b. FlowMethod b -> m b) -> Flow a -> m a
 foldFlow f (Flow comp) = foldF f comp
 
 type ReaderFlow r = ReaderT r Flow
 
-newtype PubSub a = PubSub {
-  unpackLanguagePubSub :: HasCallStack => (forall b . Flow b -> IO b) -> PSL.PubSub a
+newtype PubSub a = PubSub
+  { unpackLanguagePubSub :: HasCallStack => (forall b. Flow b -> IO b) -> PSL.PubSub a
   }
 
-type MessageCallback
-    =  ByteString  -- ^ Message payload
-    -> Flow ()
+type MessageCallback =
+  -- | Message payload
+  ByteString ->
+  Flow ()
 
-type PMessageCallback
-    =  ByteString  -- ^ Channel name
-    -> ByteString  -- ^ Message payload
-    -> Flow ()
+type PMessageCallback =
+  -- | Channel name
+  ByteString ->
+  -- | Message payload
+  ByteString ->
+  Flow ()
 
 -- | MonadBaseControl/UnliftIO-like interface for flow.
 --
@@ -1649,16 +1671,16 @@ withRunFlow ioAct = liftFC $ WithRunFlow ioAct
 -- >   _ <- runIO someAction
 -- >   forkFlow "myFlow1 fork" myFlow1
 -- >   pure ()
---
 forkFlow :: HasCallStack => Description -> Flow a -> Flow ()
 forkFlow description flow = do
   flowGUID <- generateGUID
-  void $ forkFlow'' description flowGUID $ do
-    void $ setLoggerContext "flow_guid" flowGUID
-    eitherResult <- runSafeFlow flow
-    case eitherResult of
-      Left msg -> logError ("forkFlow" :: Text) msg
-      Right _  -> pure ()
+  void $
+    forkFlow'' description flowGUID $ do
+      void $ setLoggerContext "flow_guid" flowGUID
+      eitherResult <- runSafeFlow flow
+      case eitherResult of
+        Left msg -> logError ("forkFlow" :: Text) msg
+        Right _ -> pure ()
 
 -- | Same as 'forkFlow', but takes @Flow a@ and returns an 'T.Awaitable' which can be used
 -- to reap results from the flow being forked.
@@ -1670,113 +1692,193 @@ forkFlow description flow = do
 -- > myFlow2 = do
 -- >   awaitable <- forkFlow' "myFlow1 fork" myFlow1
 -- >   await Nothing awaitable
---
-forkFlow'' :: HasCallStack =>
-  Description -> ForkGUID -> Flow a -> Flow (Awaitable (Either Text a))
+forkFlow'' ::
+  HasCallStack =>
+  Description ->
+  ForkGUID ->
+  Flow a ->
+  Flow (Awaitable (Either Text a))
 forkFlow'' description flowGUID flow = do
-    logInfo ("ForkFlow" :: Text) $ case Text.uncons description of
-      Nothing ->
-        "Flow forked. Description: " +| description |+ " GUID: " +| flowGUID |+ ""
-      Just _  -> "Flow forked. GUID: " +| flowGUID |+ ""
-    liftFC $ Fork description flowGUID flow id
+  logInfo ("ForkFlow" :: Text) $ case Text.uncons description of
+    Nothing ->
+      "Flow forked. Description: " +| description |+ " GUID: " +| flowGUID |+ ""
+    Just _ -> "Flow forked. GUID: " +| flowGUID |+ ""
+  liftFC $ Fork description flowGUID flow id
 
-forkFlow' :: HasCallStack =>
-  Description -> Flow a -> Flow (Awaitable (Either Text a))
+forkFlow' ::
+  HasCallStack =>
+  Description ->
+  Flow a ->
+  Flow (Awaitable (Either Text a))
 forkFlow' description flow = do
-    flowGUID <- generateGUID
-    logInfo ("ForkFlow" :: Text) $ case Text.uncons description of
-      Just _ ->
-        "Flow forked. Description: " +| description |+ " GUID: " +| flowGUID |+ ""
-      Nothing  -> "Flow forked. GUID: " +| flowGUID |+ ""
-    liftFC $ Fork description flowGUID flow id
+  flowGUID <- generateGUID
+  logInfo ("ForkFlow" :: Text) $ case Text.uncons description of
+    Just _ ->
+      "Flow forked. Description: " +| description |+ " GUID: " +| flowGUID |+ ""
+    Nothing -> "Flow forked. GUID: " +| flowGUID |+ ""
+  liftFC $ Fork description flowGUID flow id
 
+logM ::
+  forall (tag :: Type) (m :: Type -> Type) msg val.
+  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON msg, ToJSON val) =>
+  LogLevel ->
+  tag ->
+  msg ->
+  val ->
+  m ()
+logM logLvl tag m v = evalLogger' $ masterLogger logLvl tag "DOMAIN" Nothing Nothing Nothing Nothing Nothing $ Message (Just $ toJSON m) (Just $ toJSON v)
 
-logM :: forall (tag :: Type) (m :: Type -> Type) msg val .
-  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON msg, ToJSON val) => LogLevel -> tag -> msg -> val -> m ()
-logM logLvl tag m v = evalLogger' $ masterLogger logLvl tag "DOMAIN" Nothing Nothing Nothing Nothing Nothing  $ Message (Just $ toJSON m) (Just $ toJSON v)
-
-log :: forall (tag :: Type) (m :: Type -> Type) .
-  (HasCallStack, MonadFlow m, Show tag, Typeable tag) => LogLevel -> tag -> Text -> m ()
+log ::
+  forall (tag :: Type) (m :: Type -> Type).
+  (HasCallStack, MonadFlow m, Show tag, Typeable tag) =>
+  LogLevel ->
+  tag ->
+  Text ->
+  m ()
 log logLvl tag msg = evalLogger' $ masterLogger logLvl tag "DOMAIN" Nothing Nothing Nothing Nothing Nothing $ Message (Just $ A.toJSON msg) Nothing
 
-logV :: forall (tag :: Type) (m :: Type -> Type) val .
-  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON val) => LogLevel -> tag -> val -> m ()
+logV ::
+  forall (tag :: Type) (m :: Type -> Type) val.
+  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON val) =>
+  LogLevel ->
+  tag ->
+  val ->
+  m ()
 logV logLvl tag v = evalLogger' $ masterLogger logLvl tag "DOMAIN" Nothing Nothing Nothing Nothing Nothing $ Message Nothing (Just $ toJSON v)
 
 -- | Log message with Info level.
 --
 -- Thread safe.
-
-logInfoM :: forall (tag :: Type) (m :: Type -> Type) msg val .
-  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON msg, ToJSON val) => tag -> msg -> val -> m ()
+logInfoM ::
+  forall (tag :: Type) (m :: Type -> Type) msg val.
+  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON msg, ToJSON val) =>
+  tag ->
+  msg ->
+  val ->
+  m ()
 logInfoM = logM Info
 
-logInfo :: forall (tag :: Type) (m :: Type -> Type) .
-  (HasCallStack, MonadFlow m, Show tag, Typeable tag) => tag -> Text -> m ()
+logInfo ::
+  forall (tag :: Type) (m :: Type -> Type).
+  (HasCallStack, MonadFlow m, Show tag, Typeable tag) =>
+  tag ->
+  Text ->
+  m ()
 logInfo = log Info
 
-logInfoV :: forall (tag :: Type) (m :: Type -> Type) val .
-  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON val) => tag -> val -> m ()
+logInfoV ::
+  forall (tag :: Type) (m :: Type -> Type) val.
+  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON val) =>
+  tag ->
+  val ->
+  m ()
 logInfoV = logV Info
-
 
 -- | Log message with Error level.
 --
 -- Thread safe.
-logErrorM :: forall (tag :: Type) (m :: Type -> Type) msg val .
-  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON msg, ToJSON val) => tag -> msg -> val -> m ()
+logErrorM ::
+  forall (tag :: Type) (m :: Type -> Type) msg val.
+  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON msg, ToJSON val) =>
+  tag ->
+  msg ->
+  val ->
+  m ()
 logErrorM = logM Error
 
-logError :: forall (tag :: Type) (m :: Type -> Type) .
-  (HasCallStack, MonadFlow m, Show tag, Typeable tag) => tag -> Text -> m ()
+logError ::
+  forall (tag :: Type) (m :: Type -> Type).
+  (HasCallStack, MonadFlow m, Show tag, Typeable tag) =>
+  tag ->
+  Text ->
+  m ()
 logError = log Error
 
-logErrorV :: forall (tag :: Type) (m :: Type -> Type) val .
-  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON val) => tag -> val -> m ()
+logErrorV ::
+  forall (tag :: Type) (m :: Type -> Type) val.
+  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON val) =>
+  tag ->
+  val ->
+  m ()
 logErrorV = logV Error
+
 -- | Log message with Debug level.
 --
 -- Thread safe.
-logDebugM :: forall (tag :: Type) (m :: Type -> Type) msg val .
-  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON msg, ToJSON val) => tag -> msg -> val -> m ()
+logDebugM ::
+  forall (tag :: Type) (m :: Type -> Type) msg val.
+  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON msg, ToJSON val) =>
+  tag ->
+  msg ->
+  val ->
+  m ()
 logDebugM = logM Debug
 
-logDebug :: forall (tag :: Type) (m :: Type -> Type) .
-  (HasCallStack, MonadFlow m, Show tag, Typeable tag) => tag -> Text -> m ()
+logDebug ::
+  forall (tag :: Type) (m :: Type -> Type).
+  (HasCallStack, MonadFlow m, Show tag, Typeable tag) =>
+  tag ->
+  Text ->
+  m ()
 logDebug = log Debug
 
-logErrorWithCategory :: forall (tag :: Type) (m :: Type -> Type) .
-  (HasCallStack, MonadFlow m, Show tag, Typeable tag) => tag -> Text -> m ()
+logErrorWithCategory ::
+  forall (tag :: Type) (m :: Type -> Type).
+  (HasCallStack, MonadFlow m, Show tag, Typeable tag) =>
+  tag ->
+  Text ->
+  m ()
 logErrorWithCategory t v = log Error t v
 
-logDebugV :: forall (tag :: Type) (m :: Type -> Type) val .
-  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON val) => tag -> val -> m ()
+logDebugV ::
+  forall (tag :: Type) (m :: Type -> Type) val.
+  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON val) =>
+  tag ->
+  val ->
+  m ()
 logDebugV = logV Debug
 
 -- | Log message with Warning level.
 --
 -- Thread safe.
-logWarningM :: forall (tag :: Type) (m :: Type -> Type) msg val .
-  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON msg, ToJSON val) => tag -> msg -> val -> m ()
+logWarningM ::
+  forall (tag :: Type) (m :: Type -> Type) msg val.
+  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON msg, ToJSON val) =>
+  tag ->
+  msg ->
+  val ->
+  m ()
 logWarningM = logM Warning
 
-logWarning :: forall (tag :: Type) (m :: Type -> Type) .
-  (HasCallStack, MonadFlow m, Show tag, Typeable tag) => tag -> Text -> m ()
+logWarning ::
+  forall (tag :: Type) (m :: Type -> Type).
+  (HasCallStack, MonadFlow m, Show tag, Typeable tag) =>
+  tag ->
+  Text ->
+  m ()
 logWarning = log Warning
 
-logWarningV :: forall (tag :: Type) (m :: Type -> Type) val .
-  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON val) => tag -> val -> m ()
+logWarningV ::
+  forall (tag :: Type) (m :: Type -> Type) val.
+  (HasCallStack, MonadFlow m, Show tag, Typeable tag, ToJSON val) =>
+  tag ->
+  val ->
+  m ()
 logWarningV = logV Warning
 
 deriving instance Data Exception.ArithException
+
 deriving instance Data Exception.ArrayException
+
 deriving instance Data Exception.AsyncException
 
 logException :: (HasCallStack, MonadFlow m) => SomeException -> m ()
 logException exception =
   logErrorV ("ERROR_TRACKING" :: Text) exceptionLogEntry
-  where exceptionLogEntry = fromMaybe (exceptionLogDefault exception)
-          $ exceptionLogWithConstructor <$> (fromException exception :: Maybe Exception.ArithException)
+  where
+    exceptionLogEntry =
+      fromMaybe (exceptionLogDefault exception) $
+        exceptionLogWithConstructor <$> (fromException exception :: Maybe Exception.ArithException)
           <|> exceptionLogWithConstructor <$> (fromException exception :: Maybe Exception.ArrayException)
           <|> exceptionLogDefault <$> (fromException exception :: Maybe Exception.AssertionFailed)
           <|> exceptionLogWithConstructor <$> (fromException exception :: Maybe Exception.AsyncException)
@@ -1795,8 +1897,8 @@ logException exception =
           <|> exceptionLogDefault <$> (fromException exception :: Maybe Exception.ErrorCall)
           <|> exceptionLogWithConstructor <$> (fromException exception :: Maybe T.DBError)
           <|> exceptionLogWithConstructor <$> (fromException exception :: Maybe MeshError)
-        exceptionLogWithConstructor ex = ExceptionEntry (show . toConstr $ ex) (displayException ex) (show $ typeOf ex) "Exception"
-        exceptionLogDefault ex = ExceptionEntry (show $ typeOf ex) (displayException ex) (show $ typeOf ex) "Exception"
+    exceptionLogWithConstructor ex = ExceptionEntry (show . toConstr $ ex) (displayException ex) (show $ typeOf ex) "Exception"
+    exceptionLogDefault ex = ExceptionEntry (show $ typeOf ex) (displayException ex) (show $ typeOf ex) "Exception"
 
 -- | Run some IO operation, result should have 'ToJSONEx' instance (extended 'ToJSON'),
 -- because we have to collect it in recordings for ART system.
@@ -1809,7 +1911,6 @@ logException exception =
 -- >   pure content
 runIO :: (HasCallStack, MonadFlow m) => IO a -> m a
 runIO = runIO' ""
-
 
 -------------------------------------------------------
 incrementDbAndRedisMetric :: MonadFlow m => DBAndRedisMetricHandler -> DBAndRedisMetric -> Text -> Text -> m ()
@@ -1826,92 +1927,99 @@ data DBAndRedisMetric
   | ConnectionDoesNotExist
   | ConnectionAlreadyExists
   | TransactionRollbacked
---   | SQLQueryError
-  | UnrecognizedDBError
+  | --   | SQLQueryError
+    UnrecognizedDBError
   | UnexpectedDBResult
   | RedisExceptionMessage
 
 mkDBAndRedisMetricHandler :: IO DBAndRedisMetricHandler
 mkDBAndRedisMetricHandler = do
   metrics <- register collectionLock
-  pure $ DBAndRedisMetricHandler $ \case
-    (ConnectionLost, dbName, hostName)   ->
-      inc (metrics </> #connection_lost) dbName hostName
-    (ConnectionFailed, dbName, hostName)    ->
-      inc (metrics </> #connection_failed) dbName hostName
-    (ConnectionDoesNotExist, dbName, hostName)    ->
-      inc (metrics </> #connection_doesnot_exist) dbName hostName
-    (ConnectionAlreadyExists, dbName, hostName)    ->
-      inc (metrics </> #connection_already_exists) dbName hostName
-    (TransactionRollbacked, dbName, hostName)    ->
-      inc (metrics </> #transaction_rollbacked) dbName hostName
-    -- (SQLQueryError,dbName, hostName)    ->
-    --   inc (metrics </> #sql_query_error) dbName hostName
-    (UnrecognizedDBError, dbName, hostName)    ->
-      inc (metrics </> #unrecognized_db_error) dbName hostName
-    (UnexpectedDBResult, dbName, hostName)    ->
-      inc (metrics </> #unexpected_db_result) dbName hostName
-    (RedisExceptionMessage, dbName, hostName)    ->
-      inc (metrics </> #redis_exception_msg) dbName hostName
+  pure $
+    DBAndRedisMetricHandler $ \case
+      (ConnectionLost, dbName, hostName) ->
+        inc (metrics </> #connection_lost) dbName hostName
+      (ConnectionFailed, dbName, hostName) ->
+        inc (metrics </> #connection_failed) dbName hostName
+      (ConnectionDoesNotExist, dbName, hostName) ->
+        inc (metrics </> #connection_doesnot_exist) dbName hostName
+      (ConnectionAlreadyExists, dbName, hostName) ->
+        inc (metrics </> #connection_already_exists) dbName hostName
+      (TransactionRollbacked, dbName, hostName) ->
+        inc (metrics </> #transaction_rollbacked) dbName hostName
+      -- (SQLQueryError,dbName, hostName)    ->
+      --   inc (metrics </> #sql_query_error) dbName hostName
+      (UnrecognizedDBError, dbName, hostName) ->
+        inc (metrics </> #unrecognized_db_error) dbName hostName
+      (UnexpectedDBResult, dbName, hostName) ->
+        inc (metrics </> #unexpected_db_result) dbName hostName
+      (RedisExceptionMessage, dbName, hostName) ->
+        inc (metrics </> #redis_exception_msg) dbName hostName
 
-connection_lost = counter #connection_lost
-      .& lbl @"db_name" @Text
-      .& lbl @"host_name" @Text
-      .& build
+connection_lost =
+  counter #connection_lost
+    .& lbl @"db_name" @Text
+    .& lbl @"host_name" @Text
+    .& build
 
-connection_failed = counter #connection_failed
-      .& lbl @"db_name" @Text
-      .& lbl @"host_name" @Text
-      .& build
+connection_failed =
+  counter #connection_failed
+    .& lbl @"db_name" @Text
+    .& lbl @"host_name" @Text
+    .& build
 
-connection_doesnot_exist = counter #connection_doesnot_exist
-      .& lbl @"db_name" @Text
-      .& lbl @"host_name" @Text
-      .& build
+connection_doesnot_exist =
+  counter #connection_doesnot_exist
+    .& lbl @"db_name" @Text
+    .& lbl @"host_name" @Text
+    .& build
 
-connection_already_exists = counter #connection_already_exists
-      .& lbl @"db_name" @Text
-      .& lbl @"host_name" @Text
-      .& build
+connection_already_exists =
+  counter #connection_already_exists
+    .& lbl @"db_name" @Text
+    .& lbl @"host_name" @Text
+    .& build
 
 -- sql_query_error = counter #sql_query_error
 --       .& lbl @"db_name" @Text
 --       .& lbl @"host_name" @Text
 --       .& build
 
-transaction_rollbacked = counter #transaction_rollbacked
-      .& lbl @"db_name" @Text
-      .& lbl @"host_name" @Text
-      .& build
+transaction_rollbacked =
+  counter #transaction_rollbacked
+    .& lbl @"db_name" @Text
+    .& lbl @"host_name" @Text
+    .& build
 
-unrecognized_db_error = counter #unrecognized_db_error
-      .& lbl @"db_name" @Text
-      .& lbl @"host_name" @Text
-      .& build
+unrecognized_db_error =
+  counter #unrecognized_db_error
+    .& lbl @"db_name" @Text
+    .& lbl @"host_name" @Text
+    .& build
 
+unexpected_db_result =
+  counter #unexpected_db_result
+    .& lbl @"db_name" @Text
+    .& lbl @"host_name" @Text
+    .& build
 
-unexpected_db_result = counter #unexpected_db_result
-      .& lbl @"db_name" @Text
-      .& lbl @"host_name" @Text
-      .& build
-
-redis_exception_msg = counter #redis_exception_msg
-      .& lbl @"db_name" @Text
-      .& lbl @"host_name" @Text
-      .& build
+redis_exception_msg =
+  counter #redis_exception_msg
+    .& lbl @"db_name" @Text
+    .& lbl @"host_name" @Text
+    .& build
 
 collectionLock =
-     connection_lost
-  .> connection_failed
-  .> connection_doesnot_exist
-  .> connection_already_exists
---   .> sql_query_error
-  .> transaction_rollbacked
-  .> unrecognized_db_error
-  .> unexpected_db_result
-  .> redis_exception_msg
-  .> MNil
-
+  connection_lost
+    .> connection_failed
+    .> connection_doesnot_exist
+    .> connection_already_exists
+    --   .> sql_query_error
+    .> transaction_rollbacked
+    .> unrecognized_db_error
+    .> unexpected_db_result
+    .> redis_exception_msg
+    .> MNil
 
 ---------------------------------------------------------
 
@@ -1948,9 +2056,10 @@ incrementDbMetric (T.DBError err msg) dbConf = when isDBMetricEnabled $
     T.ConnectionDoesNotExist -> incrementMetric ConnectionDoesNotExist (dbConfigToTag dbConf)
     T.TransactionRollbacked -> incrementMetric TransactionRollbacked (dbConfigToTag dbConf)
     T.UnexpectedResult -> incrementMetric UnexpectedDBResult (dbConfigToTag dbConf)
-    T.UnrecognizedError -> if Text.isInfixOf "Network.Socket.connect" $ show msg
-      then incrementMetric ConnectionLost (dbConfigToTag dbConf)
-      else incrementMetric UnrecognizedDBError (dbConfigToTag dbConf)
+    T.UnrecognizedError ->
+      if Text.isInfixOf "Network.Socket.connect" $ show msg
+        then incrementMetric ConnectionLost (dbConfigToTag dbConf)
+        else incrementMetric UnrecognizedDBError (dbConfigToTag dbConf)
     _ -> pure ()
 
 incrementMetric :: (HasCallStack, MonadFlow m) => DBAndRedisMetric -> Text -> m ()
@@ -1963,5 +2072,5 @@ incrementMetric metric dbName = do
 dbConfigToTag :: T.DBConfig beM -> Text
 dbConfigToTag = \case
   T.PostgresPoolConf t _ _ -> t
-  T.MySQLPoolConf t _ _    -> t
-  T.SQLitePoolConf t _ _   -> t
+  T.MySQLPoolConf t _ _ -> t
+  T.SQLitePoolConf t _ _ -> t

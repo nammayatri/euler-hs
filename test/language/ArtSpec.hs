@@ -1,5 +1,6 @@
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 
-module ArtSpec (
-  ) where
-
+module ArtSpec
+  (
+  )
+where

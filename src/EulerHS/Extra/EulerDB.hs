@@ -1,33 +1,40 @@
-{-# LANGUAGE DeriveAnyClass      #-}
-{-# LANGUAGE DerivingStrategies  #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module EulerHS.Extra.EulerDB (
-  EulerDbCfg(..),
-  EulerDbCfgR1(..),
-  EulerPsqlDbCfg(..),
-  EulerProcessTrackerDbCfg(..),
-  EulerProcessTrackerDbCfgR1(..),
-  EulerPsqlDbAdditionalCfg(..),
-  getEulerDbConf,
-  getEulerDbConfR1,
-  withEulerDB,
-  withEulerDBR1,
-  withEulerPsqlDB,
-  withEulerDBTransaction,
-  withEulerAdditionalPsqlDB,
-  getEulerPsqlDbConf,
-  getEulerProcessTrackerDbConf,
-  getEulerProcessTrackerDbConfR1,
-  ) where
+module EulerHS.Extra.EulerDB
+  ( EulerDbCfg (..),
+    EulerDbCfgR1 (..),
+    EulerPsqlDbCfg (..),
+    EulerProcessTrackerDbCfg (..),
+    EulerProcessTrackerDbCfgR1 (..),
+    EulerPsqlDbAdditionalCfg (..),
+    getEulerDbConf,
+    getEulerDbConfR1,
+    withEulerDB,
+    withEulerDBR1,
+    withEulerPsqlDB,
+    withEulerDBTransaction,
+    withEulerAdditionalPsqlDB,
+    getEulerPsqlDbConf,
+    getEulerProcessTrackerDbConf,
+    getEulerProcessTrackerDbConfR1,
+  )
+where
 
-import           EulerHS.Language (MonadFlow, SqlDB, getOption, logErrorT,
-                                   throwException, withDB, withDBTransaction)
-import           EulerHS.Prelude
-import           EulerHS.Types (DBConfig, OptionEntity)
-
-import           Database.Beam.MySQL (MySQLM)
+import Database.Beam.MySQL (MySQLM)
 import qualified Database.Beam.Postgres as BP
+import EulerHS.Language
+  ( MonadFlow,
+    SqlDB,
+    getOption,
+    logErrorT,
+    throwException,
+    withDB,
+    withDBTransaction,
+  )
+import EulerHS.Prelude
+import EulerHS.Types (DBConfig, OptionEntity)
 
 data EulerDbCfg = EulerDbCfg
   deriving stock (Eq, Show, Generic)
@@ -74,9 +81,11 @@ getEulerDbConf = getEulerDbByConfig EulerDbCfg
 getEulerDbConfR1 :: (HasCallStack, MonadFlow m, Exception e) => e -> m (DBConfig MySQLM)
 getEulerDbConfR1 = getEulerDbByConfig EulerDbCfgR1
 
-
-getEulerDbByConfig :: (HasCallStack, MonadFlow m, Exception e, OptionEntity k (DBConfig MySQLM))
-  => k -> e -> m (DBConfig MySQLM)
+getEulerDbByConfig ::
+  (HasCallStack, MonadFlow m, Exception e, OptionEntity k (DBConfig MySQLM)) =>
+  k ->
+  e ->
+  m (DBConfig MySQLM)
 getEulerDbByConfig dbConf internalError = do
   dbcfg <- getOption dbConf
   case dbcfg of
@@ -94,8 +103,11 @@ getEulerProcessTrackerDbConf = getEulerPsqlDbByConfig EulerProcessTrackerDbCfg
 getEulerProcessTrackerDbConfR1 :: (HasCallStack, MonadFlow m, Exception e) => e -> m (DBConfig BP.Pg)
 getEulerProcessTrackerDbConfR1 = getEulerPsqlDbByConfig EulerProcessTrackerDbCfgR1
 
-getEulerPsqlDbByConfig :: (HasCallStack, MonadFlow m, Exception e, OptionEntity k (DBConfig BP.Pg))
-  => k -> e -> m (DBConfig BP.Pg)
+getEulerPsqlDbByConfig ::
+  (HasCallStack, MonadFlow m, Exception e, OptionEntity k (DBConfig BP.Pg)) =>
+  k ->
+  e ->
+  m (DBConfig BP.Pg)
 getEulerPsqlDbByConfig dbConf internalError = do
   dbcfg <- getOption dbConf
   case dbcfg of
@@ -114,8 +126,12 @@ withEulerDB internalError act = withEulerDBGeneral EulerDbCfg internalError act
 withEulerDBR1 :: (HasCallStack, MonadFlow m, Exception e) => e -> SqlDB MySQLM a -> m a
 withEulerDBR1 internalError act = withEulerDBGeneral EulerDbCfg internalError act
 
-withEulerDBGeneral :: (HasCallStack, MonadFlow m, Exception e, OptionEntity k (DBConfig MySQLM))
-  => k -> e -> SqlDB MySQLM a -> m a
+withEulerDBGeneral ::
+  (HasCallStack, MonadFlow m, Exception e, OptionEntity k (DBConfig MySQLM)) =>
+  k ->
+  e ->
+  SqlDB MySQLM a ->
+  m a
 withEulerDBGeneral key internalError act = do
   dbcfg <- getOption key
   case dbcfg of
@@ -125,8 +141,11 @@ withEulerDBGeneral key internalError act = do
       throwException internalError
 
 -- NOTE: Does NOT run inside a transaction
-withEulerDBTransaction :: (HasCallStack, MonadFlow m, Exception e)
-  => e -> SqlDB MySQLM a -> m a
+withEulerDBTransaction ::
+  (HasCallStack, MonadFlow m, Exception e) =>
+  e ->
+  SqlDB MySQLM a ->
+  m a
 withEulerDBTransaction internalError act = do
   (dbcfg :: Maybe (DBConfig MySQLM)) <- getOption EulerDbCfg
   case dbcfg of
@@ -135,8 +154,11 @@ withEulerDBTransaction internalError act = do
       logErrorT "MissingDB identifier" "Can't find EulerDB identifier in options"
       throwException internalError
 
-withEulerPsqlDB :: (HasCallStack, MonadFlow m, Exception e)
-  => e -> SqlDB BP.Pg a -> m a
+withEulerPsqlDB ::
+  (HasCallStack, MonadFlow m, Exception e) =>
+  e ->
+  SqlDB BP.Pg a ->
+  m a
 withEulerPsqlDB internalError act = do
   (dbcfg :: Maybe (DBConfig BP.Pg)) <- getOption EulerPsqlDbCfg
   case dbcfg of
@@ -145,8 +167,11 @@ withEulerPsqlDB internalError act = do
       logErrorT "MissingDB identifier" "Can't find EulerDB identifier in options"
       throwException internalError
 
-withEulerAdditionalPsqlDB :: (HasCallStack, MonadFlow m, Exception e)
-  => e -> SqlDB BP.Pg a -> m a
+withEulerAdditionalPsqlDB ::
+  (HasCallStack, MonadFlow m, Exception e) =>
+  e ->
+  SqlDB BP.Pg a ->
+  m a
 withEulerAdditionalPsqlDB internalError act = do
   (dbcfg :: Maybe (DBConfig BP.Pg)) <- getOption EulerPsqlDbAdditionalCfg
   case dbcfg of

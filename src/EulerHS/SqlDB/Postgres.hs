@@ -1,26 +1,29 @@
-{-# LANGUAGE DeriveAnyClass  #-}
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE RecordWildCards #-}
 
 module EulerHS.SqlDB.Postgres
-  (
-    -- * Core Postgres
+  ( -- * Core Postgres
+
     -- ** Types
-    PostgresConfig(..)
+    PostgresConfig (..),
+
     -- ** Methods
-  , createPostgresConn
-  , closePostgresConn
-  ) where
+    createPostgresConn,
+    closePostgresConn,
+  )
+where
 
 import qualified Database.Beam.Postgres as BP
-import           EulerHS.Prelude
+import EulerHS.Prelude
 
 data PostgresConfig = PostgresConfig
-  { connectHost     :: String
-  , connectPort     :: Word16
-  , connectUser     :: String
-  , connectPassword :: String
-  , connectDatabase :: String
-  } deriving (Show, Eq, Ord, Generic, ToJSON, FromJSON)
+  { connectHost :: String,
+    connectPort :: Word16,
+    connectUser :: String,
+    connectPassword :: String,
+    connectDatabase :: String
+  }
+  deriving (Show, Eq, Ord, Generic, ToJSON, FromJSON)
 
 -- | Transform PostgresConfig to the Postgres ConnectInfo.
 toBeamPostgresConnectInfo :: PostgresConfig -> BP.ConnectInfo
@@ -33,4 +36,3 @@ createPostgresConn = BP.connect . toBeamPostgresConnectInfo
 -- | Close the given connection.
 closePostgresConn :: BP.Connection -> IO ()
 closePostgresConn = BP.close
-

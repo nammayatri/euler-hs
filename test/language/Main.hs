@@ -4,11 +4,11 @@ module Main (main) where
 
 -- import qualified ArtSpec as Art
 -- import           Control.Exception.Safe (bracket)
-import           EulerHS.Prelude hiding (bracket)
+import EulerHS.Prelude hiding (bracket)
 import qualified EulerHS.Types as T
-import qualified MaskingSpec as MaskSpec
 import qualified FlowSpec as Flow
 import qualified HttpAPISpec as HttpAPISpec
+import qualified MaskingSpec as MaskSpec
 -- import qualified KVDBArtSpec as KVDB
 -- import qualified PubSubSpec as PubSub
 -- import qualified SQLArtSpec as SQL
@@ -18,31 +18,28 @@ import qualified HttpAPISpec as HttpAPISpec
 -- import           System.FilePath ((<.>), (</>))
 -- import           System.Process.Typed (proc, startProcess, stopProcess)
 -- import           System.Random (getStdRandom, random)
-import           Test.Hspec (hspec)
+import Test.Hspec (hspec)
 
 main :: IO ()
 main = do
-    -- Redis not works on CI
-    -- withRedis $
-    hspec $ do
-      HttpAPISpec.spec
-      MaskSpec.spec
-      Flow.spec logsDisabled
-
-      -- Wait for Redis on CI
-      -- CachedSqlDBQuery.spec
-
-      -- ART removed and these tests not work anymore
-      -- Art.spec
-      -- KVDB.spec
-      -- SQL.spec
-      -- PubSub.spec
+  -- Redis not works on CI
+  -- withRedis $
+  hspec $ do
+    HttpAPISpec.spec
+    MaskSpec.spec
+    Flow.spec logsDisabled
   where
+    -- Wait for Redis on CI
+    -- CachedSqlDBQuery.spec
+
+    -- ART removed and these tests not work anymore
+    -- Art.spec
+    -- KVDB.spec
+    -- SQL.spec
+    -- PubSub.spec
+
     logsDisabled :: Maybe T.LoggerConfig
     logsDisabled = Nothing
-
-
-
 
 -- Helpers
 
