@@ -32,7 +32,7 @@ import qualified Database.Beam.Schema.Tables as B
 import qualified Database.Redis as DR
 import EulerHS.KVConnector.Encoding ()
 import qualified EulerHS.KVConnector.Encoding as Encoding
-import EulerHS.KVConnector.Metrics (KVMetric (..), incrementMetric)
+import EulerHS.KVConnector.Metrics (KVMetric (..), incrementMetric, observeSecondaryKeyElements)
 import EulerHS.KVConnector.Types
   ( DBCommandVersion (..),
     DBLogEntry (..),
@@ -688,6 +688,7 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = 
           case primaryRes of
             Left e -> pure $ Left $ RedisError $ (show e <> " for key: " <> show constructedKey)
             Right primaryKeys -> do
+              observeSecondaryKeyElements modelName k "primaryCluster" (length primaryKeys)
               -- If secondary Redis is enabled, also check it and merge results
               if meshCfg.secondaryRedisEnabled && meshCfg.meshEnabled
                 then do
@@ -695,6 +696,7 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = 
                   case secondaryRes of
                     Left e -> pure $ Left $ RedisError $ (show e <> " for secondary key: " <> show constructedKey)
                     Right secondaryKeys -> do
+                      observeSecondaryKeyElements modelName k "secondaryCluster" (length secondaryKeys)
                       -- Merge primary keys from both Redis instances (union)
                       let mergedKeys = mkUniq (primaryKeys ++ secondaryKeys)
                       pure $ Right $ Just mergedKeys
