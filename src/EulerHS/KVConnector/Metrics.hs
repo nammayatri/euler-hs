@@ -252,11 +252,11 @@ incrementKVHitMissMetric action model findResult = when isKVMetricEnabled $ do
     Nothing -> pure ()
 
 incrementJsonbFallbackMetric :: (HasCallStack, L.MonadFlow m) => Text -> Text -> Text -> m ()
-incrementJsonbFallbackMetric schema model err = when isKVMetricEnabled $ do
+incrementJsonbFallbackMetric schema model err = do
   env <- L.getOption KVMetricCfg
   case env of
     Just val -> L.runIO $ jsonbFallback val (schema, model, err)
-    Nothing -> pure ()
+    Nothing  -> pure ()
 
 withKVLatencyMetric :: (HasCallStack, L.MonadFlow m) => Text -> Text -> Text -> m a -> m a
 withKVLatencyMetric handler model redisCluster action = do

@@ -23,6 +23,9 @@ import qualified Data.Aeson                    as A
 import qualified Data.Text                     as T
 import qualified Data.Text.Encoding            as TE
 import           Data.Time                     (UTCTime)
+import qualified Data.ByteString               as BS
+import qualified Data.ByteString.Base16        as B16
+import qualified Data.ByteString.Lazy          as BL
 import qualified Data.Vector                   as V
 import qualified Database.Beam                 as B
 import           Database.Beam.Backend.SQL.Row ()
@@ -62,9 +65,9 @@ data PersonT f = PersonT
   , isNew       :: B.C f Bool
   , createdAt   :: B.C f UTCTime
   , tags        :: B.C f (Maybe [Text])         -- text[]   array
-  , mobileHash  :: B.C f (Maybe Text)           -- bytea column; modelled as Maybe Text only for the FALLBACK path (to_jsonb -> "\\xdeadbeef"); normal beam path will type-mismatch (intentional)
+  , mobileHash  :: B.C f (Maybe HexBlob)        -- bytea column; HexBlob mirrors DbHash (hex string FromJSON + native bytea Beam IO)
   , metadata    :: B.C f (Maybe A.Value)        -- jsonb passthrough
-  , pref        :: B.C f (Maybe Text)           -- text storing JSON (mkBeamInstancesForJSON shape)
+  , pref        :: B.C f (Maybe VehiclePref)    -- text storing JSON (mkBeamInstancesForJSON shape): structured sum type
   } deriving (Generic, B.Beamable)
 
 instance B.Table PersonT where
@@ -100,6 +103,50 @@ instance ModelMeta PersonT where
 
 instance ToSQLObject Bool where
   convertToSQLObject = SQLObjectValue . T.pack . show
+
+-- | Stand-in for a @mkBeamInstancesForJSON@-style type: stored as TEXT
+-- containing a JSON-encoded sum-type. FromJSON expects an Object/Array, not
+-- a raw string — verifies the fallback's TEXT→JSON unwrap.
+data VehiclePref
+  = VehicleSedan [Text]
+  | VehicleAuto  Text
+  deriving (Eq, Show, Generic)
+instance A.FromJSON VehiclePref
+instance A.ToJSON VehiclePref
+
+instance PGS.FromField VehiclePref where
+  fromField f mb = do
+    bs :: BS.ByteString <- PGS.fromField f mb
+    case A.eitherDecodeStrict bs of
+      Right v -> pure v
+      Left  e -> PGS.returnError PGS.ConversionFailed f ("VehiclePref decode: " <> e)
+
+instance HasSqlValueSyntax PgValueSyntax VehiclePref where
+  sqlValueSyntax = sqlValueSyntax . TE.decodeUtf8 . BL.toStrict . A.encode
+
+instance B.FromBackendRow B.Postgres VehiclePref
+instance B.HasSqlEqualityCheck B.Postgres VehiclePref
+
+-- | Stand-in for shared-kernel's @DbHash@: bytea in PG, hex string in JSON.
+-- Verifies the fallback's @\\x@-prefix-strip lets DbHash-style FromJSON decode
+-- without the table needing any change.
+newtype HexBlob = HexBlob { unHexBlob :: BS.ByteString } deriving (Eq, Generic)
+
+instance Show HexBlob where show = T.unpack . TE.decodeUtf8 . B16.encode . unHexBlob
+
+instance A.FromJSON HexBlob where
+  parseJSON = A.withText "HexBlob" $ \t -> case B16.decode (TE.encodeUtf8 t) of
+    Right b -> pure (HexBlob b)
+    Left  e -> fail ("HexBlob: bad hex: " <> e)
+
+instance PGS.FromField HexBlob where
+  fromField f mb = HexBlob <$> PGS.fromField f mb
+
+instance HasSqlValueSyntax PgValueSyntax HexBlob where
+  sqlValueSyntax = sqlValueSyntax . unHexBlob
+
+instance B.FromBackendRow B.Postgres HexBlob
+instance B.HasSqlEqualityCheck B.Postgres HexBlob
 
 -- Orphan instances shared-kernel ships for text[] support
 -- (`Kernel.Types.Common` lines 159-170); duplicated here so the test exec
@@ -186,7 +233,7 @@ resetSchema = do
   runRaw "ALTER TABLE atlas_driver_offer_bpp.person ADD COLUMN IF NOT EXISTS mobile_hash bytea"
   runRaw "ALTER TABLE atlas_driver_offer_bpp.person ADD COLUMN IF NOT EXISTS metadata jsonb"
   runRaw "ALTER TABLE atlas_driver_offer_bpp.person ADD COLUMN IF NOT EXISTS pref text"
-  runRaw "UPDATE atlas_driver_offer_bpp.person SET tags=ARRAY['vip','english']::text[], mobile_hash=E'\\\\xDEADBEEF'::bytea, metadata='{\"foo\":1}'::jsonb, pref='{\"Sedan\":[]}' WHERE id IN ('p1','p2')"
+  runRaw "UPDATE atlas_driver_offer_bpp.person SET tags=ARRAY['vip','english']::text[], mobile_hash=E'\\\\xDEADBEEFCAFEBABE'::bytea, metadata='{\"foo\":1}'::jsonb, pref='{\"tag\":\"VehicleSedan\",\"contents\":[\"spacious\",\"quiet\"]}' WHERE id IN ('p1','p2')"
 
 dropCol :: Text -> IO ()
 dropCol col = runRaw ("ALTER TABLE atlas_driver_offer_bpp.person DROP COLUMN " <> col)

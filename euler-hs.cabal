@@ -203,13 +203,15 @@ executable jsonb-live-test
   hs-source-dirs:   test-jsonb-live
   build-depends:
     , aeson
+    , base16-bytestring
     , beam-core
     , beam-postgres
+    , bytestring
+    , casing
     , euler-hs
     , postgresql-simple
     , sequelize
     , text
-    , casing
     , time
     , vector
   ghc-options:      -threaded

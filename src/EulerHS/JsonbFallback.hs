@@ -164,17 +164,58 @@ renderWhere = \case
 -- Execute SELECT to_jsonb(t.*) and decode rows
 --------------------------------------------------------------------------------
 
--- | Postgres @to_jsonb(t.*)@ emits column names verbatim (snake_case).
--- @mkTableInstances@-generated FromJSON uses @genericParseJSON defaultOptions@
--- which expects Haskell field names (camelCase). Rewrite ONLY top-level keys —
--- nested objects / arrays are user payload (JSONB columns, text[] arrays) and
--- must not be touched.
-snakeKeysToCamel :: A.Value -> A.Value
-snakeKeysToCamel = \case
+-- | Normalise a row JSON value for downstream @FromJSON@. All transforms
+-- apply ONLY to top-level column values — nested objects / arrays are user
+-- payload (JSONB / @text[]@) and must stay byte-identical.
+--
+-- 1. Rewrite top-level keys @snake_case → camelCase@ so the
+--    @mkTableInstances@-generated @genericParseJSON defaultOptions@ instances
+--    (which expect Haskell field names) decode unchanged.
+-- 2. Strip the Postgres bytea text-format @\\x@ prefix from string values
+--    (@"\\xdeadbeef" → "deadbeef"@) so @DbHash@-style @decodeHex@ accepts them.
+-- 3. Unwrap @TEXT@ columns that hold a serialised JSON object / array (the
+--    @mkBeamInstancesForJSON@ shape) — @to_jsonb@ emits them as JSON strings
+--    @\"{...}\"@, the type's auto-derived FromJSON expects the structured
+--    Value. We parse and substitute only when the inner parse yields an
+--    Object or Array (scalar-looking strings are left untouched).
+normaliseRow :: A.Value -> A.Value
+normaliseRow = \case
   A.Object o -> A.Object $ AKM.fromList
-    [ (AK.fromText (T.pack (Casing.camel (T.unpack (AK.toText k)))), v)
+    [ (AK.fromText (T.pack (Casing.camel (T.unpack (AK.toText k)))), normaliseValue v)
     | (k, v) <- AKM.toList o ]
   other      -> other
+
+normaliseValue :: A.Value -> A.Value
+normaliseValue = unwrapJsonText . unbyteaEncode
+
+unbyteaEncode :: A.Value -> A.Value
+unbyteaEncode = \case
+  A.String t
+    | Just rest <- T.stripPrefix "\\x" t
+    , not (T.null rest)
+    , T.all isHexChar rest -> A.String rest
+  other -> other
+  where
+    isHexChar c = (c >= '0' && c <= '9')
+               || (c >= 'a' && c <= 'f')
+               || (c >= 'A' && c <= 'F')
+
+-- | Promote @TEXT@-stored JSON to its parsed Value, but only when the string
+-- starts with @{@ or @[@ and parses to a structured value. Plain strings
+-- (even those starting with other JSON-prefix characters) are preserved.
+unwrapJsonText :: A.Value -> A.Value
+unwrapJsonText = \case
+  A.String t
+    | not (T.null t)
+    , T.head t == '{' || T.head t == '['
+    , Right parsed <- A.eitherDecodeStrict (TE.encodeUtf8 t)
+    , structured parsed
+    -> parsed
+  other -> other
+  where
+    structured (A.Object _) = True
+    structured (A.Array  _) = True
+    structured _            = False
 
 runJsonbSelect
   :: forall table m
@@ -196,7 +237,7 @@ runJsonbSelect dbConf sql = do
   where
     decodeRows :: [A.Value] -> [table Identity] -> Either JsonbFallbackError [table Identity]
     decodeRows []     acc = Right (reverse acc)
-    decodeRows (v:vs) acc = case A.fromJSON (snakeKeysToCamel v) of
+    decodeRows (v:vs) acc = case A.fromJSON (normaliseRow v) of
       A.Success r -> decodeRows vs (r : acc)
       A.Error err -> Left (JfeJsonDecodeError (T.pack err))
 
