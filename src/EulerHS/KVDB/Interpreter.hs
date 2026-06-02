@@ -151,6 +151,8 @@ interpretKeyValueF runRedis (L.ZRangeByScore k minScore maxScore next) =
   fmap next $ runRedis $ R.zrangebyscore k minScore maxScore
 interpretKeyValueF runRedis (L.ZRangeByScoreWithLimit k minScore maxScore offset count next) =
   fmap next $ runRedis $ R.zrangebyscoreLimit k minScore maxScore offset count
+interpretKeyValueF runRedis (L.ZRevRangeByScoreWithLimit k maxScore minScore offset count next) =
+  fmap next $ runRedis $ R.zrevrangebyscoreLimit k maxScore minScore offset count
 interpretKeyValueF runRedis (L.ZRem k v next) =
   fmap next $ runRedis $ R.zrem k v
 interpretKeyValueF runRedis (L.ZRemRangeByScore k minScore maxScore next) =
@@ -258,6 +260,8 @@ interpretKeyValueTxF (L.ZRangeByScore k minScore maxScore next) =
   next <$> R.zrangebyscore k minScore maxScore
 interpretKeyValueTxF (L.ZRangeByScoreWithLimit k minScore maxScore offset count next) =
   next <$> R.zrangebyscoreLimit k minScore maxScore offset count
+interpretKeyValueTxF (L.ZRevRangeByScoreWithLimit k maxScore minScore offset count next) =
+  next <$> R.zrevrangebyscoreLimit k maxScore minScore offset count
 interpretKeyValueTxF (L.ZRem k v next) =
   next <$> R.zrem k v
 interpretKeyValueTxF (L.ZRemRangeByScore k minScore maxScore next) =

@@ -95,6 +95,7 @@ module EulerHS.KVDB.Language
     zrange,
     zrangebyscore,
     zrangebyscorewithlimit,
+    zrevrangebyscorewithlimit,
     zrem,
     zremrangebyscore,
     zcard,
@@ -200,6 +201,8 @@ data KeyValueF f next where
   ZRange :: KVDBKey -> Integer -> Integer -> (f [ByteString] -> next) -> KeyValueF f next
   ZRangeByScore :: KVDBKey -> Double -> Double -> (f [ByteString] -> next) -> KeyValueF f next
   ZRangeByScoreWithLimit :: KVDBKey -> Double -> Double -> Integer -> Integer -> (f [ByteString] -> next) -> KeyValueF f next
+  -- | Reverse (highest score first) range with offset/count. Args: key, max, min, offset, count.
+  ZRevRangeByScoreWithLimit :: KVDBKey -> Double -> Double -> Integer -> Integer -> (f [ByteString] -> next) -> KeyValueF f next
   ZRem :: KVDBKey -> [KVDBValue] -> (f Integer -> next) -> KeyValueF f next
   ZRemRangeByScore :: KVDBKey -> Double -> Double -> (f Integer -> next) -> KeyValueF f next
   ZCard :: KVDBKey -> (f Integer -> next) -> KeyValueF f next
@@ -237,6 +240,7 @@ instance Functor (KeyValueF f) where
   fmap f (ZRange k s1 s2 next) = ZRange k s1 s2 (f . next)
   fmap f (ZRangeByScore k s1 s2 next) = ZRangeByScore k s1 s2 (f . next)
   fmap f (ZRangeByScoreWithLimit k s1 s2 offset count next) = ZRangeByScoreWithLimit k s1 s2 offset count (f . next)
+  fmap f (ZRevRangeByScoreWithLimit k s1 s2 offset count next) = ZRevRangeByScoreWithLimit k s1 s2 offset count (f . next)
   fmap f (ZRem k v next) = ZRem k v (f . next)
   fmap f (ZRemRangeByScore k s1 s2 next) = ZRemRangeByScore k s1 s2 (f . next)
   fmap f (ZCard k next) = ZCard k (f . next)
@@ -423,6 +427,10 @@ zremrangebyscore key minScore maxScore = ExceptT $ liftFC $ KV $ ZRemRangeByScor
 
 zrangebyscorewithlimit :: KVDBKey -> Double -> Double -> Integer -> Integer -> KVDB [ByteString]
 zrangebyscorewithlimit key minScore maxScore offset count = ExceptT $ liftFC $ KV $ ZRangeByScoreWithLimit key minScore maxScore offset count id
+
+-- | Reverse range (highest score first) with offset/count. Args: key, max, min, offset, count.
+zrevrangebyscorewithlimit :: KVDBKey -> Double -> Double -> Integer -> Integer -> KVDB [ByteString]
+zrevrangebyscorewithlimit key maxScore minScore offset count = ExceptT $ liftFC $ KV $ ZRevRangeByScoreWithLimit key maxScore minScore offset count id
 
 zcard :: KVDBKey -> KVDB Integer
 zcard key = ExceptT $ liftFC $ KV $ ZCard key id

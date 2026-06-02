@@ -32,12 +32,13 @@ import qualified Data.Aeson as A
 import qualified Data.ByteString.Lazy as BSL
 import Data.Either.Extra (mapLeft, mapRight)
 import qualified Data.HashMap.Strict as HM
-import Data.List (maximum)
+import Data.List (lookup, maximum)
 import qualified Data.Maybe as DMaybe
 import qualified Data.Serialize as Serialize
 import qualified Data.Text as T
 import qualified Database.Beam as B
 import qualified Database.Beam.Postgres as BP
+import qualified Database.Beam.Schema.Tables as B
 import EulerHS.CachedSqlDBQuery
   ( SqlReturning (..),
     createReturning,
@@ -54,7 +55,7 @@ import EulerHS.KVConnector.Helper.Utils
 import EulerHS.KVConnector.InMemConfig.Flow (fetchRowFromDBAndAlterImc, pushToInMemConfigStream, searchInMemoryCache)
 import EulerHS.KVConnector.InMemConfig.Types (ImcStreamCommand (..))
 import qualified EulerHS.KVConnector.Metrics as Metrics
-import EulerHS.KVConnector.Types (DBCommandVersion (..), KVConnector (..), MeshConfig (..), MeshError (..), MeshMeta (..), MeshResult, SecondaryKey (..), Source (..), TableMappings (..), keyMap, tableName)
+import EulerHS.KVConnector.Types (DBCommandVersion (..), KVConnector (..), MeshConfig (..), MeshError (..), MeshMeta (..), MeshResult, PartialCond (..), SecondaryKey (..), SecondaryKeyConfig (..), SecondaryKeyExpiry (..), Source (..), TableMappings (..), keyMap, tableName)
 import EulerHS.KVConnector.Utils
 import EulerHS.KVDB.Types (KVDBReply)
 import qualified EulerHS.Language as L
@@ -62,7 +63,7 @@ import EulerHS.Prelude hiding (maximum)
 import qualified EulerHS.SqlDB.Language as DB
 import EulerHS.SqlDB.Types (BeamRunner, BeamRuntime, DBConfig, DBError (..))
 import Named (defaults, (!))
-import Sequelize (Clause (..), Model, OrderBy (..), Set (..), Where, columnize, fromColumnar', sqlDelete, sqlSelect, sqlSelect', sqlUpdate)
+import Sequelize (Clause (..), Column, Model, OrderBy (..), Set (..), Term (..), Where, columnize, fromColumnar', sqlDelete, sqlSelect, sqlSelect', sqlUpdate)
 
 createWoReturingKVConnector ::
   forall (table :: (Type -> Type) -> Type) be m beM.
@@ -132,6 +133,20 @@ createWithKVConnector dbConf meshCfg value = do
       Left _ -> pure ()
   pure res
 
+-- | Write a single secondary index entry for a pkey: ZADD for ordered (ZSET)
+-- indexes, SADD for plain ones, then refresh its (possibly per-key) TTL.
+writeSecondaryIndexEntry ::
+  (L.MonadFlow m) => Text -> ByteString -> SecondaryLookupKey -> m (Either KVDBReply Bool)
+writeSecondaryIndexEntry redisConn pKey slk = do
+  let sKey = fromString . T.unpack $ slkKey slk
+  addRes <-
+    if slkOrdered slk
+      then L.runKVDB redisConn $ L.zadd sKey [(slkScore slk, pKey)]
+      else L.runKVDB redisConn $ L.sadd sKey [pKey]
+  case addRes of
+    Left err -> pure $ Left err
+    Right _ -> L.runKVDB redisConn $ L.expire sKey (slkTtl slk)
+
 createKV ::
   forall (table :: (Type -> Type) -> Type) m.
   ( FromJSON (table Identity),
@@ -161,12 +176,8 @@ createKV meshCfg value = do
 
       revMappingRes <-
         mapM
-          ( \secIdx -> do
-              let sKey = fromString . T.unpack $ secIdx
-              _ <- L.runKVDB meshCfg.kvRedis $ L.sadd sKey [pKey]
-              L.runKVDB meshCfg.kvRedis $ L.expire sKey meshCfg.redisTtl
-          )
-          $ getSecondaryLookupKeys meshCfg.redisKeyPrefix val
+          (writeSecondaryIndexEntry meshCfg.kvRedis pKey)
+          $ getSecondaryLookupKeysWithConfig meshCfg.redisKeyPrefix meshCfg.redisTtl (round time) val
       case foldEither revMappingRes of
         Left err -> pure $ Left $ RedisError (show err <> "Primary key => " <> show pKey <> " Secondary key => " <> show (getSecondaryLookupKeys meshCfg.redisKeyPrefix val) <> " in createKV")
         Right _ -> do
@@ -199,14 +210,11 @@ createInRedis meshCfg val = do
   let pKeyText = getLookupKeyByPKey meshCfg.redisKeyPrefix val
       shard = getShardedHashTag meshCfg.tableShardModRange pKeyText
       pKey = fromString . T.unpack $ pKeyText <> shard
+  nowMillis <- fromIntegral <$> L.getCurrentDateInMillis
   revMappingRes <-
     mapM
-      ( \secIdx -> do
-          let sKey = fromString . T.unpack $ secIdx
-          _ <- L.runKVDB meshCfg.kvRedis $ L.sadd sKey [pKey]
-          L.runKVDB meshCfg.kvRedis $ L.expire sKey meshCfg.redisTtl
-      )
-      $ getSecondaryLookupKeys meshCfg.redisKeyPrefix val
+      (writeSecondaryIndexEntry meshCfg.kvRedis pKey)
+      $ getSecondaryLookupKeysWithConfig meshCfg.redisKeyPrefix meshCfg.redisTtl nowMillis val
   case foldEither revMappingRes of
     Left err -> pure $ Left $ RedisError (show err <> "Primary key => " <> show pKey <> " Secondary key => " <> show (getSecondaryLookupKeys meshCfg.redisKeyPrefix val))
     Right _ -> do
@@ -530,8 +538,7 @@ updateObjectRedis meshCfg redisConn updVals setClauses addPrimaryKeyToWhereClaus
 
         case resultToEither $ A.fromJSON updatedModel of
           Right value -> do
-            let olderSkeys = map (\(SKey s) -> s) (secondaryKeysFiltered obj)
-            skeysUpdationRes <- modifySKeysRedis olderSkeys value
+            skeysUpdationRes <- modifySKeysRedis obj value
             case skeysUpdationRes of
               Right _ -> do
                 kvdbRes <- L.runKVDB redisConn $
@@ -549,41 +556,68 @@ updateObjectRedis meshCfg redisConn updVals setClauses addPrimaryKeyToWhereClaus
               Left err -> pure $ Left err
           Left err -> pure $ Left $ MDecodingError err
   where
-    modifySKeysRedis :: [[(Text, Text)]] -> table Identity -> m (MeshResult (table Identity)) -- TODO: Optimise this logic
-    modifySKeysRedis olderSkeys table = do
-      let pKeyText = getLookupKeyByPKey meshCfg.redisKeyPrefix table
+    toUnitRes :: Either KVDBReply a -> MeshResult ()
+    toUnitRes = \case
+      Left e -> Left (MRedisError e)
+      Right _ -> Right ()
+
+    -- Reconcile every secondary index between the OLD and NEW row state. Handles
+    -- value changes, score-field re-scoring, per-key TTL, and partial-index
+    -- membership transitions (adding/clearing as the row enters/leaves a partial
+    -- predicate). secondaryKeys preserves declaration order, so old/new line up
+    -- positionally.
+    modifySKeysRedis :: table Identity -> table Identity -> m (MeshResult (table Identity))
+    modifySKeysRedis oldObj newObj = do
+      nowMillis <- fromIntegral <$> L.getCurrentDateInMillis
+      let pKeyText = getLookupKeyByPKey meshCfg.redisKeyPrefix newObj
           shard = getShardedHashTag meshCfg.tableShardModRange pKeyText
           pKey = fromString . T.unpack $ pKeyText <> shard
-      let tName = tableName @(table Identity)
+          tName = tableName @(table Identity)
+          cfgMap = secondaryKeyConfigs @(table Identity)
+          oldRowJson = mkSQLObject oldObj -- lazy: forced only for score-field / partial keys
+          newRowJson = mkSQLObject newObj
           updValsMap = HM.fromList (map (\p -> (fst p, True)) updVals)
-          (modifiedSkeysOld, unModifiedSkeys) =
-            applyFPair (map (getSortedKeyAndValue tName)) $
-              segregateList (`isKeyModified` updValsMap) olderSkeys
-          newSkeys = map (\(SKey s) -> s) (secondaryKeys table)
-          (modifiedSkeysNew, _) =
-            applyFPair (map (getSortedKeyAndValue tName)) $
-              segregateList (`isKeyModified` updValsMap) newSkeys
-      mapRight (const table)
-        <$> runExceptT
-          ( do
-              mapM_ (ExceptT . resetTTL) unModifiedSkeys
-              mapM_ (ExceptT . deletePkeyFromSkey pKey) modifiedSkeysOld
-              mapM_ (ExceptT . addPkeyToSkey pKey) modifiedSkeysNew
-          )
+          keyPairs = zip (map (\(SKey s) -> s) (secondaryKeys oldObj)) (map (\(SKey s) -> s) (secondaryKeys newObj))
 
-    resetTTL Nothing = pure $ Right False
-    resetTTL (Just key) = do
-      x <- L.rExpire redisConn (fromString $ T.unpack key) meshCfg.redisTtl
-      pure $ mapLeft MRedisError x
+          -- Full redis key for a config+tuple (Nothing if any key value empty). Includes the partial suffix.
+          keyForCfg cfg pairs = (<> partialSuffix (maybe [] skPartial cfg)) <$> getSortedKeyAndValue tName pairs
 
-    deletePkeyFromSkey _ Nothing = pure $ Right 0
-    deletePkeyFromSkey pKey (Just key) = mapLeft MRedisError <$> L.sRemB redisConn (fromString $ T.unpack key) [pKey]
+          addOp ordered keyText score ttl = do
+            let k = fromString $ T.unpack keyText
+            addRes <- if ordered then L.rZAdd redisConn k [(score, pKey)] else L.rSadd redisConn k [pKey]
+            case addRes of
+              Left e -> pure $ Left $ MRedisError e
+              Right _ -> toUnitRes <$> L.rExpireB redisConn k ttl
 
-    addPkeyToSkey :: ByteString -> Maybe Text -> m (MeshResult Bool)
-    addPkeyToSkey _ Nothing = pure $ Right False
-    addPkeyToSkey pKey (Just key) = do
-      _ <- L.rSadd redisConn (fromString $ T.unpack key) [pKey]
-      mapLeft MRedisError <$> L.rExpireB redisConn (fromString $ T.unpack key) meshCfg.redisTtl
+          removeOp ordered keyText =
+            let k = fromString $ T.unpack keyText
+             in toUnitRes <$> (if ordered then L.rZRem redisConn k [pKey] else L.sRemB redisConn k [pKey])
+
+          touchOp ordered keyText score ttl rescore = do
+            let k = fromString $ T.unpack keyText
+            rescoreRes <- if ordered && rescore then toUnitRes <$> L.rZAdd redisConn k [(score, pKey)] else pure (Right ())
+            case rescoreRes of
+              Left e -> pure $ Left e
+              Right _ -> toUnitRes <$> L.rExpireB redisConn k ttl
+
+          step (oldPairs, newPairs) = do
+            let cfg = HM.lookup (skeyFieldCombo newPairs) cfgMap -- old/new share fields => same combo
+                ordered = maybe False skOrdered cfg
+                partial = maybe [] skPartial cfg
+                ttl = maybe meshCfg.redisTtl (\c -> getSecondaryKeyTtl (skExpiry c) meshCfg.redisTtl nowMillis) cfg
+                score = getScoreForRow newRowJson (cfg >>= skScoreField) nowMillis
+                scoreChanged = maybe False (`HM.member` updValsMap) (cfg >>= skScoreField)
+                -- membership = satisfies partial predicate (if any) AND has a non-empty key value
+                oldKey = if null partial || rowSatisfiesPartial oldRowJson partial then keyForCfg cfg oldPairs else Nothing
+                newKey = if null partial || rowSatisfiesPartial newRowJson partial then keyForCfg cfg newPairs else Nothing
+            case (oldKey, newKey) of
+              (Nothing, Nothing) -> pure $ Right ()
+              (Nothing, Just nk) -> addOp ordered nk score ttl -- entered the index
+              (Just ok, Nothing) -> removeOp ordered ok -- left the index (state change / value cleared)
+              (Just ok, Just nk)
+                | ok == nk -> touchOp ordered nk score ttl scoreChanged
+                | otherwise -> runExceptT (ExceptT (removeOp ordered ok) >> ExceptT (addOp ordered nk score ttl))
+      mapRight (const newObj) <$> runExceptT (mapM_ (ExceptT . step) keyPairs)
 
     getSortedKeyAndValue :: Text -> [(Text, Text)] -> Maybe Text
     getSortedKeyAndValue tName kvTup = do
@@ -592,17 +626,6 @@ updateObjectRedis meshCfg redisConn updVals setClauses addPrimaryKeyToWhereClaus
       if any (\(_, v) -> v == "") kvTup
         then Nothing
         else Just $ meshCfg.redisKeyPrefix <> tName <> "_" <> appendedKeys <> "_" <> appendedValues
-
-    isKeyModified :: [(Text, Text)] -> HM.HashMap Text Bool -> Bool
-    isKeyModified sKey updValsMap = foldl' (\r k -> HM.member (fst k) updValsMap || r) False sKey
-
-    segregateList :: (a -> Bool) -> [a] -> ([a], [a])
-    segregateList func list = go list ([], [])
-      where
-        go [] res = res
-        go (x : xs) (trueList, falseList)
-          | func x = go xs (x : trueList, falseList)
-          | otherwise = go xs (trueList, x : falseList)
 
 updateAllReturningWithKVConnector ::
   forall table m.
@@ -1098,7 +1121,7 @@ findOneFromRedis meshCfg whereClause = do
       clusterName = if meshCfg.kvRedis == meshCfg.kvRedisSecondary then "secondaryCluster" else "primaryCluster"
 
   Metrics.withKVLatencyMetric "REDIS_FIND_ONE" modelName clusterName $ do
-    eitherKeyRes <- mapM (getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap) andCombinationsFiltered
+    eitherKeyRes <- mapM (getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap (secondaryKeyConfigs @(table Identity))) andCombinationsFiltered
     result <- case foldEither eitherKeyRes of
       Right keyRes -> do
         let lenKeyRes = lengthOfLists keyRes
@@ -1368,6 +1391,116 @@ findAllFromKvRedis dbConf meshCfg whereClause orderBy = do
       Just (Desc col) -> sortBy (compareCols (fromColumnar' . col . columnize) False)
       Nothing -> id
 
+-- | Fast path for paginated reads fully covered by an ordered (ZSET) secondary
+-- index. Fetches only the requested @offset+limit@ window from Redis (newest
+-- first) instead of pulling the whole secondary set, then returns 'Just' a
+-- result ONLY when the index can satisfy the whole page from live KV rows.
+-- Returns 'Nothing' to signal the caller to fall back to the normal KV+DB merge
+-- path -- i.e. we touch the DB only once the secondary index is exhausted.
+--
+-- Safe-by-construction. It only triggers when:
+--   (a) a positive limit is given,
+--   (b) the where-clause is pure equality fully covering exactly one ordered
+--       index (any extra/non-eq predicate disqualifies it),
+--   (c) ordering is unspecified, or descending on the index's score field.
+-- Descending/unspecified is sound because the newest rows are guaranteed to be
+-- in KV within TTL; ascending (oldest-first) pages may have aged out of KV, so
+-- those deliberately fall back to the merge path.
+--
+-- NOTE: only enabled for the single-Redis setup; multi-cloud falls back.
+tryOrderedIndexFastPath ::
+  forall be table m.
+  ( HasCallStack,
+    B.Beamable table,
+    Model be table,
+    MeshMeta be table,
+    KVConnector (table Identity),
+    FromJSON (table Identity),
+    Serialize.Serialize (table Identity),
+    L.MonadFlow m
+  ) =>
+  MeshConfig ->
+  Where be table ->
+  Maybe (OrderBy table) ->
+  Maybe Int ->
+  Maybe Int ->
+  m (Maybe (MeshResult [table Identity]))
+tryOrderedIndexFastPath meshCfg whereClause orderBy mbLimit mbOffset =
+  if meshCfg.kvHardKilled || not meshCfg.meshEnabled || meshCfg.secondaryRedisEnabled
+    then pure Nothing
+    else do
+      let modelName = tableName @(table Identity)
+          cfgMap = secondaryKeyConfigs @(table Identity)
+          keyAndValueCombinations = getFieldsAndValuesFromClause meshModelTableEntityDescriptor (And whereClause)
+      case (mbLimit, keyAndValueCombinations) of
+        (Just lim, [kvs])
+          | lim > 0,
+            isPureEqClause whereClause,
+            Just (cfg, indexPairs) <- findMatchingOrderedCfg cfgMap kvs,
+            fastDirOK cfg -> do
+              let offset = max 0 (fromMaybe 0 mbOffset)
+                  -- key built from the index-field pairs only, plus the partial suffix (if any).
+                  key = fromString . T.unpack $ meshCfg.redisKeyPrefix <> modelName <> "_" <> getSortedKey indexPairs <> partialSuffix (skPartial cfg)
+              -- Window: newest (highest score) first, skip @offset@, take @lim@.
+              membersRes <- L.rZRevRangeByScoreWithLimit meshCfg.kvRedis key skScorePosInf skScoreNegInf (toInteger offset) (toInteger lim)
+              case membersRes of
+                Left _ -> pure Nothing -- error / legacy SET -> fall back
+                Right members -> do
+                  rowsRes <- getDataFromPKeysRedis meshCfg.kvRedis members
+                  case rowsRes of
+                    Left _ -> pure Nothing
+                    Right (liveRows, _) -> do
+                      let matched = findAllMatching whereClause liveRows
+                      if length matched >= lim
+                        then do
+                          Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVHit
+                          pure $ Just $ Right $ take lim matched
+                        else pure Nothing -- index exhausted -> fall back to DB merge path
+        _ -> pure Nothing
+  where
+    -- Find an ordered index (full or partial) that EXACTLY covers the clause:
+    -- remaining clause fields (after removing predicate fields) must equal the
+    -- index's field-combo, and the clause must supply the partial predicate
+    -- values. This guarantees the index members are both correct and complete
+    -- for the query, so it's safe to answer purely from the index.
+    findMatchingOrderedCfg :: HM.HashMap Text SecondaryKeyConfig -> [(Text, Text)] -> Maybe (SecondaryKeyConfig, [(Text, Text)])
+    findMatchingOrderedCfg cfgMap clausePairs =
+      DMaybe.listToMaybe
+        [ (cfg, indexPairs)
+          | (combo, cfg) <- HM.toList cfgMap,
+            skOrdered cfg,
+            let predConds = skPartial cfg,
+            let predFields = map pcField predConds,
+            all (`elem` map fst clausePairs) predFields,
+            predicateSatisfiedByClause clausePairs predConds,
+            let indexPairs = filter ((`notElem` predFields) . fst) clausePairs,
+            skeyFieldCombo indexPairs == combo
+        ]
+
+    predicateSatisfiedByClause :: [(Text, Text)] -> [PartialCond] -> Bool
+    predicateSatisfiedByClause clausePairs =
+      all (\(PartialCond f vs) -> maybe False (`elem` vs) (lookup f clausePairs))
+
+    isPureEqClause :: [Clause be table] -> Bool
+    isPureEqClause = all goClause
+      where
+        goClause = \case
+          And cs -> all goClause cs
+          Or _ -> False
+          Is _ term -> case term of
+            Eq _ -> True
+            _ -> False
+
+    fastDirOK :: SecondaryKeyConfig -> Bool
+    fastDirOK cfg = case orderBy of
+      Nothing -> True
+      Just (Desc col) -> skScoreField cfg == Just (orderByFieldName col)
+      Just (Asc _) -> False
+
+    orderByFieldName :: forall value. Column table value -> Text
+    orderByFieldName col =
+      B._fieldName . fromColumnar' . col . columnize $ B.dbTableSettings (meshModelTableEntityDescriptor @table @be)
+
 -- Need to recheck offset implementation
 findAllWithOptionsKVConnector ::
   forall be table beM m.
@@ -1392,7 +1525,10 @@ findAllWithOptionsKVConnector ::
   Maybe Int ->
   m (MeshResult [table Identity])
 findAllWithOptionsKVConnector dbConf meshCfg whereClause orderBy mbLimit mbOffset = do
-  findAllWithOptionsHelper dbConf meshCfg whereClause (Just orderBy) mbLimit mbOffset
+  mbFast <- tryOrderedIndexFastPath meshCfg whereClause (Just orderBy) mbLimit mbOffset
+  case mbFast of
+    Just res -> pure res
+    Nothing -> findAllWithOptionsHelper dbConf meshCfg whereClause (Just orderBy) mbLimit mbOffset
 
 -- Need to recheck offset implementation
 findAllWithOptionsKVConnector' ::
@@ -1416,8 +1552,11 @@ findAllWithOptionsKVConnector' ::
   Maybe Int ->
   Maybe Int ->
   m (MeshResult [table Identity])
-findAllWithOptionsKVConnector' dbConf meshCfg whereClause =
-  findAllWithOptionsHelper dbConf meshCfg whereClause Nothing
+findAllWithOptionsKVConnector' dbConf meshCfg whereClause mbLimit mbOffset = do
+  mbFast <- tryOrderedIndexFastPath meshCfg whereClause Nothing mbLimit mbOffset
+  case mbFast of
+    Just res -> pure res
+    Nothing -> findAllWithOptionsHelper dbConf meshCfg whereClause Nothing mbLimit mbOffset
 
 findAllWithKVConnector ::
   forall be table beM m.
@@ -1640,7 +1779,7 @@ redisFindAll meshCfg whereClause = do
       clusterName = if meshCfg.kvRedis == meshCfg.kvRedisSecondary then "secondaryCluster" else "primaryCluster"
 
   Metrics.withKVLatencyMetric "REDIS_FIND_ALL" modelName clusterName $ do
-    eitherKeyRes <- mapM (getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap) andCombinationsFiltered
+    eitherKeyRes <- mapM (getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap (secondaryKeyConfigs @(table Identity))) andCombinationsFiltered
     result <- case foldEither eitherKeyRes of
       Right keyRes -> do
         let allKeys = concat keyRes
@@ -1722,24 +1861,18 @@ reCacheDBRows ::
   [table Identity] ->
   m (Either KVDBReply [[Bool]])
 reCacheDBRows meshCfg dbRows = do
+  nowMillis <- fromIntegral <$> L.getCurrentDateInMillis
   reCacheRes <-
     mapM
       ( \obj -> do
           let pKeyText = getLookupKeyByPKey meshCfg.redisKeyPrefix obj
               shard = getShardedHashTag meshCfg.tableShardModRange pKeyText
               pKey = fromString . T.unpack $ pKeyText <> shard
+          -- Recaching Skeys in redis (ZADD for ordered indexes, SADD otherwise)
           res <-
             mapM
-              ( \secIdx -> do
-                  -- Recaching Skeys in redis
-                  let sKey = fromString . T.unpack $ secIdx
-                  res1 <- L.runKVDB meshCfg.kvRedis $ L.sadd sKey [pKey]
-                  case res1 of
-                    Left err -> return $ Left err
-                    Right _ ->
-                      L.runKVDB meshCfg.kvRedis $ L.expire sKey meshCfg.redisTtl
-              )
-              $ getSecondaryLookupKeys meshCfg.redisKeyPrefix obj
+              (writeSecondaryIndexEntry meshCfg.kvRedis pKey)
+              $ getSecondaryLookupKeysWithConfig meshCfg.redisKeyPrefix meshCfg.redisTtl nowMillis obj
           return $ sequence res
       )
       dbRows

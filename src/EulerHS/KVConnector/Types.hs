@@ -43,12 +43,67 @@ data PrimaryKey = PKey [(Text, Text)]
 
 data SecondaryKey = SKey [(Text, Text)]
 
+-- | How a secondary key index should expire in Redis.
+data SecondaryKeyExpiry
+  = -- | Use the global @meshCfg.redisTtl@ (legacy behaviour).
+    DefaultTTL
+  | -- | Fixed duration (in seconds) overriding the global TTL.
+    TTLSeconds Integer
+  | -- | Expire at the next occurrence of this wall-clock time of day (UTC),
+    -- in 24h format @(hour, minute)@. If today's time has already passed,
+    -- the key expires at the same time tomorrow.
+    DailyAt Int Int
+  deriving (Generic, Eq, Show)
+
+-- | A single partial-index condition. The row is included in the index iff the
+-- value of @pcField@ (stringified the same way secondary-key values are) is one
+-- of @pcValues@. Multiple conditions on one index are ANDed together. This is an
+-- equality/IN predicate -- enough to express "state" conditions such as
+-- @status \`elem\` ["ACTIVE","PENDING"]@.
+data PartialCond = PartialCond
+  { pcField :: Text,
+    pcValues :: [Text]
+  }
+  deriving (Generic, Eq, Show)
+
+-- | Per-secondary-key index configuration. Controls whether the index is
+-- stored as an ordered Redis sorted-set (ZSET) instead of a plain SET, what
+-- score it is ordered by, how it expires, and an optional partial-index
+-- predicate that gates membership.
+data SecondaryKeyConfig = SecondaryKeyConfig
+  { -- | Store this secondary index as a ZSET (ordered) rather than a SET.
+    skOrdered :: Bool,
+    -- | Field used to compute the ZSET score. 'Nothing' => use the row's
+    -- insertion/write time (epoch millis) as the score.
+    skScoreField :: Maybe Text,
+    -- | Expiry policy for this index.
+    skExpiry :: SecondaryKeyExpiry,
+    -- | Partial-index predicate (ANDed conditions). Empty => full index (every
+    -- row is indexed). Non-empty => only rows satisfying all conditions are
+    -- indexed; rows are added/removed as their state changes. Partial indexes
+    -- use a distinct key (see 'partialSuffix') so they never collide with or
+    -- pollute full/generic secondary-key lookups.
+    skPartial :: [PartialCond]
+  }
+  deriving (Generic, Eq, Show)
+
+-- | An ordered index with default (global) TTL, scored by insertion time.
+defaultOrderedKeyConfig :: SecondaryKeyConfig
+defaultOrderedKeyConfig = SecondaryKeyConfig {skOrdered = True, skScoreField = Nothing, skExpiry = DefaultTTL, skPartial = []}
+
 class KVConnector table where
   tableName :: Text
   keyMap :: HM.HashMap Text Bool -- True implies it is primary key and False implies secondary
   primaryKey :: table -> PrimaryKey
   secondaryKeys :: table -> [SecondaryKey]
   mkSQLObject :: table -> A.Value
+
+  -- | Per-secondary-key index configuration, keyed by the sorted underscore-joined
+  -- field-combo string (the same string used as a key in 'keyMap'). Secondary keys
+  -- absent from this map keep the legacy plain-SET behaviour. Defaults to empty so
+  -- existing generated instances remain source-compatible.
+  secondaryKeyConfigs :: HM.HashMap Text SecondaryKeyConfig
+  secondaryKeyConfigs = HM.empty
 
 ----------------------------------------------
 

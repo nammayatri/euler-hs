@@ -12,20 +12,79 @@ import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Database.Beam as B
 import Database.Beam.MySQL (MySQL)
-import EulerHS.KVConnector.Types (KVConnector (..), MeshMeta (..), PrimaryKey (..), SecondaryKey (..), TermWrap (..))
+import EulerHS.KVConnector.Types (KVConnector (..), MeshMeta (..), PartialCond (..), PrimaryKey (..), SecondaryKey (..), SecondaryKeyConfig (..), SecondaryKeyExpiry (..), TermWrap (..))
 import EulerHS.Prelude hiding (Type, words)
 import Language.Haskell.TH
 import qualified Sequelize as S
 import Text.Casing (camel)
 import Prelude (head)
 
+-- | TH-level expiry policy for an ordered secondary index. Mirrors
+--   'EulerHS.KVConnector.Types.SecondaryKeyExpiry'.
+data ExpiryTH = DefTTL | TtlSecs Integer | DailyAtTH Int Int
+
+-- | TH-level secondary key index configuration. Build with 'plainSk' /
+--   'orderedSk' and optionally wrap with 'partialSk'.
+data SkConfigTH = SkConfigTH
+  { skcOrdered :: Bool,
+    skcScoreField :: Maybe String,
+    skcExpiry :: ExpiryTH,
+    skcPartial :: [(String, [String])] -- AND of (field `elem` values)
+  }
+
+-- | Legacy plain SET secondary index.
+plainSk :: SkConfigTH
+plainSk = SkConfigTH False Nothing DefTTL []
+
+-- | Ordered (ZSET) secondary index; score field 'Nothing' => insertion time.
+orderedSk :: Maybe String -> ExpiryTH -> SkConfigTH
+orderedSk sf e = SkConfigTH True sf e []
+
+-- | Make an index partial: only rows where every @(field, values)@ holds are
+--   indexed (and they are cleared as their state changes).
+partialSk :: [(String, [String])] -> SkConfigTH -> SkConfigTH
+partialSk conds c = c {skcPartial = conds}
+
 enableKV :: Name -> [Name] -> [[Name]] -> Q [Dec]
-enableKV name pKeyN sKeysN = do
+enableKV name pKeyN sKeysN = enableKVG name pKeyN (map (\s -> (s, plainSk)) sKeysN)
+
+-- | Like 'enableKV' but lets each secondary key opt into an ordered (ZSET)
+--   index, an optional score field, a custom expiry, and/or a partial predicate.
+--
+--   Example:
+--   @$(enableKVWithConfig ''TxnT ['id] [(['status], partialSk [("isActive", ["true"])] (orderedSk (Just \"createdAt\") (DailyAtTH 3 0)))])@
+enableKVWithConfig :: Name -> [Name] -> [([Name], SkConfigTH)] -> Q [Dec]
+enableKVWithConfig = enableKVG
+
+enableKVG :: Name -> [Name] -> [([Name], SkConfigTH)] -> Q [Dec]
+enableKVG name pKeyN sKeyDefs = do
   [tModeMeshDec] <- tableTModMeshD name
-  [kvConnectorDec] <- kvConnectorInstancesD name pKeyN sKeysN
+  [kvConnectorDec] <- kvConnectorInstancesD name pKeyN sKeyDefs
   [meshMetaDec] <- meshMetaInstancesD name
   cerealDec <- cerealInstancesD name
   pure $ [tModeMeshDec, meshMetaDec, kvConnectorDec] ++ cerealDec
+
+mkExpiryExp :: ExpiryTH -> Exp
+mkExpiryExp DefTTL = ConE 'DefaultTTL
+mkExpiryExp (TtlSecs n) = AppE (ConE 'TTLSeconds) (LitE (IntegerL n))
+mkExpiryExp (DailyAtTH h m) = AppE (AppE (ConE 'DailyAt) (LitE (IntegerL (toInteger h)))) (LitE (IntegerL (toInteger m)))
+
+thText :: String -> Exp
+thText s = AppE (VarE 'T.pack) (LitE (StringL s))
+
+mkPartialExp :: [(String, [String])] -> Exp
+mkPartialExp conds =
+  ListE [AppE (AppE (ConE 'PartialCond) (thText f)) (ListE (map thText vs)) | (f, vs) <- conds]
+
+mkSkCfgExp :: SkConfigTH -> Exp
+mkSkCfgExp c =
+  RecConE
+    'SecondaryKeyConfig
+    [ ('skOrdered, ConE (if skcOrdered c then 'True else 'False)),
+      ('skScoreField, maybe (ConE 'Nothing) (\s -> AppE (ConE 'Just) (thText s)) (skcScoreField c)),
+      ('skExpiry, mkExpiryExp (skcExpiry c)),
+      ('skPartial, mkPartialExp (skcPartial c))
+    ]
 
 tableTModMeshD :: Name -> Q [Dec]
 tableTModMeshD name = do
@@ -43,24 +102,36 @@ tableTModMeshD name = do
 --   primaryKey :: table -> PrimaryKey
 --   secondaryKeys:: table -> [SecondaryKey]
 
-kvConnectorInstancesD :: Name -> [Name] -> [[Name]] -> Q [Dec]
-kvConnectorInstancesD name pKeyN sKeysN = do
+kvConnectorInstancesD :: Name -> [Name] -> [([Name], SkConfigTH)] -> Q [Dec]
+kvConnectorInstancesD name pKeyN sKeyDefs = do
   let tableName = mkName "tableName"
       keyMap = mkName "keyMap"
       primaryKey = mkName "primaryKey"
       secondaryKeys = mkName "secondaryKeys"
       mkSQLObject = mkName "mkSQLObject"
+      secondaryKeyConfigs = mkName "secondaryKeyConfigs"
+      sKeysN = map fst sKeyDefs
 
   let pKeyPair = TupE [Just (LitE $ StringL $ sortAndGetKey pKeyN), Just (ConE 'True)]
       sKeyPairs = map (\k -> TupE [Just (LitE $ StringL $ sortAndGetKey k), Just (ConE 'False)]) sKeysN
+      -- Only emit config entries for ordered or partial indexes; plain full
+      -- indexes fall back to the class default (empty map => legacy SET).
+      cfgPairs =
+        [ TupE [Just (LitE $ StringL $ sortAndGetKey fields), Just (mkSkCfgExp cfg)]
+          | (fields, cfg) <- sKeyDefs,
+            skcOrdered cfg || not (null (skcPartial cfg))
+        ]
 
   let tableNameD = FunD tableName [Clause [] (NormalB (LitE (StringL $ init $ camel (nameBase name)))) []]
       keyMapD = FunD keyMap [Clause [] (NormalB (AppE (VarE 'HM.fromList) (ListE (pKeyPair : sKeyPairs)))) []]
       primaryKeyD = FunD primaryKey [Clause [] (NormalB getPrimaryKeyE) []]
       secondaryKeysD = FunD secondaryKeys [Clause [] (NormalB getSecondaryKeysE) []]
       mkSQLObjectD = FunD mkSQLObject [Clause [] (NormalB (VarE 'A.toJSON)) []]
+      secondaryKeyConfigsD = FunD secondaryKeyConfigs [Clause [] (NormalB (AppE (VarE 'HM.fromList) (ListE cfgPairs))) []]
+      baseMethods = [tableNameD, keyMapD, primaryKeyD, secondaryKeysD, mkSQLObjectD]
+      methods = if null cfgPairs then baseMethods else baseMethods ++ [secondaryKeyConfigsD]
 
-  return [InstanceD Nothing [] (AppT (ConT ''KVConnector) (AppT (ConT name) (ConT $ mkName "Identity"))) [tableNameD, keyMapD, primaryKeyD, secondaryKeysD, mkSQLObjectD]]
+  return [InstanceD Nothing [] (AppT (ConT ''KVConnector) (AppT (ConT name) (ConT $ mkName "Identity"))) methods]
   where
     getPrimaryKeyE =
       let obj = mkName "obj"
@@ -73,7 +144,7 @@ kvConnectorInstancesD name pKeyN sKeysN = do
             ( ListE $
                 map
                   (\sKey -> AppE (ConE 'SKey) (ListE (map (\n -> TupE [Just (keyNameTextE n), Just (getRecFieldE n obj)]) sKey)))
-                  sKeysN
+                  (map fst sKeyDefs)
             )
 
     getRecFieldE f obj =

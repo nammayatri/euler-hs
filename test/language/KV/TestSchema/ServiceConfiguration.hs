@@ -36,7 +36,7 @@ import           Data.Scientific (floatingOrInteger)
 import Data.Maybe (fromJust)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
-import KV.TestSchema.ThUtils (meshMetaInstancesD, kvConnectorInstancesD, enableKV)
+import KV.TestSchema.ThUtils (meshMetaInstancesD, kvConnectorInstancesD, enableKV, enableKVWithConfig, orderedSk, ExpiryTH (..))
 import Data.Cereal.TH
 import Data.Cereal.Instances ()
 
@@ -200,4 +200,7 @@ mkServiceConfig name' value' =
     , value = Just value'
     }
 
-$(enableKV ''ServiceConfigurationT ['id] [['name]])
+-- Demonstrates the ordered (ZSET) secondary index: the `name` index is stored
+-- as a sorted-set scored by insertion time, with the default global TTL.
+-- (Use `enableKV ''ServiceConfigurationT ['id] [['name]]` for the legacy plain-SET behaviour.)
+$(enableKVWithConfig ''ServiceConfigurationT ['id] [(['name], orderedSk Nothing DefTTL)])
