@@ -355,7 +355,7 @@ modifyOneKV dbConf replicaDbConfig meshCfg whereClause mbSetClause updateWoRetur
   where
     processKvResult :: MeshResult ([table Identity], [table Identity]) -> Text -> [(Text, A.Value)] -> [Set be table] -> m (Source, MeshResult (Maybe (table Identity)))
     processKvResult kvResult redisConn updVals setClause = case kvResult of
-      Right ([], []) -> updateInKVOrSQL Nothing updVals setClause redisConn
+      Right ([], []) -> updateInKVOrSQL Nothing updVals setClause meshCfg.kvRedis
       Right ([], _) -> do
         L.logDebugT "modifyOneKV" ("Modifying nothing - Row is deleted already for " <> tableName @(table Identity))
         pure (KV, Right Nothing)
@@ -363,7 +363,7 @@ modifyOneKV dbConf replicaDbConfig meshCfg whereClause mbSetClause updateWoRetur
         findFromDBIfMatchingFailsRes <- findFromDBIfMatchingFails meshCfg replicaDbConfig whereClause kvLiveRows
         case findFromDBIfMatchingFailsRes of
           (_, Right []) -> pure (KV, Right Nothing)
-          (SQL, Right [dbRow]) -> updateInKVOrSQL (Just dbRow) updVals setClause redisConn
+          (SQL, Right [dbRow]) -> updateInKVOrSQL (Just dbRow) updVals setClause meshCfg.kvRedis
           (KV, Right [obj]) ->
             (KV,) . mapRight Just
               <$> ( if isLive
