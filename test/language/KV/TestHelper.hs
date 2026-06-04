@@ -1,6 +1,7 @@
 module KV.TestHelper where
 
 import qualified Data.ByteString.Lazy as BSL
+import Data.Maybe (listToMaybe)
 import qualified Data.Serialize as Serialize
 import qualified Data.Text as Text
 import Database.Beam.MySQL (MySQLM)
@@ -41,7 +42,7 @@ getValueFromSecondaryKeys secKeys = do
 
 deleteTableEntryValueFromKV :: (KVConnector (table Identity)) => table Identity -> L.Flow ()
 deleteTableEntryValueFromKV sc = do
-  let pKey = getPKeyWithShard 128 sc
+  let pKey = getPKeyWithShard sc "" (0, 128)
   let secKeys = getSecondaryLookupKeys "" sc
   void $ fromEitherToMaybe <$> (L.runKVDB kvRedis $ L.del ([encodeUtf8 pKey]))
   void $ fromEitherToMaybe <$> (L.runKVDB kvRedis $ L.del (encodeUtf8 <$> secKeys))
@@ -73,6 +74,7 @@ withTableEntry ::
     FromJSON (table Identity),
     ToJSON (table Identity),
     KVConnector (table Identity),
+    TableMappings (table Identity),
     Show (table Identity),
     Serialize.Serialize (table Identity)
   ) =>

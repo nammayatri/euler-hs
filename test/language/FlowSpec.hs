@@ -245,7 +245,7 @@ spec loggerCfg = do
               let settings = T.withClientTls cert <> T.withCustomCA store
               mgr <- L.getHTTPManager settings
               _ <- L.getHTTPManager settings
-              L.callHTTPUsingManager' mgr req Nothingjj
+              L.callHTTPUsingManager mgr req Nothing
             resEither `shouldSatisfy` isRight
 
           it "authenticate client by an ad-hoc certificate with callAPI" $ \rt -> do

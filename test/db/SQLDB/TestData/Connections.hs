@@ -18,8 +18,12 @@ connectOrFail cfg =
 testDBName :: String
 testDBName = "./test/language/EulerHS/TestData/test.db"
 
-testDBTemplateName :: String
-testDBTemplateName = "./test/language/EulerHS/TestData/test.db.template"
+-- | Schema for the throwaway SQLite test DB. Built fresh from SQL on every run
+--   (see 'prepareTestDB') instead of copying a checked-in binary @.db.template@,
+--   so the fixture is text, deterministic, and survives a clean checkout.
+testDBSchema :: String
+testDBSchema =
+  "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, first_name VARCHAR NOT NULL, last_name VARCHAR NOT NULL);"
 
 rmTestDB :: L.Flow ()
 rmTestDB = void $ L.runSysCmd $ "rm -f " <> testDBName
@@ -27,7 +31,7 @@ rmTestDB = void $ L.runSysCmd $ "rm -f " <> testDBName
 prepareTestDB :: (T.DBConfig beM -> L.Flow ()) -> T.DBConfig beM -> L.Flow ()
 prepareTestDB insertValues cfg = do
   rmTestDB
-  void $ L.runSysCmd $ "cp " <> testDBTemplateName <> " " <> testDBName
+  void $ L.runSysCmd $ "sqlite3 " <> testDBName <> " " <> show testDBSchema
   insertValues cfg
 
 withEmptyDB :: (T.DBConfig beM -> L.Flow ()) -> T.DBConfig beM -> (R.FlowRuntime -> IO ()) -> IO ()

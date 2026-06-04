@@ -243,10 +243,13 @@ clubDB =
       }
 
 testDBName :: String
-testDBName = "./testDB/SQLDB/TestData/test.db"
+testDBName = "./test/db/SQLDB/TestData/test.db"
 
-testDBTemplateName :: String
-testDBTemplateName = "./testDB/SQLDB/TestData/query_examples.db.template"
+-- The pgexercises "clubdata" dataset as a SQLite-loadable text seed (schema +
+-- INSERTs), generated from the canonical Postgres dump. Loaded fresh per run,
+-- replacing the binary .db.template that was never committed to this repo.
+testDBSeed :: String
+testDBSeed = "./test/db/SQLDB/TestData/clubdata.sqlite.sql"
 
 poolConfig :: T.PoolConfig
 poolConfig =
@@ -271,7 +274,7 @@ rmTestDB = void $ L.runSysCmd $ "rm -f " <> testDBName
 prepareTestDB :: L.Flow ()
 prepareTestDB = do
   rmTestDB
-  void $ L.runSysCmd $ "cp " <> testDBTemplateName <> " " <> testDBName
+  void $ L.runSysCmd $ "sqlite3 " <> testDBName <> " < " <> testDBSeed
 
 --Basic string searches
 textSearchLike :: L.Flow (T.DBResult [Facility])

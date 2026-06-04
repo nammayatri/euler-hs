@@ -1,2 +1,7 @@
 packages:
   .
+
+-- Stream the `tests` suite's logs live (so `cabal test` shows the per-suite
+-- output + final summary instead of buffering it). Bare `cabal build` is
+-- unaffected and still builds only the library.
+test-show-details: direct

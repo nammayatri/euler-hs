@@ -69,7 +69,7 @@
             ];
             excludes = [
               "dist-newstyle/**"
-              "test-jsonb-live/Main.hs"
+              "test/jsonb-live/Main.hs"
               # ormolu 0.1.4.1 chokes on these (Haddock-mode parser
               # bugs + idempotency bug on record-update syntax). Same
               # pattern as nammayatri/Backend excluding `vira.hs`.
@@ -77,7 +77,7 @@
               "src/EulerHS/HttpAPI.hs"
               "test/language/Common.hs"
               "test/language/KV/TestSchema/ServiceConfiguration.hs"
-              "testDB/SQLDB/TestData/Scenarios/SQLite.hs"
+              "test/db/SQLDB/TestData/Scenarios/SQLite.hs"
             ];
           };
         };
@@ -112,6 +112,19 @@
             bytestring-conversion.broken = false;
             hedis.check = false;
             sequelize.check = false;
+            # The euler-hs test-suites (language/db/extra, gated behind the
+            # `enable-tests` cabal flag) pull in a few deps that are not part of
+            # the library's own dependency closure. Force them into the dev
+            # shell so `cabal build --enable-tests -f enable-tests` resolves
+            # against the nix-provided (jailbroken) packages instead of falling
+            # back to Hackage (which hits a servant-mock base<4.14 conflict).
+            euler-hs = { self, ... }: {
+              extraBuildDepends = [
+                self.servant-mock
+                self.generic-arbitrary
+                self.quickcheck-instances
+              ];
+            };
             servant-client = {
               jailbreak = true;
             };
