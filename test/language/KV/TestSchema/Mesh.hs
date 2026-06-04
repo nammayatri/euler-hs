@@ -5,7 +5,7 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
-import EulerHS.KVConnector.Types (MeshConfig (..))
+import EulerHS.KVConnector.Types (MeshConfig (..), SortedIndexMode (..))
 import System.Environment (getEnvironment)
 import System.IO.Unsafe (unsafePerformIO)
 import Text.Read (readMaybe)
@@ -26,7 +26,8 @@ meshConfig =
       kvHardKilled = False,
       tableShardModRange = (0, 128),
       redisKeyPrefix = "",
-      forceDrainToDB = False
+      forceDrainToDB = False,
+      sortedIndexMode = SetOnly
     }
 
 dbMeshTrackerTables :: Set.Set Text

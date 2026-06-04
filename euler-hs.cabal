@@ -1,6 +1,6 @@
 cabal-version: 3.0
 name:          euler-hs
-version:       3.0.0
+version:       2.13.0.4
 synopsis:      The Flow framework for Euler.
 description:
 homepage:      https://github.com/juspay/euler-hs
@@ -201,21 +201,22 @@ flag enable-tests
   description: Enable building the opt-in / infra-heavy suites (language, jsonb).
   default: False
 
--- The one command: `cabal test`.
+-- The one command: `cabal run tests`.
 -- Self-managing: checks Postgres + Redis are up (prints how to start them if
 -- not), auto-creates the euler_sorted_test DB, and each suite cleans its own PG
--- rows + Redis keys. Runs kv-live + encoding + recache + jsonb + db + extra.
+-- rows + Redis keys. Runs kv-live + sorted-set (all 3 phases) + db + extra.
 -- Plain `cabal build` does NOT build this (or any test-suite) — only the library.
 test-suite tests
   import:         common-lang
   type:           exitcode-stdio-1.0
   main-is:        Main.hs
-  hs-source-dirs: test/suite test/kv-live test/db test/extra test/jsonb-live
+  hs-source-dirs: test/suite test/kv-live test/sorted-set-live test/db test/extra test/jsonb-live
   other-modules:
     EncodingTests
     KvConnectorTH
     Schema
     KvLiveTests
+    SortedSetTests
     JsonbLiveTests
     Options
     SQLDB.TestData.Connections

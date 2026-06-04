@@ -12,9 +12,9 @@
 --
 -- What it runs (with per-suite logs + a final PASS/FAIL summary):
 --   • kv-live              — every EulerHS.KVConnector.Flow function, live PG+Redis
---   • encoding/compression — value codec round-trips
---   • recache flags        — IS_CACHING_DB_FIND_ENABLED / IS_RECACHING_ENABLED
---   • jsonb-live           — jsonb fallback (skips if the atlas DB is absent)
+--   • sorted-set-live      — ZSET sorted-secondary-index incl. zadd/zrange/zrem
+--                            parsing, across all 3 rollout phases (SetOnly /
+--                            DualWrite / ZSetOnly) as child processes
 --   • db                   — SQLite query-builder + pgexercises clubdata (hspec)
 --   • extra                — aeson option deriving (hspec)
 --
@@ -24,7 +24,7 @@
 module Main (main) where
 
 import Control.Exception (SomeException, try)
-import Control.Monad (unless, void)
+import Control.Monad (forM, unless, void)
 import Data.ByteString (ByteString)
 import Data.Text (Text)
 import qualified Database.PostgreSQL.Simple as PGS
@@ -38,6 +38,7 @@ import KvLiveTests (runKvLiveTests, runRecacheTests)
 import qualified Options
 import qualified SQLDB.Tests.QueryExamplesSpec as QueryExamples
 import qualified SQLDB.Tests.SQLiteDBSpec as SQLiteDB
+import SortedSetTests (runSortedSetTests)
 import System.Environment (getArgs, getEnvironment, getExecutablePath)
 import System.Exit (ExitCode (..), exitFailure, exitSuccess, exitWith)
 import System.IO (BufferMode (..), hSetBuffering, stdout)
@@ -50,6 +51,12 @@ main = do
   hSetBuffering stdout LineBuffering
   args <- getArgs
   case args of
+    -- Child invocation: run ONLY the sorted-set suite for the phase in
+    -- KV_SORTED_INDEX_MODE (the mode is read once per process, so each phase
+    -- needs its own process).
+    ("--sorted-phase" : _) -> do
+      ok <- runSortedSetTests
+      exitWith (if ok then ExitSuccess else ExitFailure 1)
     -- Child: recache flags are per-process CAFs, set in this child's env.
     ("--recache-phase" : _) -> do
       ok <- runRecacheTests
@@ -81,8 +88,16 @@ orchestrate = do
   -- 1b) value codec: JSON/CBOR/DEAD headers + zstd compression -------------
   encOk <- runEncodingTests
 
+  -- 2) Sorted-set across all 3 rollout phases (child processes) ------------
   self <- getExecutablePath
   baseEnv <- getEnvironment
+  sortedOks <- forM phases $ \(label, modeEnv) -> do
+    putStrLn $ "\n>>> launching sorted-set-live phase: " <> label
+    let env' = ("KV_SORTED_INDEX_MODE", modeEnv) : filter ((/= "KV_SORTED_INDEX_MODE") . fst) baseEnv
+    (_, _, _, ph) <-
+      createProcess (proc self ["--sorted-phase"]) {env = Just env', std_out = Inherit, std_err = Inherit}
+    code <- waitForProcess ph
+    pure ("sorted-set-live [" <> label <> "]", code == ExitSuccess)
 
   -- 2b) Recache flags in a child process (CAF env: caching-db-find + recaching) --
   putStrLn "\n>>> launching recache-flags phase (IS_CACHING_DB_FIND_ENABLED + IS_RECACHING_ENABLED)"
@@ -119,6 +134,7 @@ orchestrate = do
         [ ("kv-live (full KV connector surface)", kvOk),
           ("encoding + compression (JSON/CBOR/DEAD/zstd)", encOk)
         ]
+          <> sortedOks
           <> [ ("recache flags (caching-db-find + recaching)", recacheOk),
                ("jsonb-live (skipped if atlas DB absent)", jsonbOk),
                ("extra (hspec)", summaryFailures exSum == 0),
@@ -131,6 +147,8 @@ orchestrate = do
   if all snd rows
     then putStrLn "\n✅ ALL TESTS GREEN" >> exitSuccess
     else putStrLn "\n❌ FAILURES ABOVE — see logs" >> exitFailure
+  where
+    phases = [("SetOnly", ""), ("DualWrite", "DUAL"), ("ZSetOnly", "ZSET_ONLY")]
 
 -- =============================================================================
 -- Preflight: fail fast with actionable instructions if infra is down.

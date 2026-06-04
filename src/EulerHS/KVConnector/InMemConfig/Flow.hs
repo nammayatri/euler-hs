@@ -307,7 +307,7 @@ searchInMemoryCache meshCfg dbConf whereClause = do
           keyHashMap = keyMap @(table Identity)
       eitherKeyRes <-
         if fetchFromRedis
-          then mapM (getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap) andCombinations
+          then mapM (getPrimaryKeyFromFieldsAndValues modelName meshCfg (shouldReadZSet meshCfg.sortedIndexMode (isSortedTable @table)) keyHashMap) andCombinations
           else mapM (getPrimaryKeyInIMCFromFieldsAndValues modelName keyHashMap) andCombinations
       pure $ foldEither eitherKeyRes
 

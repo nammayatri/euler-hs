@@ -22,7 +22,8 @@ import Data.Aeson.Types (Parser)
 import Data.Data (Data)
 import qualified Data.HashMap.Strict as HM
 import qualified Data.Map.Strict as Map
-import Data.Time (UTCTime)
+import Data.Time (Day, LocalTime, UTCTime, localTimeToUTC, toModifiedJulianDay, utc)
+import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import qualified Database.Beam as B
 import Database.Beam.Backend (BeamSqlBackend, HasSqlValueSyntax (sqlValueSyntax), autoSqlValueSyntax)
 import qualified Database.Beam.Backend.SQL as B
@@ -49,6 +50,41 @@ class KVConnector table where
   primaryKey :: table -> PrimaryKey
   secondaryKeys :: table -> [SecondaryKey]
   mkSQLObject :: table -> A.Value
+
+  -- | Sorted-secondary-index support.
+  --   'Nothing'  => secondary indexes are plain Redis SETs (default / legacy behaviour).
+  --   'Just f'   => secondary indexes are maintained as sorted sets (ZSET) and @f@
+  --                 extracts the score (epoch-millis / day-number) from a row.
+  --   Populated by the @enableKVPGWithSortKey@ codegen macro; hand-written and
+  --   non-sorted ('enableKVPG') instances inherit the 'Nothing' default, so this is
+  --   fully backward compatible.
+  sortScore :: Maybe (table -> Double)
+  sortScore = Nothing
+
+  -- | Name of the column the ZSET is scored by (e.g. @"updatedAt"@). Used by the read
+  --   path to verify a query's @orderBy@ matches the ZSET ordering before pushing the
+  --   LIMIT/OFFSET into Redis. 'Nothing' for non-sorted tables.
+  sortScoreColumn :: Maybe Text
+  sortScoreColumn = Nothing
+
+----------------------------------------------
+
+-- | Columns usable as a ZSET sort score must reduce to a monotonic 'Double'.
+--   v1 supports time columns only. Equal scores tie-break by member (pkey) in Redis,
+--   so ordering stays deterministic.
+class ToZScore a where
+  toZScore :: a -> Double
+
+-- epoch milliseconds (fits a ZSET score's 52-bit double mantissa; do NOT use micros)
+instance ToZScore UTCTime where
+  toZScore = (* 1000) . realToFrac . utcTimeToPOSIXSeconds
+
+-- treat LocalTime as UTC-naive for ordering purposes (consistent, not TZ-correct)
+instance ToZScore LocalTime where
+  toZScore = (* 1000) . realToFrac . utcTimeToPOSIXSeconds . localTimeToUTC utc
+
+instance ToZScore Day where
+  toZScore = fromIntegral . toModifiedJulianDay
 
 ----------------------------------------------
 
@@ -101,6 +137,17 @@ instance ToJSON MeshError where
 
 data QueryPath = KVPath | SQLPath
 
+-- | Rollout mode for sorted-secondary-indexes (ZSETs). Read from env
+--   @KV_SORTED_INDEX_MODE@ (see 'EulerHS.KVConnector.Utils.sortedIndexMode').
+--   Only affects tables that opted in via a non-'Nothing' 'sortScore'.
+--
+--   * 'SetOnly'   — legacy: secondary indexes are plain SETs only (default).
+--   * 'DualWrite' — write BOTH SET and ZSET; reads still use the (complete) SET.
+--                   Canary/warm-up phase: safe while old (SET-only) pods coexist.
+--   * 'ZSetOnly'  — write/read ZSET only. Enter only after full rollout + >=1 TTL soak.
+data SortedIndexMode = SetOnly | DualWrite | ZSetOnly
+  deriving (Generic, Eq, Show, A.ToJSON, A.FromJSON)
+
 data MeshConfig = MeshConfig
   { meshEnabled :: Bool,
     cerealEnabled :: Bool,
@@ -114,7 +161,12 @@ data MeshConfig = MeshConfig
     kvHardKilled :: Bool,
     tableShardModRange :: (Int, Int),
     redisKeyPrefix :: Text,
-    forceDrainToDB :: Bool
+    forceDrainToDB :: Bool,
+    -- | Sorted-secondary-index (ZSET) rollout phase for THIS table. Set per-table
+    --   in shared-kernel from the @Tables@ config (kv_configs), so the phase can be
+    --   flipped centrally without a redeploy. Defaults to 'SetOnly' (legacy / safe);
+    --   non-sorted tables ignore it.
+    sortedIndexMode :: SortedIndexMode
   }
   deriving (Generic, Eq, Show, A.ToJSON)
 

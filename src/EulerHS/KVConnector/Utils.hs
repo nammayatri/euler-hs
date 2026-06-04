@@ -45,6 +45,7 @@ import EulerHS.KVConnector.Types
     Operation (..),
     PrimaryKey (..),
     SecondaryKey (..),
+    SortedIndexMode (..),
     Source (..),
   )
 import EulerHS.KVDB.Types (KVDBReply)
@@ -55,7 +56,7 @@ import EulerHS.SqlDB.Types (DBError (..), DBErrorType (..))
 import EulerHS.Types (ApiTag (..))
 import Juspay.Extra.Config (lookupEnvT)
 import Safe (atMay)
-import Sequelize (Clause (..), Model, Set (..), Term (..), Where, columnize, fromColumnar', modelTableName)
+import Sequelize (Clause (..), Model, OrderBy (..), Set (..), Term (..), Where, columnize, fromColumnar', modelTableName)
 import Sequelize.SQLObject (ToSQLObject (..))
 import System.Random (randomRIO)
 import Text.Casing (quietSnake)
@@ -321,6 +322,74 @@ secondaryKeysFiltered table = filter filterEmptyValues (secondaryKeys table)
   where
     filterEmptyValues :: SecondaryKey -> Bool
     filterEmptyValues (SKey sKeyPairs) = not $ any (\p -> snd p == "") sKeyPairs
+
+----------- Sorted-secondary-index (ZSET) helpers -----------
+
+-- | Reserved prefix marking a ZSET secondary index. Distinct from the SET key name
+--   so both can coexist during the @Dual@ rollout phase without Redis @WRONGTYPE@.
+zSetKeyMarker :: Text
+zSetKeyMarker = "Z::"
+
+-- | ZSET variant of a SET secondary-index key.
+toZSetKey :: Text -> Text
+toZSetKey = (zSetKeyMarker <>)
+
+-- | ZSET secondary-index keys for a row (mirrors 'getSecondaryLookupKeys').
+getSecondaryLookupKeysZ :: forall table. (KVConnector (table Identity)) => Text -> table Identity -> [Text]
+getSecondaryLookupKeysZ redisKeyPrefix table = map toZSetKey (getSecondaryLookupKeys redisKeyPrefix table)
+
+-- | 'True' iff this table opted into sorted secondary indexes (declared a 'sortScore').
+isSortedTable :: forall table. (KVConnector (table Identity)) => Bool
+isSortedTable = isJust (sortScore @(table Identity))
+
+-- | The ZSET score for a row, if the table is sorted.
+rowSortScore :: forall table. (KVConnector (table Identity)) => table Identity -> Maybe Double
+rowSortScore table = ($ table) <$> sortScore @(table Identity)
+
+-- | Should writes maintain the plain SET for this table in the given phase?
+--   (Always, unless we are in ZSetOnly for a sorted table.) The phase comes from
+--   'MeshConfig.sortedIndexMode' (set per-table in shared-kernel), NOT a global env.
+shouldWriteSet :: SortedIndexMode -> Bool -> Bool
+shouldWriteSet mode tableIsSorted = not (tableIsSorted && mode == ZSetOnly)
+
+-- | Should writes maintain the ZSET for this table in the given phase?
+shouldWriteZSet :: SortedIndexMode -> Bool -> Bool
+shouldWriteZSet mode tableIsSorted = tableIsSorted && mode /= SetOnly
+
+-- | Should reads resolve secondary keys from the ZSET (rather than the SET)?
+--   Only in ZSetOnly for a sorted table (in Dual the SET is still complete).
+shouldReadZSet :: SortedIndexMode -> Bool -> Bool
+shouldReadZSet mode tableIsSorted = tableIsSorted && mode == ZSetOnly
+
+-- | The beam field name an 'OrderBy' sorts on, e.g. @"updatedAt"@. Used to verify
+--   a query's ordering matches the ZSET's score column before LIMIT pushdown.
+orderByColumnName :: forall be table. (Model be table, MeshMeta be table) => OrderBy table -> Text
+orderByColumnName ob =
+  let dt = B.dbTableSettings (meshModelTableEntityDescriptor @table @be)
+   in case ob of
+        Asc column -> B._fieldName . fromColumnar' . column . columnize $ dt
+        Desc column -> B._fieldName . fromColumnar' . column . columnize $ dt
+
+-- | If a WHERE clause maps to exactly ONE secondary index that FULLY covers it
+--   (no residual in-memory predicate, no OR / In fan-out), return that index's ZSET
+--   key. This is the eligibility gate for bounded ZSET LIMIT pushdown — anything else
+--   returns 'Nothing' so the caller falls back to the safe path.
+singleCoveringZKey ::
+  forall be table.
+  (Model be table, MeshMeta be table, KVConnector (table Identity)) =>
+  MeshConfig ->
+  Where be table ->
+  Maybe Text
+singleCoveringZKey meshCfg whereClause =
+  case getFieldsAndValuesFromClause (meshModelTableEntityDescriptor @table @be) (And whereClause) of
+    [combo] ->
+      let sorted = sortBy (compare `on` fst) combo
+          fieldName = T.intercalate "_" (map fst sorted)
+          valuePart = T.intercalate "_" (map snd sorted)
+       in if HM.lookup fieldName (keyMap @(table Identity)) == Just False && not (any (T.null . snd) combo)
+            then Just $ toZSetKey (meshCfg.redisKeyPrefix <> tableName @(table Identity) <> "_" <> fieldName <> "_" <> valuePart)
+            else Nothing
+    _ -> Nothing
 
 applyFPair :: (t -> b) -> (t, t) -> (b, b)
 applyFPair f (x, y) = (f x, f y)
@@ -672,19 +741,29 @@ getFieldsAndValuesFromClause dt = \case
       A.Bool b -> T.pack $ show b
       A.Null -> T.pack ""
 
-getPrimaryKeyFromFieldsAndValues :: (L.MonadFlow m) => Text -> MeshConfig -> HM.HashMap Text Bool -> [(Text, Text)] -> m (MeshResult [ByteString])
-getPrimaryKeyFromFieldsAndValues _ _ _ [] = pure $ Right []
-getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = do
+-- | Resolve secondary/primary keys for a clause combination.
+--   @useZSet@ (caller passes 'shouldReadZSet') makes the secondary lookup read the
+--   ZSET index (@ZRANGE 0 -1@ → all members, behaviour-equivalent to @SMEMBERS@)
+--   instead of the SET. Primary-key resolution is unchanged.
+getPrimaryKeyFromFieldsAndValues :: (L.MonadFlow m) => Text -> MeshConfig -> Bool -> HM.HashMap Text Bool -> [(Text, Text)] -> m (MeshResult [ByteString])
+getPrimaryKeyFromFieldsAndValues _ _ _ _ [] = pure $ Right []
+getPrimaryKeyFromFieldsAndValues modelName meshCfg useZSet keyHashMap fieldsAndValues = do
   res <- foldEither <$> mapM getPrimaryKeyFromFieldAndValueHelper fieldsAndValues
   pure $ mapRight (intersectList . catMaybes) res
   where
+    -- read all members of a secondary index: ZRANGE (sorted) when on the ZSET path,
+    -- otherwise SMEMBERS. Both return the full member (pkey) list.
+    readSecondaryMembers conn setKey =
+      if useZSet
+        then L.runKVDB conn $ L.zrange (fromString $ T.unpack $ toZSetKey setKey) 0 (-1)
+        else L.runKVDB conn $ L.smembers (fromString $ T.unpack setKey)
     getPrimaryKeyFromFieldAndValueHelper (k, v) = do
       let constructedKey = meshCfg.redisKeyPrefix <> modelName <> "_" <> k <> "_" <> v
       case HM.lookup k keyHashMap of
         Just True -> pure $ Right $ Just [fromString $ T.unpack (constructedKey <> getShardedHashTag meshCfg.tableShardModRange constructedKey)]
         Just False -> do
           -- Check primary Redis first
-          primaryRes <- L.runKVDB meshCfg.kvRedis $ L.smembers (fromString $ T.unpack constructedKey)
+          primaryRes <- readSecondaryMembers meshCfg.kvRedis constructedKey
           case primaryRes of
             Left e -> pure $ Left $ RedisError $ (show e <> " for key: " <> show constructedKey)
             Right primaryKeys -> do
@@ -692,15 +771,17 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = 
               -- If secondary Redis is enabled, also check it and merge results
               if meshCfg.secondaryRedisEnabled && meshCfg.meshEnabled
                 then do
-                  secondaryRes <- L.runKVDB meshCfg.kvRedisSecondary $ L.smembers (fromString $ T.unpack constructedKey)
+                  secondaryRes <- readSecondaryMembers meshCfg.kvRedisSecondary constructedKey
                   case secondaryRes of
                     Left e -> pure $ Left $ RedisError $ (show e <> " for secondary key: " <> show constructedKey)
                     Right secondaryKeys -> do
                       observeSecondaryKeyElements modelName k "secondaryCluster" (length secondaryKeys)
-                      -- Merge primary keys from both Redis instances (union)
+                      -- Merge primary keys from both Redis instances (union, de-duplicated)
                       let mergedKeys = mkUniq (primaryKeys ++ secondaryKeys)
                       pure $ Right $ Just mergedKeys
-                else pure $ Right $ Just primaryKeys
+                else -- de-duplicate SMEMBERS/ZRANGE members defensively (a pkey could be
+                -- present more than once across overlapping index reads)
+                  pure $ Right $ Just (mkUniq primaryKeys)
         _ -> pure $ Right Nothing
 
     intersectList (x : y : xs) = intersectList (intersect x y : xs)
@@ -766,6 +847,17 @@ isCachingDbFindEnabled = fromMaybe False $ readMaybe =<< lookupEnvT @String "IS_
 
 isPipeliningEnabled :: Bool
 isPipeliningEnabled = fromMaybe True $ readMaybe =<< lookupEnvT @String "enablePipelining"
+
+-- | Global DEFAULT rollout phase, read once from env @KV_SORTED_INDEX_MODE@ ∈
+--   {SET_ONLY (default), DUAL, ZSET_ONLY}. The per-table phase now lives in
+--   'MeshConfig.sortedIndexMode' (set in shared-kernel from the Tables config);
+--   shared-kernel uses THIS as the fallback when a table has no per-table override,
+--   so existing env-based deployments keep working during migration.
+defaultSortedIndexMode :: SortedIndexMode
+defaultSortedIndexMode = case lookupEnvT @String "KV_SORTED_INDEX_MODE" of
+  Just "DUAL" -> DualWrite
+  Just "ZSET_ONLY" -> ZSetOnly
+  _ -> SetOnly
 
 shouldLogFindDBCallLogs :: Bool
 shouldLogFindDBCallLogs = fromMaybe False $ readMaybe =<< lookupEnvT @String "IS_FIND_DB_LOGS_ENABLED"

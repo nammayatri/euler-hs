@@ -52,7 +52,7 @@ import EulerHS.KVConnector.Flow
     updateWithKVConnector,
     updateWoReturningWithKVConnector,
   )
-import EulerHS.KVConnector.Types (MeshConfig (..), MeshMeta (..), MeshResult, TermWrap)
+import EulerHS.KVConnector.Types (MeshConfig (..), MeshMeta (..), MeshResult, SortedIndexMode (..), TermWrap)
 import EulerHS.KVConnector.Utils (getPKeyWithShard)
 import qualified EulerHS.Language as L
 import EulerHS.Prelude hiding (id, note, putStrLn, show)
@@ -111,7 +111,8 @@ meshCfg =
       kvHardKilled = False,
       tableShardModRange = (0, 128),
       redisKeyPrefix = "",
-      forceDrainToDB = False
+      forceDrainToDB = False,
+      sortedIndexMode = SetOnly -- kv_live is a plain (non-sorted) table; mode is a no-op for it
     }
 
 -- Treat the secondary Redis as this pod's primary (used to seed the "other cloud").
