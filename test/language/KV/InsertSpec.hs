@@ -50,7 +50,7 @@ spec = flowSpec $ do
     sc <- dummyServiceConfig
     withTableEntry sc $
       ( \serviceConfig _dbConf -> do
-          let pKey = getPKeyWithShard 128 serviceConfig
+          let pKey = getPKeyWithShard serviceConfig "" (0, 128)
           let secKeys = getSecondaryLookupKeys "" serviceConfig
           (valueFromPrimaryKey :: Maybe ServiceConfiguration) <- getValueFromPrimaryKey pKey
           valueFromSecondaryKeys <- (snd . partialHead) <$> getValueFromSecondaryKeys secKeys

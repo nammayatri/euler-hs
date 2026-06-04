@@ -1,6 +1,6 @@
 cabal-version: 3.0
 name:          euler-hs
-version:       2.13.0.4
+version:       3.0.0
 synopsis:      The Flow framework for Euler.
 description:
 homepage:      https://github.com/juspay/euler-hs
@@ -197,159 +197,137 @@ library
 
   hs-source-dirs:  src
 
-executable jsonb-live-test
-  import:           common-lang
-  main-is:          Main.hs
-  hs-source-dirs:   test-jsonb-live
+flag enable-tests
+  description: Enable building the opt-in / infra-heavy suites (language, jsonb).
+  default: False
+
+-- The one command: `cabal test`.
+-- Self-managing: checks Postgres + Redis are up (prints how to start them if
+-- not), auto-creates the euler_sorted_test DB, and each suite cleans its own PG
+-- rows + Redis keys. Runs kv-live + encoding + recache + jsonb + db + extra.
+-- Plain `cabal build` does NOT build this (or any test-suite) — only the library.
+test-suite tests
+  import:         common-lang
+  type:           exitcode-stdio-1.0
+  main-is:        Main.hs
+  hs-source-dirs: test/suite test/kv-live test/db test/extra test/jsonb-live
+  other-modules:
+    EncodingTests
+    KvConnectorTH
+    Schema
+    KvLiveTests
+    JsonbLiveTests
+    Options
+    SQLDB.TestData.Connections
+    SQLDB.TestData.Scenarios.SQLite
+    SQLDB.TestData.Types
+    SQLDB.Tests.QueryExamplesSpec
+    SQLDB.Tests.SQLiteDBSpec
   build-depends:
     , aeson
     , async
     , base16-bytestring
     , beam-core
     , beam-postgres
+    , beam-sqlite
     , bytestring
     , casing
+    , cereal
+    , containers
     , euler-hs
+    , hspec
     , postgresql-simple
+    , process
     , sequelize
+    , template-haskell
     , text
     , time
+    , unordered-containers
     , vector
-  ghc-options:      -threaded
+  ghc-options:    -threaded
 
-flag enable-tests
-  description: Enable building tests
-  default: False
+test-suite language
+  import:         common-lang
+  type:           exitcode-stdio-1.0
+  main-is:        Main.hs
+  if !flag(enable-tests)
+    buildable: False
+  other-modules:
+    ArtSpec
+    -- CachedDBSpec
+    Client
+    Common
+    DBSetup
+    EulerHS.TestData.Types
+    EulerHS.Testing.Flow.Interpreter
+    EulerHS.Testing.Types
+    HttpAPISpec
+    FlowSpec
+    KVDBArtSpec
+    MaskingSpec
+    PubSubSpec
+    Scenario1
+    SQLArtSpec
+    KV.FlowHelper
+    KV.TestSchema.ServiceConfiguration
+    KV.InsertSpec
+    KV.TestSchema.ThUtils
+    KV.TestSchema.Mesh
+    KV.TestHelper
+    KV.FindOneSpec
 
-if flag(enable-tests)
-  test-suite language
-    import:         common-lang
-    type:           exitcode-stdio-1.0
-    main-is:        Main.hs
-    other-modules:
-      ArtSpec
-      -- CachedDBSpec
-      Client
-      Common
-      DBSetup
-      EulerHS.TestData.Types
-      EulerHS.Testing.Flow.Interpreter
-      EulerHS.Testing.Types
-      HttpAPISpec
-      FlowSpec
-      KVDBArtSpec
-      MaskingSpec
-      PubSubSpec
-      Scenario1
-      SQLArtSpec
-      KV.FlowHelper
-      KV.TestSchema.ServiceConfiguration
-      KV.InsertSpec
-      KV.TestSchema.ThUtils
-      KV.TestSchema.Mesh
-      KV.TestHelper
-      KV.FindOneSpec
+  build-depends:
+    , aeson
+    , aeson-pretty
+    , zstd
+    , async
+    , beam-core
+    , beam-sqlite
+    , beam-mysql
+    , bytestring
+    , containers
+    , data-default
+    , directory
+    , euler-hs
+    , extra
+    , filepath
+    , generic-arbitrary
+    , generic-lens
+    , hedis
+    , hspec
+    , http-client
+    , http-client-tls
+    , named
+    , process
+    , QuickCheck
+    , quickcheck-instances
+    , random
+    , safe-exceptions
+    , sequelize
+    , servant
+    , servant-client
+    , servant-mock
+    , servant-server
+    , string-conversions
+    , text
+    , tls
+    , typed-process
+    , unordered-containers
+    , uuid
+    , vector
+    , warp
+    , warp-tls
+    , x509-store
+    , tls
+    , connection
+    , time
+    , tinylog
+    , template-haskell
+    , casing
+    , scientific
+    , hspec-core
+    , cereal
 
-    build-depends:
-      , aeson
-      , aeson-pretty
-      , zstd
-      , async
-      , beam-core
-      , beam-sqlite
-      , beam-mysql
-      , bytestring
-      , containers
-      , data-default
-      , directory
-      , euler-hs
-      , extra
-      , filepath
-      , generic-arbitrary
-      , generic-lens
-      , hedis
-      , hspec
-      , http-client
-      , http-client-tls
-      , named
-      , process
-      , QuickCheck
-      , quickcheck-instances
-      , random
-      , safe-exceptions
-      , sequelize             
-      , servant               
-      , servant-client        
-      , servant-mock         
-      , servant-server        
-      , string-conversions
-      , text
-      , tls
-      , typed-process
-      , unordered-containers
-      , uuid
-      , vector
-      , warp
-      , warp-tls
-      , x509-store
-      , tls
-      , connection
-      , time
-      , tinylog
-      , template-haskell
-      , casing
-      , scientific
-      , hspec-core
-      , cereal
+  ghc-options:    -threaded -O2
+  hs-source-dirs: test/language
 
-    ghc-options:    -threaded -O2
-    hs-source-dirs: test/language
-
-  test-suite db
-    import:         common-lang
-    type:           exitcode-stdio-1.0
-    main-is:        Main.hs
-    other-modules:
-      KVDB.KVDBSpec
-      SQLDB.TestData.Connections
-      SQLDB.TestData.Scenarios.MySQL
-      SQLDB.TestData.Scenarios.Postgres
-      SQLDB.TestData.Scenarios.SQLite
-      SQLDB.TestData.Types
-      SQLDB.Tests.MySQLDBSpec
-      SQLDB.Tests.PostgresDBSpec
-      SQLDB.Tests.QueryExamplesSpec
-      SQLDB.Tests.SQLiteDBSpec
-
-    build-depends:
-      , aeson
-      , beam-core
-      , beam-mysql
-      , beam-postgres
-      , beam-sqlite
-      , bytestring
-      , euler-hs
-      , hspec
-      , mysql-haskell
-      , postgresql-simple
-      , process
-      , servant
-      , servant-mock
-      , time
-
-    hs-source-dirs: testDB
-
-  test-suite extra
-    import:         common-lang
-    type:           exitcode-stdio-1.0
-    main-is:        Main.hs
-    other-modules:
-      Options
-
-    build-depends:
-      , aeson
-      , euler-hs
-      , hspec
-      , bytestring
-
-    hs-source-dirs: test/extra

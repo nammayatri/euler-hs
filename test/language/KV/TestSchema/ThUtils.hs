@@ -49,20 +49,22 @@ kvConnectorInstancesD name pKeyN sKeysN = do
       keyMap = mkName "keyMap"
       primaryKey = mkName "primaryKey"
       secondaryKeys = mkName "secondaryKeys"
+      mkSQLObject = mkName "mkSQLObject"
 
-  let pKeyPair = TupE [LitE $ StringL $ sortAndGetKey pKeyN, ConE 'True]
-      sKeyPairs = map (\k -> TupE [LitE $ StringL $ sortAndGetKey k, ConE 'False]) sKeysN
+  let pKeyPair = TupE [Just (LitE $ StringL $ sortAndGetKey pKeyN), Just (ConE 'True)]
+      sKeyPairs = map (\k -> TupE [Just (LitE $ StringL $ sortAndGetKey k), Just (ConE 'False)]) sKeysN
 
   let tableNameD = FunD tableName [Clause [] (NormalB (LitE (StringL $ init $ camel (nameBase name)))) []]
       keyMapD = FunD keyMap [Clause [] (NormalB (AppE (VarE 'HM.fromList) (ListE (pKeyPair : sKeyPairs)))) []]
       primaryKeyD = FunD primaryKey [Clause [] (NormalB getPrimaryKeyE) []]
       secondaryKeysD = FunD secondaryKeys [Clause [] (NormalB getSecondaryKeysE) []]
+      mkSQLObjectD = FunD mkSQLObject [Clause [] (NormalB (VarE 'A.toJSON)) []]
 
-  return [InstanceD Nothing [] (AppT (ConT ''KVConnector) (AppT (ConT name) (ConT $ mkName "Identity"))) [tableNameD, keyMapD, primaryKeyD, secondaryKeysD]]
+  return [InstanceD Nothing [] (AppT (ConT ''KVConnector) (AppT (ConT name) (ConT $ mkName "Identity"))) [tableNameD, keyMapD, primaryKeyD, secondaryKeysD, mkSQLObjectD]]
   where
     getPrimaryKeyE =
       let obj = mkName "obj"
-       in LamE [VarP obj] (AppE (ConE 'PKey) (ListE (map (\n -> TupE [keyNameTextE n, getRecFieldE n obj]) pKeyN)))
+       in LamE [VarP obj] (AppE (ConE 'PKey) (ListE (map (\n -> TupE [Just (keyNameTextE n), Just (getRecFieldE n obj)]) pKeyN)))
 
     getSecondaryKeysE =
       let obj = mkName "obj"
@@ -70,7 +72,7 @@ kvConnectorInstancesD name pKeyN sKeysN = do
             [VarP obj]
             ( ListE $
                 map
-                  (\sKey -> AppE (ConE 'SKey) (ListE (map (\n -> TupE [keyNameTextE n, getRecFieldE n obj]) sKey)))
+                  (\sKey -> AppE (ConE 'SKey) (ListE (map (\n -> TupE [Just (keyNameTextE n), Just (getRecFieldE n obj)]) sKey)))
                   sKeysN
             )
 

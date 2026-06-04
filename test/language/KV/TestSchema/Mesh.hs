@@ -20,8 +20,13 @@ meshConfig =
       meshDBName = "ECRDB",
       ecRedisDBStream = "db-sync-stream",
       kvRedis = "KVRedis",
+      kvRedisSecondary = "KVRedis",
+      secondaryRedisEnabled = False,
       redisTtl = 43200,
-      kvHardKilled = False
+      kvHardKilled = False,
+      tableShardModRange = (0, 128),
+      redisKeyPrefix = "",
+      forceDrainToDB = False
     }
 
 dbMeshTrackerTables :: Set.Set Text

@@ -23,9 +23,11 @@ import qualified EulerHS.Language as L
 import           Sequelize (ModelMeta (modelFieldModification, modelTableName, mkExprWithDefault), Clause(..), Term(..),Set (..))
 import           KV.FlowHelper
 import           KV.TestSchema.ThUtils
-import           EulerHS.KVConnector.Types (KVConnector(..), MeshMeta(..), PrimaryKey(..), SecondaryKey(..), TermWrap(..), MeshMeta, tableName, primaryKey, secondaryKeys)
+import           EulerHS.KVConnector.Types (KVConnector(..), MeshMeta(..), PrimaryKey(..), SecondaryKey(..), TermWrap(..), MeshMeta, TableMappings(..), tableName, primaryKey, secondaryKeys)
 import           KV.TestSchema.Mesh
 import qualified Data.Aeson as A
+import qualified Data.Aeson.Key as AK
+import qualified Data.Aeson.KeyMap as AKM
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import qualified Data.HashMap.Strict as HM
@@ -76,6 +78,10 @@ serviceConfigurationToMesh = B.tableModification
 type ServiceConfiguration = ServiceConfigurationT Identity
 type ServiceConfigurationId = B.PrimaryKey ServiceConfigurationT Identity
 
+instance TableMappings (ServiceConfigurationT Identity) where
+  getTableName = "service_configuration"
+  getTableMappings = []
+
 deriving stock instance Show ServiceConfiguration
 deriving stock instance Eq ServiceConfiguration
 -- deriving anyclass instance ToJSON ServiceConfiguration
@@ -84,8 +90,8 @@ deriving stock instance Read ServiceConfiguration
 deriving stock instance Ord ServiceConfiguration
 
 toHSJSONServiceConfiguration :: A.Value -> A.Value
-toHSJSONServiceConfiguration (A.Object hm) = A.Object (modifyField `HM.mapWithKey` hm)
-  where modifyField = (\k -> M.findWithDefault _id k serviceConfigurationToHSModifiers )
+toHSJSONServiceConfiguration (A.Object hm) = A.Object (AKM.mapWithKey modifyField hm)
+  where modifyField = (\k -> M.findWithDefault _id (AK.toText k) serviceConfigurationToHSModifiers )
         _id = \x -> x
 toHSJSONServiceConfiguration _ = error "expected ServiceConfiguration to be a object"
 
@@ -123,8 +129,8 @@ serviceConfigurationToPSModifiers = M.fromList
  
  -- | Postprocess serialized ServiceConfiguration JSON to be compatible with Purescript.
 toPSJSONServiceConfiguration :: A.Value -> A.Value
-toPSJSONServiceConfiguration (A.Object hm) = A.Object (modifyField `HM.mapWithKey` hm)
-  where modifyField = (\k -> M.findWithDefault _id k serviceConfigurationToPSModifiers )
+toPSJSONServiceConfiguration (A.Object hm) = A.Object (AKM.mapWithKey modifyField hm)
+  where modifyField = (\k -> M.findWithDefault _id (AK.toText k) serviceConfigurationToPSModifiers )
         _id = \x -> x
 toPSJSONServiceConfiguration _ = error "expected ServiceConfiguration to be a object"
  

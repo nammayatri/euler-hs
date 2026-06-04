@@ -15,7 +15,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-unused-imports -Wno-orphans -Wno-name-shadowing -Wno-missing-signatures -Wno-incomplete-record-updates #-}
 
-module Main (main) where
+module JsonbLiveTests (runJsonbTests) where
 
 import Control.Concurrent.Async (mapConcurrently)
 import qualified Data.Aeson as A
@@ -84,7 +84,7 @@ data PersonT f = PersonT
 
 instance B.Table PersonT where
   data PrimaryKey PersonT f = PersonId (B.C f Text) deriving (Generic, B.Beamable)
-  primaryKey = PersonId . Main.id
+  primaryKey = PersonId . JsonbLiveTests.id
 
 type Person = PersonT Identity
 
@@ -235,7 +235,7 @@ whereM1 :: Where BP.Postgres PersonT
 whereM1 = [Is merchantId (Eq ("M1" :: Text))]
 
 wherePid :: Text -> Where BP.Postgres PersonT
-wherePid v = [Is Main.id (Eq v)]
+wherePid v = [Is JsonbLiveTests.id (Eq v)]
 
 -- =============================================================================
 -- Schema mutation helpers (local sandbox)
@@ -273,7 +273,7 @@ reportEither label = \case
     putStrLn $ "  " <> label <> ": OK rows=" <> show (length rs)
     forM_ rs $ \p ->
       putStrLn $
-        "    - " <> T.unpack (Main.id p)
+        "    - " <> T.unpack (JsonbLiveTests.id p)
           <> "  desc="
           <> show (description p)
           <> "  tags="
@@ -303,8 +303,38 @@ checkHits ref expected label = do
 resetHits :: IORef Int -> IO ()
 resetHits ref = atomicModifyIORef' ref (const (0, ()))
 
-main :: IO ()
-main = do
+-- Is the atlas BPP database (with the seeded person rows p1/p2) present? The
+-- jsonb-live tests ALTER an existing atlas_driver_offer_bpp.person table, so we
+-- skip cleanly when it isn't there (e.g. on a dev box) rather than fail.
+atlasAvailable :: IO Bool
+atlasAvailable =
+  ( do
+      c <- PGS.connectPostgreSQL "host=localhost port=5432 user=postgres dbname=atlas_driver_offer_bpp_v1"
+      ns <- PGS.query_ c "SELECT count(*) FROM atlas_driver_offer_bpp.person WHERE id IN ('p1','p2')" :: IO [PGS.Only Int]
+      PGS.close c
+      pure $ case ns of [PGS.Only n] -> n >= 1; _ -> False
+  )
+    `catch` (\(_ :: SomeException) -> pure False)
+
+-- | Run the jsonb-fallback suite against atlas_driver_offer_bpp.person. Returns
+--   True on all-pass OR when the atlas DB isn't present (skipped). False on a
+--   real failure.
+runJsonbTests :: IO Bool
+runJsonbTests = do
+  putStrLn "\n############################################################"
+  putStrLn "#  jsonb-live — jsonb fallback vs schema drift (atlas person)"
+  putStrLn "############################################################"
+  avail <- atlasAvailable
+  if not avail
+    then do
+      putStrLn "⏭  SKIPPED — atlas_driver_offer_bpp_v1.person (rows p1,p2) not present on localhost:5432."
+      putStrLn "   The kv_live suite's test [34] already covers the jsonb-fallback mechanism;"
+      putStrLn "   to run THIS end-to-end suite, point it at a BPP database with a seeded person table."
+      pure True
+    else runJsonbTestsBody
+
+runJsonbTestsBody :: IO Bool
+runJsonbTestsBody = do
   setEnv "KV_METRIC_ENABLED" "True"
   putStrLn "=== Live jsonb-fallback test against atlas_driver_offer_bpp.person ==="
   resetSchema
@@ -344,7 +374,7 @@ main = do
   resetHits hitRef
   rE <- runFlow handler $ DBQ.findOneSql dbConf (wherePid "p1")
   let okE1 = case rE of
-        Right (Just p) -> Main.id p == "p1"
+        Right (Just p) -> JsonbLiveTests.id p == "p1"
         _ -> False
   okE2 <- checkHits hitRef False "E"
   putStrLn $ "  E -> " <> show rE
@@ -590,5 +620,5 @@ main = do
           okU2
         ]
       passed = length (filter (== True) results)
-  putStrLn $ "\n=== Summary: " <> show passed <> "/" <> show (length results) <> " passed ==="
-  unless (and results) exitFailure
+  putStrLn $ "\n=== jsonb-live: " <> show passed <> "/" <> show (length results) <> " passed ==="
+  pure (and results)
