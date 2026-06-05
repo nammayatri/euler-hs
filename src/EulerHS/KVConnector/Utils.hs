@@ -414,30 +414,36 @@ data SecondaryLookupKey = SecondaryLookupKey
   }
 
 -- | Like 'getSecondaryLookupKeys' but resolves each secondary key's config
---   (ordered?/score/ttl). @defaultTtl@ is @meshCfg.redisTtl@; @nowMillis@ is the
---   write timestamp (epoch millis).
+--   (ordered?/score/ttl). @nowMillis@ is the write timestamp (epoch millis).
+--   Honours the table-level KV config: skips any index whose field-combo is in
+--   @meshCfg.disableSecondaryKeys@, and coerces every index to a plain SET
+--   (@slkOrdered = False@) when @meshCfg.forceUnorderedSecondaryKeys@ is set.
 getSecondaryLookupKeysWithConfig ::
   forall table.
   (KVConnector (table Identity)) =>
-  Text ->
-  Integer ->
+  MeshConfig ->
   Integer ->
   table Identity ->
   [SecondaryLookupKey]
-getSecondaryLookupKeysWithConfig redisKeyPrefix defaultTtl nowMillis table =
-  let tName = tableName @(table Identity)
+getSecondaryLookupKeysWithConfig meshCfg nowMillis table =
+  let redisKeyPrefix = meshCfg.redisKeyPrefix
+      defaultTtl = meshCfg.redisTtl
+      forceUnordered = meshCfg.forceUnorderedSecondaryKeys
+      disabled = meshCfg.disableSecondaryKeys
+      tName = tableName @(table Identity)
       cfgMap = secondaryKeyConfigs @(table Identity)
       rowJson = mkSQLObject table -- lazy: only forced for keys with a score field or partial predicate
    in DM.mapMaybe
         ( \(SKey pairs) ->
-            let mbCfg = HM.lookup (skeyFieldCombo pairs) cfgMap
+            let combo = skeyFieldCombo pairs
+                mbCfg = HM.lookup combo cfgMap
                 partial = maybe [] skPartial mbCfg
-             in -- Skip partial indexes whose predicate the row does not satisfy.
-                if not (null partial) && not (rowSatisfiesPartial rowJson partial)
+             in -- Skip disabled indexes, and partial indexes whose predicate the row does not satisfy.
+                if combo `elem` disabled || (not (null partial) && not (rowSatisfiesPartial rowJson partial))
                   then Nothing
                   else
                     let keyStr = redisKeyPrefix <> tName <> keyDelim <> getSortedKey pairs <> partialSuffix partial
-                        ordered = maybe False skOrdered mbCfg
+                        ordered = not forceUnordered && maybe False skOrdered mbCfg
                         score = getScoreForRow rowJson (mbCfg >>= skScoreField) nowMillis
                         ttl = maybe defaultTtl (\c -> getSecondaryKeyTtl (skExpiry c) defaultTtl nowMillis) mbCfg
                      in Just $ SecondaryLookupKey keyStr ordered score ttl
@@ -817,8 +823,11 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap cfgMap fieldsAndVa
       let constructedKey = meshCfg.redisKeyPrefix <> modelName <> "_" <> k <> "_" <> v
       case HM.lookup k keyHashMap of
         Just True -> pure $ Right $ Just [fromString $ T.unpack (constructedKey <> getShardedHashTag meshCfg.tableShardModRange constructedKey)]
+        -- Disabled secondary index: skip Redis entirely so the lookup contributes
+        -- no constraint and the query falls through to the DB.
+        Just False | k `elem` meshCfg.disableSecondaryKeys -> pure $ Right Nothing
         Just False -> do
-          let ordered = maybe False skOrdered (HM.lookup k cfgMap)
+          let ordered = not meshCfg.forceUnorderedSecondaryKeys && maybe False skOrdered (HM.lookup k cfgMap)
               key = fromString $ T.unpack constructedKey
           -- Check primary Redis first
           primaryRes <- readSkeyMembers meshCfg.kvRedis ordered key

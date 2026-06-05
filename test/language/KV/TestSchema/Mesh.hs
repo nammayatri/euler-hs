@@ -26,7 +26,10 @@ meshConfig =
       kvHardKilled = False,
       tableShardModRange = (0, 128),
       redisKeyPrefix = "",
-      forceDrainToDB = False
+      forceDrainToDB = False,
+      disableSecondaryKeys = [],
+      forceUnorderedSecondaryKeys = False,
+      inOrderedReadStrategy = Nothing
     }
 
 dbMeshTrackerTables :: Set.Set Text

@@ -55,7 +55,7 @@ import EulerHS.KVConnector.Helper.Utils
 import EulerHS.KVConnector.InMemConfig.Flow (fetchRowFromDBAndAlterImc, pushToInMemConfigStream, searchInMemoryCache)
 import EulerHS.KVConnector.InMemConfig.Types (ImcStreamCommand (..))
 import qualified EulerHS.KVConnector.Metrics as Metrics
-import EulerHS.KVConnector.Types (DBCommandVersion (..), KVConnector (..), MeshConfig (..), MeshError (..), MeshMeta (..), MeshResult, PartialCond (..), SecondaryKey (..), SecondaryKeyConfig (..), SecondaryKeyExpiry (..), Source (..), TableMappings (..), keyMap, tableName)
+import EulerHS.KVConnector.Types (DBCommandVersion (..), InReadStrategy (..), KVConnector (..), MeshConfig (..), MeshError (..), MeshMeta (..), MeshResult, PartialCond (..), SecondaryKey (..), SecondaryKeyConfig (..), SecondaryKeyExpiry (..), Source (..), TableMappings (..), keyMap, tableName)
 import EulerHS.KVConnector.Utils
 import EulerHS.KVDB.Types (KVDBReply)
 import qualified EulerHS.Language as L
@@ -177,7 +177,7 @@ createKV meshCfg value = do
       revMappingRes <-
         mapM
           (writeSecondaryIndexEntry meshCfg.kvRedis pKey)
-          $ getSecondaryLookupKeysWithConfig meshCfg.redisKeyPrefix meshCfg.redisTtl (round time) val
+          $ getSecondaryLookupKeysWithConfig meshCfg (round time) val
       case foldEither revMappingRes of
         Left err -> pure $ Left $ RedisError (show err <> "Primary key => " <> show pKey <> " Secondary key => " <> show (getSecondaryLookupKeys meshCfg.redisKeyPrefix val) <> " in createKV")
         Right _ -> do
@@ -214,7 +214,7 @@ createInRedis meshCfg val = do
   revMappingRes <-
     mapM
       (writeSecondaryIndexEntry meshCfg.kvRedis pKey)
-      $ getSecondaryLookupKeysWithConfig meshCfg.redisKeyPrefix meshCfg.redisTtl nowMillis val
+      $ getSecondaryLookupKeysWithConfig meshCfg nowMillis val
   case foldEither revMappingRes of
     Left err -> pure $ Left $ RedisError (show err <> "Primary key => " <> show pKey <> " Secondary key => " <> show (getSecondaryLookupKeys meshCfg.redisKeyPrefix val))
     Right _ -> do
@@ -600,9 +600,11 @@ updateObjectRedis meshCfg redisConn updVals setClauses addPrimaryKeyToWhereClaus
               Left e -> pure $ Left e
               Right _ -> toUnitRes <$> L.rExpireB redisConn k ttl
 
+          step (_, newPairs)
+            | skeyFieldCombo newPairs `elem` meshCfg.disableSecondaryKeys = pure $ Right () -- disabled index: leave untouched
           step (oldPairs, newPairs) = do
             let cfg = HM.lookup (skeyFieldCombo newPairs) cfgMap -- old/new share fields => same combo
-                ordered = maybe False skOrdered cfg
+                ordered = not meshCfg.forceUnorderedSecondaryKeys && maybe False skOrdered cfg
                 partial = maybe [] skPartial cfg
                 ttl = maybe meshCfg.redisTtl (\c -> getSecondaryKeyTtl (skExpiry c) meshCfg.redisTtl nowMillis) cfg
                 score = getScoreForRow newRowJson (cfg >>= skScoreField) nowMillis
@@ -1426,7 +1428,10 @@ tryOrderedIndexFastPath ::
   Maybe Int ->
   m (Maybe (MeshResult [table Identity]))
 tryOrderedIndexFastPath meshCfg whereClause orderBy mbLimit mbOffset =
-  if meshCfg.kvHardKilled || not meshCfg.meshEnabled || meshCfg.secondaryRedisEnabled
+  -- The fast path reads a ZSET; it is invalid when secondary indexes are forced
+  -- to plain SETs for this table. (Per-index disabling is handled in
+  -- findMatchingOrderedCfg below.)
+  if meshCfg.kvHardKilled || not meshCfg.meshEnabled || meshCfg.secondaryRedisEnabled || meshCfg.forceUnorderedSecondaryKeys
     then pure Nothing
     else do
       let modelName = tableName @(table Identity)
@@ -1468,6 +1473,7 @@ tryOrderedIndexFastPath meshCfg whereClause orderBy mbLimit mbOffset =
       DMaybe.listToMaybe
         [ (cfg, indexPairs)
           | (combo, cfg) <- HM.toList cfgMap,
+            combo `notElem` meshCfg.disableSecondaryKeys,
             skOrdered cfg,
             let predConds = skPartial cfg,
             let predFields = map pcField predConds,
@@ -1872,7 +1878,7 @@ reCacheDBRows meshCfg dbRows = do
           res <-
             mapM
               (writeSecondaryIndexEntry meshCfg.kvRedis pKey)
-              $ getSecondaryLookupKeysWithConfig meshCfg.redisKeyPrefix meshCfg.redisTtl nowMillis obj
+              $ getSecondaryLookupKeysWithConfig meshCfg nowMillis obj
           return $ sequence res
       )
       dbRows

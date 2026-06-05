@@ -91,6 +91,22 @@ data SecondaryKeyConfig = SecondaryKeyConfig
 defaultOrderedKeyConfig :: SecondaryKeyConfig
 defaultOrderedKeyConfig = SecondaryKeyConfig {skOrdered = True, skScoreField = Nothing, skExpiry = DefaultTTL, skPartial = []}
 
+-- | Read strategy for @col IN (..)@ queries on a secondary index, selected
+-- per-table via @kv_configs@ ('MeshConfig.inOrderedReadStrategy'). 'Nothing'
+-- (the field default) keeps the legacy fan-out + KV\/DB merge.
+data InReadStrategy
+  = -- | KV is authoritative: fan out the @IN@ per value, merge, apply the
+    -- residual where clause, then order + window (limit\/offset) in memory,
+    -- entirely from KV. Falls back to the KV+DB merge only when a requested
+    -- limit\/offset page can't be filled from the index ("index exhausted => DB").
+    InKvScan
+  | -- | DB is authoritative for completeness\/ordering: run the @IN@ query (with
+    -- order\/limit\/offset) on the DB, then overlay each returned row's latest
+    -- value from KV by primary key (KV live wins; KV tombstone drops the row;
+    -- absent keeps the DB row). On DB error, fall back to 'InKvScan'.
+    InDbFirstKvOverlay
+  deriving (Generic, Eq, Show, ToJSON, FromJSON)
+
 class KVConnector table where
   tableName :: Text
   keyMap :: HM.HashMap Text Bool -- True implies it is primary key and False implies secondary
@@ -169,7 +185,24 @@ data MeshConfig = MeshConfig
     kvHardKilled :: Bool,
     tableShardModRange :: (Int, Int),
     redisKeyPrefix :: Text,
-    forceDrainToDB :: Bool
+    forceDrainToDB :: Bool,
+    -- | Secondary indexes to disable for this table, identified by their
+    -- field-combo string -- the sorted underscore-joined field names, i.e. the
+    -- same key used in 'keyMap' \/ 'secondaryKeyConfigs' (e.g. @"status"@, or
+    -- @"merchantId_orderId"@ for a composite key). A disabled index is never
+    -- created\/recached\/maintained on writes (create, update, recache-on-miss)
+    -- and is never read (lookups on it skip Redis and route to the DB). Empty =>
+    -- all secondary indexes enabled (legacy behaviour). Combos not present on the
+    -- table are simply ignored.
+    disableSecondaryKeys :: [Text],
+    -- | Force every secondary index to a plain Redis SET regardless of the
+    -- per-key 'skOrdered' flag, i.e. override ZSET-back indexes down to SET. The
+    -- ordered (ZSET) fast path is disabled while this is on. Lets a table flip
+    -- index type via config without recompiling the TH-generated instance.
+    forceUnorderedSecondaryKeys :: Bool,
+    -- | Per-table read strategy for @col IN (..)@ queries on a secondary index
+    -- (see 'InReadStrategy'). 'Nothing' => legacy fan-out + KV\/DB merge.
+    inOrderedReadStrategy :: Maybe InReadStrategy
   }
   deriving (Generic, Eq, Show, A.ToJSON)
 

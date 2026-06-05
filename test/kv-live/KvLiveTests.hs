@@ -111,7 +111,10 @@ meshCfg =
       kvHardKilled = False,
       tableShardModRange = (0, 128),
       redisKeyPrefix = "",
-      forceDrainToDB = False
+      forceDrainToDB = False,
+      disableSecondaryKeys = [],
+      forceUnorderedSecondaryKeys = False,
+      inOrderedReadStrategy = Nothing
     }
 
 -- Treat the secondary Redis as this pod's primary (used to seed the "other cloud").
@@ -271,6 +274,9 @@ runKvLiveTests = do
         tFindAllUnionDedup,
         tFindAllFromKvRedis,
         tFindAllConditionalDb,
+        tFindOneHalfDrained,
+        tFindAllHalfDrained,
+        tFindAllInHalfDrained,
         tFindAllWithOptions,
         tFindAllWithOptionsNoOrder,
         tResidualFilter,
@@ -479,6 +485,90 @@ tResidualFilter = do
     forM_ rows (createWithKVConnector dbConf meshCfg)
     findAllWithKVConnector dbConf meshCfg [Is groupId (Eq ("gR16" :: Text)), Is cnt (Eq (7 :: Int))]
   check "groupId=gR16 AND cnt=7 ⇒ {r1}" $ sortedIds res =?= ["r1"]
+
+-- =============================================================================
+-- HALF-DRAINED DATASET — find* over a table where some matching rows have been
+-- drained to Postgres (DB-only) and some have NOT (KV/Redis-only). Models the
+-- real steady state: createWithKVConnector writes Redis + a drain-stream entry;
+-- the (separate) drainer later lands it in PG. So at any instant a query's
+-- result set spans tiers, and the connector must union them (and dedup a row
+-- that is in BOTH because it was drained while still cached). insertDbRow puts a
+-- row in PG only (drained + evicted); createWithKVConnector puts it in KV only
+-- (not yet drained); doing both = drained but still cached.
+-- =============================================================================
+
+-- [35] findWithKVConnector (findOne): every row resolves regardless of tier —
+-- KV-only via a Redis hit, DB-only via the DB fallback — and a findOne by a
+-- secondary index over the mixed group returns one valid member.
+tFindOneHalfDrained :: IO Bool
+tFindOneHalfDrained = do
+  putStrLn "\n[35] findOne — half-drained group: KV-only rows hit Redis, DB-only (drained) rows hit the DB fallback"
+  let kv1 = mkRow "fo_kv1" "gFO35" "active" 1 (Just "kv") 100
+      kv2 = mkRow "fo_kv2" "gFO35" "active" 2 (Just "kv") 200
+      db1 = mkRow "fo_db1" "gFO35" "active" 3 (Just "db") 300
+      db2 = mkRow "fo_db2" "gFO35" "active" 4 (Just "db") 400
+  (fkv1, fkv2, fdb1, fdb2, bySecondary) <- runFlow $ do
+    forM_ [kv1, kv2] (createWithKVConnector dbConf meshCfg) -- KV only (not drained)
+    forM_ [db1, db2] (L.runIO . insertDbRow) -- DB only (drained, evicted from KV)
+    a <- findWithKVConnector dbConf meshCfg [Is id (Eq ("fo_kv1" :: Text))]
+    b <- findWithKVConnector dbConf meshCfg [Is id (Eq ("fo_kv2" :: Text))]
+    c <- findWithKVConnector dbConf meshCfg [Is id (Eq ("fo_db1" :: Text))]
+    d <- findWithKVConnector dbConf meshCfg [Is id (Eq ("fo_db2" :: Text))]
+    e <- findWithKVConnector dbConf meshCfg [Is groupId (Eq ("gFO35" :: Text))]
+    pure (a, b, c, d, e)
+  ok1 <- check "KV-only fo_kv1 ⇒ Just (Redis hit)" $ fkv1 =?= Just kv1
+  ok2 <- check "KV-only fo_kv2 ⇒ Just (Redis hit)" $ fkv2 =?= Just kv2
+  ok3 <- check "DB-only fo_db1 ⇒ Just (DB fallback)" $ fdb1 =?= Just db1
+  ok4 <- check "DB-only fo_db2 ⇒ Just (DB fallback)" $ fdb2 =?= Just db2
+  ok5 <- check "findOne by secondary over mixed group ⇒ one valid member" $ case bySecondary of
+    Right (Just r) -> id r `elem` (["fo_kv1", "fo_kv2", "fo_db1", "fo_db2"] :: [Text])
+    _ -> False
+  pure (ok1 && ok2 && ok3 && ok4 && ok5)
+
+-- [36] findAllWithKVConnector: the full result set = KV-only ∪ DB-only, and a
+-- row that is in BOTH tiers (drained but still cached) appears exactly once.
+tFindAllHalfDrained :: IO Bool
+tFindAllHalfDrained = do
+  putStrLn "\n[36] findAll — half-drained group ⇒ KV ∪ DB union; a drained-but-still-cached row is deduped to one"
+  let kvOnly = [mkRow "fa_kv1" "gFA36" "active" 1 Nothing 100, mkRow "fa_kv2" "gFA36" "active" 2 Nothing 200, mkRow "fa_kv3" "gFA36" "active" 3 Nothing 300]
+      dbOnly = [mkRow "fa_db1" "gFA36" "active" 4 Nothing 400, mkRow "fa_db2" "gFA36" "active" 5 Nothing 500, mkRow "fa_db3" "gFA36" "active" 6 Nothing 600]
+      both = mkRow "fa_both" "gFA36" "active" 7 Nothing 700
+  res <- runFlow $ do
+    forM_ kvOnly (createWithKVConnector dbConf meshCfg) -- not drained (KV only)
+    forM_ dbOnly (L.runIO . insertDbRow) -- drained + evicted (DB only)
+    _ <- createWithKVConnector dbConf meshCfg both -- drained but still cached: in KV
+    L.runIO $ insertDbRow both -- ...and in DB
+    findAllWithKVConnector dbConf meshCfg [Is groupId (Eq ("gFA36" :: Text))]
+  ok1 <-
+    check "KV ∪ DB across tiers ⇒ all 7 ids" $
+      sortedIds res =?= ["fa_both", "fa_db1", "fa_db2", "fa_db3", "fa_kv1", "fa_kv2", "fa_kv3"]
+  ok2 <- check "the both-tiers row is not duplicated (length == 7)" $ case res of
+    Right rs -> length rs == 7
+    Left _ -> False
+  pure (ok1 && ok2)
+
+-- [37] findAll with IN queries over a half-drained dataset: an IN on the primary
+-- key and an IN on a secondary key both return every existing row across tiers,
+-- and silently ignore values that match nothing.
+tFindAllInHalfDrained :: IO Bool
+tFindAllInHalfDrained = do
+  putStrLn "\n[37] findAll with IN (Is _ (In [...])) over half-drained data ⇒ all existing rows across tiers; absent values ignored"
+  let kvOnly = [mkRow "in_kv1" "gIN37" "active" 1 Nothing 100, mkRow "in_kv2" "gIN37" "active" 2 Nothing 200]
+      dbOnly = [mkRow "in_db1" "gIN37" "active" 3 Nothing 300, mkRow "in_db2" "gIN37" "active" 4 Nothing 400]
+      queriedIds = ["in_kv1", "in_kv2", "in_db1", "in_db2", "in_absent"] :: [Text]
+  (byIdIn, byGroupIn) <- runFlow $ do
+    forM_ kvOnly (createWithKVConnector dbConf meshCfg) -- not drained (KV only)
+    forM_ dbOnly (L.runIO . insertDbRow) -- drained + evicted (DB only)
+    a <- findAllWithKVConnector dbConf meshCfg [Is id (In queriedIds)]
+    b <- findAllWithKVConnector dbConf meshCfg [Is groupId (In (["gIN37", "gNONE37"] :: [Text]))]
+    pure (a, b)
+  ok1 <-
+    check "IN over PKs spanning KV-only + DB-only ⇒ the 4 existing rows (absent id dropped)" $
+      sortedIds byIdIn =?= ["in_db1", "in_db2", "in_kv1", "in_kv2"]
+  ok2 <-
+    check "IN over secondary groupId (one populated, one empty) ⇒ same 4 rows across tiers" $
+      sortedIds byGroupIn =?= ["in_db1", "in_db2", "in_kv1", "in_kv2"]
+  pure (ok1 && ok2)
 
 -- =============================================================================
 -- UPDATE
