@@ -213,6 +213,9 @@ instance OptionEntity KVMetricCfg KVMetricHandler
 isKVMetricEnabled :: Bool
 isKVMetricEnabled = fromMaybe False $ readMaybe =<< Conf.lookupEnvT @String "KV_METRIC_ENABLED"
 
+isKVHitMissMetricEnabled :: Bool
+isKVHitMissMetricEnabled = fromMaybe False $ readMaybe =<< Conf.lookupEnvT @String "KV_HIT_MISS_METRIC_ENABLED"
+
 ---------------------------------------------------------
 
 incrementMetric :: (HasCallStack, L.MonadFlow m) => KVMetric -> DBLogEntry a -> Bool -> m ()
@@ -257,7 +260,7 @@ incrementKVHandlerLatencyMetric handler model totalLatency redisCluster = when i
     Nothing -> pure ()
 
 incrementKVHitMissMetric :: (HasCallStack, L.MonadFlow m) => Text -> Text -> KVFindResult -> m ()
-incrementKVHitMissMetric action model findResult = when isKVMetricEnabled $ do
+incrementKVHitMissMetric action model findResult = when isKVHitMissMetricEnabled $ do
   env <- L.getOption KVMetricCfg
   case env of
     Just val -> L.runIO $ kvHitMiss val (action, model, findResult)
