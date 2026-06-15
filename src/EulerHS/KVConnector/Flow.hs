@@ -957,7 +957,7 @@ findWithKVConnector dbConf meshCfg whereClause = do
               res <- findOneFromDB dbConf whereClause
               case res of
                 Right (Just dbRow) -> do
-                  Metrics.incrementKVHitMissMetric "FIND" modelName Metrics.MissInKV
+                  Metrics.incrementKVHitMissMetric "FIND" modelName Metrics.KVMissDBHit
                   if isCachingDbFindEnabled && meshCfg.meshEnabled
                     then do
                       reCacheDBRowsRes <- createInRedis meshCfg dbRow
@@ -970,7 +970,7 @@ findWithKVConnector dbConf meshCfg whereClause = do
                           pure (SQL, Right (Just dbRow))
                     else pure (SQL, Right (Just dbRow))
                 Right Nothing -> do
-                  Metrics.incrementKVHitMissMetric "FIND" modelName Metrics.MissInDB
+                  Metrics.incrementKVHitMissMetric "FIND" modelName Metrics.KVMissDBMiss
                   pure (SQL, Right Nothing)
                 Left err -> pure (SQL, Left err)
             Right ([], _) -> do
@@ -985,8 +985,8 @@ findWithKVConnector dbConf meshCfg whereClause = do
                       isKVMiss = source == SQL && not (null rows)
                       isKVMissDB = source == SQL && null rows
                   when isKVHit $ Metrics.incrementKVHitMissMetric "FIND" modelName Metrics.KVHit
-                  when isKVMiss $ Metrics.incrementKVHitMissMetric "FIND" modelName Metrics.MissInKV
-                  when isKVMissDB $ Metrics.incrementKVHitMissMetric "FIND" modelName Metrics.MissInDB
+                  when isKVMiss $ Metrics.incrementKVHitMissMetric "FIND" modelName Metrics.KVMissDBHit
+                  when isKVMissDB $ Metrics.incrementKVHitMissMetric "FIND" modelName Metrics.KVMissDBMiss
                   pure (source, Right (DMaybe.listToMaybe rows))
                 Left err -> pure (source, Left err)
             Left err -> pure (KV, Left err)
@@ -1019,7 +1019,7 @@ findOneFromKvRedis dbConf meshCfg whereClause = do
         eitherKvRows <- findOneFromRedis meshCfg whereClause
         case eitherKvRows of
           Right ([], []) -> do
-            Metrics.incrementKVHitMissMetric "FIND_KV" modelName Metrics.MissInDB
+            Metrics.incrementKVHitMissMetric "FIND_KV" modelName Metrics.KVMissDBMiss
             pure (KV, Right Nothing)
           Right ([], _) -> do
             Metrics.incrementKVHitMissMetric "FIND_KV" modelName Metrics.KVHit
@@ -1029,7 +1029,7 @@ findOneFromKvRedis dbConf meshCfg whereClause = do
             let matchingData = findAllMatching whereClause kvLiveRows
             if isJust (DMaybe.listToMaybe matchingData)
               then Metrics.incrementKVHitMissMetric "FIND_KV" modelName Metrics.KVHit
-              else Metrics.incrementKVHitMissMetric "FIND_KV" modelName Metrics.MissInDB
+              else Metrics.incrementKVHitMissMetric "FIND_KV" modelName Metrics.KVMissDBMiss
             pure (KV, Right (DMaybe.listToMaybe matchingData))
           Left err -> pure (KV, Left err)
       else do
@@ -1215,13 +1215,13 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
                 Left err -> pure $ Left $ MDBError err
                 Right [] -> do
                   if not (null matchedKVLiveRows)
-                    then Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVHit
-                    else Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.MissInDB
+                    then Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVHitDBMiss
+                    else Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVMissDBMiss
                   pure $ Right $ applyOptions offset matchedKVLiveRows
                 Right dbRows -> do
                   if not (null matchedKVLiveRows)
                     then Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVHit
-                    else Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.MissInKV
+                    else Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVMissDBHit
                   let allKVRows = allKvLiveRows ++ allKvDeadRows
                       mergedRows = matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRows allKVRows
                   if isJust mbOffset
@@ -1254,13 +1254,13 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
                 Left err -> pure $ Left $ MDBError err
                 Right [] -> do
                   if not (null matchedKVLiveRows)
-                    then Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVHit
-                    else Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.MissInDB
+                    then Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVHitDBMiss
+                    else Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVMissDBMiss
                   pure $ Right $ applyOptions offset matchedKVLiveRows
                 Right dbRows -> do
                   if not (null matchedKVLiveRows)
                     then Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVHit
-                    else Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.MissInKV
+                    else Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVMissDBHit
                   let mergedRows = matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRows (snd kvRows ++ fst kvRows)
                   if isJust mbOffset
                     then do
@@ -1339,7 +1339,7 @@ findAllFromKvRedis dbConf meshCfg whereClause orderBy = do
               let matchedKVLiveRows = matchAndDeduplicateKVRows meshCfg whereClause primaryKvLiveRows secondaryKvLiveRows
               if not (null matchedKVLiveRows)
                 then Metrics.incrementKVHitMissMetric "FIND_ALL_KV" modelName Metrics.KVHit
-                else Metrics.incrementKVHitMissMetric "FIND_ALL_KV" modelName Metrics.MissInDB
+                else Metrics.incrementKVHitMissMetric "FIND_ALL_KV" modelName Metrics.KVMissDBMiss
               pure $ Right $ applyOptions matchedKVLiveRows
             Left err -> pure $ Left err
         else do
@@ -1350,7 +1350,7 @@ findAllFromKvRedis dbConf meshCfg whereClause orderBy = do
               let matchedKVLiveRows = findAllMatching whereClause (fst kvRows)
               if not (null matchedKVLiveRows)
                 then Metrics.incrementKVHitMissMetric "FIND_ALL_KV" modelName Metrics.KVHit
-                else Metrics.incrementKVHitMissMetric "FIND_ALL_KV" modelName Metrics.MissInDB
+                else Metrics.incrementKVHitMissMetric "FIND_ALL_KV" modelName Metrics.KVMissDBMiss
               pure $ Right $ applyOptions matchedKVLiveRows
             Left err -> pure $ Left err
     else do
@@ -1472,11 +1472,14 @@ findAllWithKVConnector dbConf meshCfg whereClause = do
                       "FIND_ALL"
                       modelName
                       ( if not (null allMatchedKVLiveRows)
-                          then Metrics.KVHit
+                          then
+                            if null dbRes
+                              then Metrics.KVHitDBMiss
+                              else Metrics.KVHit
                           else
                             if not (null uniqueDbRows)
-                              then Metrics.MissInKV
-                              else Metrics.MissInDB
+                              then Metrics.KVMissDBHit
+                              else Metrics.KVMissDBMiss
                       )
                   pure $ Right $ allMatchedKVLiveRows ++ uniqueDbRows
                 Left err -> return $ Left err -- Should never happen since both inputs are Right, but needed for completeness
@@ -1495,11 +1498,14 @@ findAllWithKVConnector dbConf meshCfg whereClause = do
                   "FIND_ALL"
                   modelName
                   ( if not (null matchedKVLiveRows)
-                      then Metrics.KVHit
+                      then
+                        if null dbRes
+                          then Metrics.KVHitDBMiss
+                          else Metrics.KVHit
                       else
                         if not (null dbRes)
-                          then Metrics.MissInKV
-                          else Metrics.MissInDB
+                          then Metrics.KVMissDBHit
+                          else Metrics.KVMissDBMiss
                   )
               pure $ Right $ matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRes allKVRows
             (Left err, _) -> return $ Left err
@@ -1566,8 +1572,8 @@ findAllWithKVAndConditionalDBInternal dbConf meshCfg whereClause orderBy = do
                     Right dbRows -> do
                       let allKvDeadRows = primaryKvDeadRows ++ secondaryKvDeadRows
                       if not (null dbRows)
-                        then Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.MissInKV
-                        else Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.MissInDB
+                        then Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVMissDBHit
+                        else Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVMissDBMiss
                       pure $ Right $ getUniqueDBRes meshCfg.redisKeyPrefix dbRows allKvDeadRows
                     Left err -> return $ Left $ MDBError err
             Left err -> return $ Left err
@@ -1599,8 +1605,8 @@ findAllWithKVAndConditionalDBInternal dbConf meshCfg whereClause orderBy = do
                   case dbRes of
                     Right dbRows -> do
                       if not (null dbRows)
-                        then Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.MissInKV
-                        else Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.MissInDB
+                        then Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVMissDBHit
+                        else Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVMissDBMiss
                       pure $ Right $ getUniqueDBRes meshCfg.redisKeyPrefix dbRows (snd kvRows)
                     Left err -> return $ Left $ MDBError err
             Left err -> return $ Left err
