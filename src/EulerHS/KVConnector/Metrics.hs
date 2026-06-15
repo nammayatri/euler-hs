@@ -38,7 +38,7 @@ data KVMetricHandler = KVMetricHandler
     secondaryKeyElements :: (Text, Text, Text, Int) -> IO ()
   }
 
-data KVFindResult = KVHit | MissInKV | MissInDB
+data KVFindResult = KVHit | KVHitDBMiss | KVMissDBHit | KVMissDBMiss
   deriving (Show, Eq)
 
 data KVMetric = KVAction
@@ -73,8 +73,9 @@ mkKVMetricHandler = do
           (action, model, findResult) -> do
             case findResult of
               KVHit -> inc (metrics </> #kv_hit_counter) action model
-              MissInKV -> inc (metrics </> #kv_miss_in_kv_counter) action model
-              MissInDB -> inc (metrics </> #kv_miss_in_db_counter) action model
+              KVHitDBMiss -> inc (metrics </> #kv_hit_db_miss_counter) action model
+              KVMissDBHit -> inc (metrics </> #kv_miss_db_hit_counter) action model
+              KVMissDBMiss -> inc (metrics </> #kv_miss_db_miss_counter) action model
       )
       ( \case
           (schema, model, _err) ->
@@ -154,14 +155,20 @@ kv_hit_counter =
     .& lbl @"model" @Text
     .& build
 
-kv_miss_in_kv_counter =
-  counter #kv_miss_in_kv_counter
+kv_hit_db_miss_counter =
+  counter #kv_hit_db_miss_counter
     .& lbl @"action" @Text
     .& lbl @"model" @Text
     .& build
 
-kv_miss_in_db_counter =
-  counter #kv_miss_in_db_counter
+kv_miss_db_hit_counter =
+  counter #kv_miss_db_hit_counter
+    .& lbl @"action" @Text
+    .& lbl @"model" @Text
+    .& build
+
+kv_miss_db_miss_counter =
+  counter #kv_miss_db_miss_counter
     .& lbl @"action" @Text
     .& lbl @"model" @Text
     .& build
@@ -186,8 +193,9 @@ collectionLock =
     .> kv_compression_latency_observer
     .> kv_handler_latency_observe
     .> kv_hit_counter
-    .> kv_miss_in_kv_counter
-    .> kv_miss_in_db_counter
+    .> kv_hit_db_miss_counter
+    .> kv_miss_db_hit_counter
+    .> kv_miss_db_miss_counter
     .> kv_jsonb_fallback_counter
     .> kvRedis_secondary_key_elements
     .> MNil
