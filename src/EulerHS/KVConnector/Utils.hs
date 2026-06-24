@@ -43,8 +43,11 @@ import EulerHS.KVConnector.Types
     MeshMeta (..),
     MeshResult,
     Operation (..),
+    PartialCond (..),
     PrimaryKey (..),
     SecondaryKey (..),
+    SecondaryKeyConfig (..),
+    SecondaryKeyExpiry (..),
     Source (..),
   )
 import EulerHS.KVDB.Types (KVDBReply)
@@ -321,6 +324,131 @@ secondaryKeysFiltered table = filter filterEmptyValues (secondaryKeys table)
   where
     filterEmptyValues :: SecondaryKey -> Bool
     filterEmptyValues (SKey sKeyPairs) = not $ any (\p -> snd p == "") sKeyPairs
+
+----------- Ordered secondary index helpers -----------
+
+-- | Lower/upper score bounds used to mean "the whole sorted-set". Real scores
+-- (epoch millis ~1.7e12, or numeric ids) fit comfortably within this range, so
+-- we avoid relying on Redis "+inf"/"-inf" string serialisation.
+skScoreNegInf :: Double
+skScoreNegInf = -1.0e18
+
+skScorePosInf :: Double
+skScorePosInf = 1.0e18
+
+-- | The sorted underscore-joined field-combo string identifying a secondary key.
+--   Matches both 'keyMap'/'secondaryKeyConfigs' keys and TH's @sortAndGetKey@.
+skeyFieldCombo :: [(Text, Text)] -> Text
+skeyFieldCombo pairs = T.intercalate "_" $ sort $ map fst pairs
+
+-- | Coerce a JSON field value to a ZSET score, if possible.
+valueToScore :: A.Value -> Maybe Double
+valueToScore = \case
+  A.Number n -> Just (realToFrac n)
+  A.Bool b -> Just (if b then 1 else 0)
+  A.String s -> readMaybe (T.unpack s)
+  _ -> Nothing
+
+-- | Stringify a JSON value the same way secondary-key/clause values are.
+jsonValToText :: A.Value -> Text
+jsonValToText = \case
+  A.String r -> r
+  A.Number n -> T.pack $ show n
+  A.Array l -> T.pack $ show l
+  A.Object o -> T.pack $ show o
+  A.Bool b -> T.pack $ show b
+  A.Null -> ""
+
+-- | Stable key suffix that distinguishes a partial index from the full index on
+-- the same fields, so partial sets never collide with or pollute generic
+-- lookups. Empty conditions => no suffix (full index).
+partialSuffix :: [PartialCond] -> Text
+partialSuffix [] = ""
+partialSuffix conds = "_pf" <> T.concat (map condPart (sortOn pcField conds))
+  where
+    condPart (PartialCond f vs) = "_" <> f <> "_" <> T.intercalate "|" (sort vs)
+
+-- | Does a row (as SQL JSON) satisfy all partial-index conditions?
+--   NOTE: forces 'mkSQLObject'; callers keep it lazy for non-partial keys.
+rowSatisfiesPartial :: A.Value -> [PartialCond] -> Bool
+rowSatisfiesPartial rowJson conds = case rowJson of
+  A.Object o -> all (condHolds o) conds
+  _ -> False
+  where
+    condHolds o (PartialCond field vals) =
+      case AKM.lookup (AKey.fromText field) o of
+        Just v -> jsonValToText v `elem` vals
+        Nothing -> False
+
+-- | Compute the ZSET score for a row given the (optional) score field.
+--   'Nothing' (or an uncoercible value) falls back to insertion time (millis).
+--   NOTE: kept lazy in @rowJson@ so 'mkSQLObject' is only forced when a score
+--   field is actually declared.
+getScoreForRow :: A.Value -> Maybe Text -> Integer -> Double
+getScoreForRow _ Nothing nowMillis = fromIntegral nowMillis
+getScoreForRow rowJson (Just field) nowMillis =
+  case rowJson of
+    A.Object o -> case AKM.lookup (AKey.fromText field) o >>= valueToScore of
+      Just s -> s
+      Nothing -> fromIntegral nowMillis
+    _ -> fromIntegral nowMillis
+
+-- | Resolve a per-key expiry policy to a concrete TTL (seconds).
+getSecondaryKeyTtl :: SecondaryKeyExpiry -> Integer -> Integer -> Integer
+getSecondaryKeyTtl expiry defaultTtl nowMillis = case expiry of
+  DefaultTTL -> defaultTtl
+  TTLSeconds n -> n
+  DailyAt h m ->
+    let nowSec = nowMillis `div` 1000
+        secOfDay = nowSec `mod` 86400
+        target = toInteger (h * 3600 + m * 60)
+        delta = target - secOfDay
+     in if delta > 0 then delta else delta + 86400
+
+-- | A fully-resolved secondary index entry to write for a row.
+data SecondaryLookupKey = SecondaryLookupKey
+  { slkKey :: Text, -- ^ full redis key string
+    slkOrdered :: Bool, -- ^ store as ZSET (vs plain SET)
+    slkScore :: Double, -- ^ ZSET score (valid when ordered)
+    slkTtl :: Integer -- ^ ttl in seconds for this index
+  }
+
+-- | Like 'getSecondaryLookupKeys' but resolves each secondary key's config
+--   (ordered?/score/ttl). @nowMillis@ is the write timestamp (epoch millis).
+--   Honours the table-level KV config: skips any index whose field-combo is in
+--   @meshCfg.disableSecondaryKeys@, and coerces every index to a plain SET
+--   (@slkOrdered = False@) when @meshCfg.forceUnorderedSecondaryKeys@ is set.
+getSecondaryLookupKeysWithConfig ::
+  forall table.
+  (KVConnector (table Identity)) =>
+  MeshConfig ->
+  Integer ->
+  table Identity ->
+  [SecondaryLookupKey]
+getSecondaryLookupKeysWithConfig meshCfg nowMillis table =
+  let redisKeyPrefix = meshCfg.redisKeyPrefix
+      defaultTtl = meshCfg.redisTtl
+      forceUnordered = meshCfg.forceUnorderedSecondaryKeys
+      disabled = meshCfg.disableSecondaryKeys
+      tName = tableName @(table Identity)
+      cfgMap = secondaryKeyConfigs @(table Identity)
+      rowJson = mkSQLObject table -- lazy: only forced for keys with a score field or partial predicate
+   in DM.mapMaybe
+        ( \(SKey pairs) ->
+            let combo = skeyFieldCombo pairs
+                mbCfg = HM.lookup combo cfgMap
+                partial = maybe [] skPartial mbCfg
+             in -- Skip disabled indexes, and partial indexes whose predicate the row does not satisfy.
+                if combo `elem` disabled || (not (null partial) && not (rowSatisfiesPartial rowJson partial))
+                  then Nothing
+                  else
+                    let keyStr = redisKeyPrefix <> tName <> keyDelim <> getSortedKey pairs <> partialSuffix partial
+                        ordered = not forceUnordered && maybe False skOrdered mbCfg
+                        score = getScoreForRow rowJson (mbCfg >>= skScoreField) nowMillis
+                        ttl = maybe defaultTtl (\c -> getSecondaryKeyTtl (skExpiry c) defaultTtl nowMillis) mbCfg
+                     in Just $ SecondaryLookupKey keyStr ordered score ttl
+        )
+        (secondaryKeysFiltered table)
 
 applyFPair :: (t -> b) -> (t, t) -> (b, b)
 applyFPair f (x, y) = (f x, f y)
@@ -672,19 +800,37 @@ getFieldsAndValuesFromClause dt = \case
       A.Bool b -> T.pack $ show b
       A.Null -> T.pack ""
 
-getPrimaryKeyFromFieldsAndValues :: (L.MonadFlow m) => Text -> MeshConfig -> HM.HashMap Text Bool -> [(Text, Text)] -> m (MeshResult [ByteString])
-getPrimaryKeyFromFieldsAndValues _ _ _ [] = pure $ Right []
-getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = do
+getPrimaryKeyFromFieldsAndValues :: (L.MonadFlow m) => Text -> MeshConfig -> HM.HashMap Text Bool -> HM.HashMap Text SecondaryKeyConfig -> [(Text, Text)] -> m (MeshResult [ByteString])
+getPrimaryKeyFromFieldsAndValues _ _ _ _ [] = pure $ Right []
+getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap cfgMap fieldsAndValues = do
   res <- foldEither <$> mapM getPrimaryKeyFromFieldAndValueHelper fieldsAndValues
   pure $ mapRight (intersectList . catMaybes) res
   where
+    -- Read all pkey members of a secondary index. Ordered indexes are ZSETs
+    -- (ZRANGEBYSCORE over the full score range); plain indexes are SETs. During
+    -- the SET->ZSET migration window a ZSET read may hit a legacy SET, so we
+    -- fall back to SMEMBERS on error.
+    readSkeyMembers conn ordered key =
+      if ordered
+        then do
+          r <- L.runKVDB conn $ L.zrangebyscore key skScoreNegInf skScorePosInf
+          case r of
+            Right ms -> pure $ Right ms
+            Left _ -> L.runKVDB conn $ L.smembers key
+        else L.runKVDB conn $ L.smembers key
+
     getPrimaryKeyFromFieldAndValueHelper (k, v) = do
       let constructedKey = meshCfg.redisKeyPrefix <> modelName <> "_" <> k <> "_" <> v
       case HM.lookup k keyHashMap of
         Just True -> pure $ Right $ Just [fromString $ T.unpack (constructedKey <> getShardedHashTag meshCfg.tableShardModRange constructedKey)]
+        -- Disabled secondary index: skip Redis entirely so the lookup contributes
+        -- no constraint and the query falls through to the DB.
+        Just False | k `elem` meshCfg.disableSecondaryKeys -> pure $ Right Nothing
         Just False -> do
+          let ordered = not meshCfg.forceUnorderedSecondaryKeys && maybe False skOrdered (HM.lookup k cfgMap)
+              key = fromString $ T.unpack constructedKey
           -- Check primary Redis first
-          primaryRes <- L.runKVDB meshCfg.kvRedis $ L.smembers (fromString $ T.unpack constructedKey)
+          primaryRes <- readSkeyMembers meshCfg.kvRedis ordered key
           case primaryRes of
             Left e -> pure $ Left $ RedisError $ (show e <> " for key: " <> show constructedKey)
             Right primaryKeys -> do
@@ -692,7 +838,7 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = 
               -- If secondary Redis is enabled, also check it and merge results
               if meshCfg.secondaryRedisEnabled && meshCfg.meshEnabled
                 then do
-                  secondaryRes <- L.runKVDB meshCfg.kvRedisSecondary $ L.smembers (fromString $ T.unpack constructedKey)
+                  secondaryRes <- readSkeyMembers meshCfg.kvRedisSecondary ordered key
                   case secondaryRes of
                     Left e -> pure $ Left $ RedisError $ (show e <> " for secondary key: " <> show constructedKey)
                     Right secondaryKeys -> do
