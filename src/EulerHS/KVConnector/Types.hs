@@ -114,7 +114,8 @@ data MeshConfig = MeshConfig
     kvHardKilled :: Bool,
     tableShardModRange :: (Int, Int),
     redisKeyPrefix :: Text,
-    forceDrainToDB :: Bool
+    forceDrainToDB :: Bool,
+    recacheFindEnabled :: Bool
   }
   deriving (Generic, Eq, Show, A.ToJSON)
 

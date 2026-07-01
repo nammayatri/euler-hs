@@ -958,7 +958,7 @@ findWithKVConnector dbConf meshCfg whereClause = do
               case res of
                 Right (Just dbRow) -> do
                   Metrics.incrementKVHitMissMetric "FIND" modelName Metrics.KVMissDBHit
-                  if isCachingDbFindEnabled && meshCfg.meshEnabled
+                  if (isCachingDbFindEnabled || meshCfg.recacheFindEnabled) && meshCfg.meshEnabled
                     then do
                       reCacheDBRowsRes <- createInRedis meshCfg dbRow
                       case reCacheDBRowsRes of
