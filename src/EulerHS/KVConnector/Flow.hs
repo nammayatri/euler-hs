@@ -1112,14 +1112,29 @@ findOneFromRedis meshCfg whereClause = do
             Metrics.incrementRedisCallMetric "REDIS_FIND_ONE" modelName total_length (total_length > redisCallsSoftLimit) (total_length > redisCallsHardLimit)
             -- Apply WHERE clause to primary results to check if we have any matches
             let primaryMatching = findAllMatching whereClause primaryLiveRows
+                -- Rows that came back DEAD (tombstoned) in primary are authoritatively
+                -- deleted and must NOT be resurrected from the other cloud, so we drop them
+                -- from the candidate set before the secondary lookup. Any remaining candidate
+                -- that merely MISSED in primary (e.g. a row that lives only in the other
+                -- cloud) is still looked up cross-cloud. We match on the logical pKey plus the
+                -- "{shard-" boundary and wildcard the shard number, because the two clouds may
+                -- shard the same pKey to a different shard (§8: shard-mod is not guaranteed
+                -- identical across clouds) — e.g. a dead "person_1123{shard-12}" also removes
+                -- the other cloud's "person_1123{shard-<n>}" copy. The "{shard-" delimiter
+                -- keeps "person_1123" from matching "person_11234{shard-...}".
+                deadShardPrefixes = map (\row -> getLookupKeyByPKey meshCfg.redisKeyPrefix row <> "{shard-") primaryDeadRows
+                isDeadPKey pk = let t = decodeUtf8 pk in any (`T.isPrefixOf` t) deadShardPrefixes
+                keyResWithoutDead = map (filter (not . isDeadPKey)) (mkUniq keyRes)
+                hasNonDeadCandidates = any (not . null) keyResWithoutDead
             -- Check secondary cloud Redis if:
             -- 1. No matching rows in primary (even if raw rows exist)
-            -- 2. No dead rows (deleted data should not trigger fallback)
+            -- 2. There are candidate pKeys that were NOT deleted in primary (dead pKeys are
+            --    excluded above, so deletes stay deleted and are not resurrected)
             -- 3. Mesh and secondary enabled
-            if null primaryMatching && null primaryDeadRows && meshCfg.meshEnabled && meshCfg.secondaryRedisEnabled
+            if null primaryMatching && hasNonDeadCandidates && meshCfg.meshEnabled && meshCfg.secondaryRedisEnabled
               then do
                 Metrics.withKVLatencyMetric "REDIS_FIND_ONE" modelName "secondaryCluster" $ do
-                  secondaryRowsRes <- foldEither <$> mapM (getDataFromPKeysRedis meshCfg.kvRedisSecondary) (mkUniq keyRes)
+                  secondaryRowsRes <- foldEither <$> mapM (getDataFromPKeysRedis meshCfg.kvRedisSecondary) keyResWithoutDead
                   case secondaryRowsRes of
                     Right secondaryRowsResPairList -> do
                       let (secondaryLiveListOfList, secondaryDeadListOfList) = unzip secondaryRowsResPairList
