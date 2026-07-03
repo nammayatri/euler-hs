@@ -1114,9 +1114,8 @@ findOneFromRedis meshCfg whereClause = do
             let primaryMatching = findAllMatching whereClause primaryLiveRows
             -- Check secondary cloud Redis if:
             -- 1. No matching rows in primary (even if raw rows exist)
-            -- 2. No dead rows (deleted data should not trigger fallback)
-            -- 3. Mesh and secondary enabled
-            if null primaryMatching && null primaryDeadRows && meshCfg.meshEnabled && meshCfg.secondaryRedisEnabled
+            -- 2. Mesh and secondary enabled
+            if null primaryMatching && meshCfg.meshEnabled && meshCfg.secondaryRedisEnabled
               then do
                 Metrics.withKVLatencyMetric "REDIS_FIND_ONE" modelName "secondaryCluster" $ do
                   secondaryRowsRes <- foldEither <$> mapM (getDataFromPKeysRedis meshCfg.kvRedisSecondary) (mkUniq keyRes)
