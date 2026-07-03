@@ -84,7 +84,7 @@ The connector here only *reads* `meshCfg.secondaryRedisEnabled`; it's set in `sh
 ### Reads
 - **`findWithKVConnector`** (`Flow.hs:927`) → `findOneFromRedis` (`:1091`):
   - Fetches from **primary** (`getDataFromPKeysRedis meshCfg.kvRedis`, `:1105`).
-  - Checks **secondary ONLY** when `null primaryMatching && null primaryDeadRows && meshEnabled && secondaryRedisEnabled` (`:1119`). **A matching primary row short-circuits — secondary is never read.**
+  - Checks **secondary ONLY** when `null primaryMatching && meshEnabled && secondaryRedisEnabled` (`:1119`). **A matching primary (live) row short-circuits — secondary is never read.
   - Both miss → DB; recache only if `IS_CACHING_DB_FIND_ENABLED`.
   - **Implication:** stale primary copy is returned over a fresher secondary copy. No version compare.
 - **`findAllWithKVAndConditionalDBInternal`** (`Flow.hs:1529`): when `secondaryRedisEnabled`, reads **both** clouds in parallel (`createMultiCloudConfigs`, `callKVKVAsync`) and `matchAndDeduplicateKVRows`. Dedup is **by primary key only** — primary wins over secondary; KV (possibly stale) wins over fresh DB (`getUniqueDBRes` excludes DB rows whose PK is in *any* KV row, live **or dead**).
