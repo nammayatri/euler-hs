@@ -28,7 +28,7 @@
     sequelize.inputs.haskell-flake.follows = "haskell-flake";
     sequelize.inputs.flake-parts.follows = "flake-parts";
 
-    hedis.url = "github:nammayatri/hedis/enh/zone-aware-replica-usage";
+    hedis.url = "github:nammayatri/hedis/enh/redis-pool-acquire-log";
     hedis.flake = false;
 
     servant-mock.url = "github:arjunkathuria/servant-mock?rev=17e90cb831820a30b3215d4f164cf8268607891e";

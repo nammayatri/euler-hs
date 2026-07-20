@@ -495,16 +495,16 @@
     "hedis": {
       "flake": false,
       "locked": {
-        "lastModified": 1740460297,
-        "narHash": "sha256-4FjUqrP+63Te39UM9PctBS8cuJUiJYkZ3zIJ2IPeTA8=",
+        "lastModified": 1784640132,
+        "narHash": "sha256-ovlZQ5Pe/7QVYSHAxaN3iLIq13bWXbwTWlMOFqWF7rs=",
         "owner": "nammayatri",
         "repo": "hedis",
-        "rev": "089d22be67103f613bd1eecbac8c2e6d6d0576c6",
+        "rev": "5e73de7cc4973c0158e846dd5042a72ced4a0727",
         "type": "github"
       },
       "original": {
         "owner": "nammayatri",
-        "ref": "enh/zone-aware-replica-usage",
+        "ref": "enh/redis-pool-acquire-log",
         "repo": "hedis",
         "type": "github"
       }
