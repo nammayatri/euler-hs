@@ -619,9 +619,9 @@ interpretFlowMethod mbFlowGuid flowRt (L.RunDB conn sqlDbMethod runInTransaction
       else do
         eRes <- try @_ @SomeException $
           case conn of
-            PostgresPool _ pool -> do
-              res <- try @_ @SomeException $ 
-                DP.withResource pool $ \conn' ->
+            PostgresPool connTag pool -> do
+              res <- try @_ @SomeException $
+                withResourceTimed connTag pool $ \conn' ->
                   runSqlDB (NativePGConn conn') dbgLogAction $ sqlDbMethod
               case res of
                 Right x -> pure x
@@ -630,14 +630,14 @@ interpretFlowMethod mbFlowGuid flowRt (L.RunDB conn sqlDbMethod runInTransaction
                   case errorType of
                     SQLError (PostgresError (PostgresSqlError "" PostgresFatalError "" "" "")) -> do
                       DP.destroyAllResources pool
-                      DP.withResource pool $ \conn' ->
+                      withResourceTimed connTag pool $ \conn' ->
                         runSqlDB (NativePGConn conn') dbgLogAction $ sqlDbMethod
                     _ -> throwIO e
-            MySQLPool _ pool ->
-              DP.withResource pool $ \conn' ->
+            MySQLPool connTag pool ->
+              withResourceTimed connTag pool $ \conn' ->
                 runSqlDB (NativeMySQLConn conn') dbgLogAction $ sqlDbMethod
-            SQLitePool _ pool ->
-              DP.withResource pool $ \conn' ->
+            SQLitePool connTag pool ->
+              withResourceTimed connTag pool $ \conn' ->
                 runSqlDB (NativeSQLiteConn conn') dbgLogAction $ sqlDbMethod
         wrapAndSend rawSqlTVar eRes
     tock <- EEMF.getCurrentDateInMillisIO
@@ -667,6 +667,27 @@ interpretFlowMethod mbFlowGuid flowRt (L.RunDB conn sqlDbMethod runInTransaction
       connPoolExceptionWrapper :: Either SomeException (Either DBError _a1, [Text]) -> (Either DBError _a1, [Text])
       connPoolExceptionWrapper (Left e) = (Left $ DBError ConnectionFailed $ show e, [])
       connPoolExceptionWrapper (Right r) = r
+
+      poolAcquireWarnMillis :: Double
+      poolAcquireWarnMillis = 2000
+
+      withResourceTimed :: ConnTag -> DP.Pool a -> (a -> IO b) -> IO b
+      withResourceTimed connTag pool act = Exception.mask $ \restore -> do
+        startedAt <- EEMF.getCurrentDateInMillisIO
+        (resource, localPool) <- restore (DP.takeResource pool)
+        acquiredAt <- EEMF.getCurrentDateInMillisIO
+        let waitedMillis = acquiredAt - startedAt
+        when (waitedMillis >= poolAcquireWarnMillis) $
+          runLogger mbFlowGuid (R._loggerRuntime . R._coreRuntime $ flowRt)
+            . L.logMessage' Error ("DB_POOL_ACQUIRE" :: String)
+            $ Message
+                (Just $ A.toJSON $ "Cannot get a connection from pool <" <> connTag
+                   <> "> : waited " <> Text.pack (show waitedMillis) <> "ms")
+                Nothing
+        result <- restore (act resource)
+                    `Exception.onException` DP.destroyResource pool localPool resource
+        DP.putResource localPool resource
+        pure result
 
 interpretFlowMethod _ flowRt@(R.FlowRuntime {..}) (L.RunKVDB cName act next) = do
     tick <- EEMF.getCurrentDateInMillisIO
