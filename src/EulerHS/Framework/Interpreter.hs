@@ -677,21 +677,13 @@ interpretFlowMethod mbFlowGuid flowRt (L.RunDB conn sqlDbMethod runInTransaction
         (resource, localPool) <- restore (DP.takeResource pool)
         acquiredAt <- EEMF.getCurrentDateInMillisIO
         let waitedMillis = acquiredAt - startedAt
-        if waitedMillis >= poolAcquireWarnMillis
-          then
-            runLogger mbFlowGuid (R._loggerRuntime . R._coreRuntime $ flowRt)
-              . L.logMessage' Error ("DB_POOL_ACQUIRE" :: String)
-              $ Message
-                  (Just $ A.toJSON $ "Cannot get a connection from pool <" <> connTag
-                     <> "> : waited " <> Text.pack (show waitedMillis) <> "ms")
-                  Nothing
-          else
-            runLogger mbFlowGuid (R._loggerRuntime . R._coreRuntime $ flowRt)
-              . L.logMessage' Debug ("DB_POOL_ACQUIRE" :: String)
-              $ Message
-                  (Just $ A.toJSON $ "Got connection from pool <" <> connTag
-                     <> "> in " <> Text.pack (show waitedMillis) <> "ms")
-                  Nothing
+        when (waitedMillis >= poolAcquireWarnMillis) $
+          runLogger mbFlowGuid (R._loggerRuntime . R._coreRuntime $ flowRt)
+            . L.logMessage' Error ("DB_POOL_ACQUIRE" :: String)
+            $ Message
+                (Just $ A.toJSON $ "Cannot get a connection from pool <" <> connTag
+                   <> "> : waited " <> Text.pack (show waitedMillis) <> "ms")
+                Nothing
         result <- restore (act resource)
                     `Exception.onException` DP.destroyResource pool localPool resource
         DP.putResource localPool resource
@@ -705,21 +697,13 @@ interpretFlowMethod mbFlowGuid flowRt@(R.FlowRuntime {..}) (L.RunKVDB cName act 
     val <- next <$> runKVDBInMasterOrReplica shouldReadFromMaster cName _kvdbConnections act
     tock <- EEMF.getCurrentDateInMillisIO
     let elapsedMillis = tock - tick
-    if elapsedMillis >= redisWarnMillis
-      then
-        runLogger mbFlowGuid (R._loggerRuntime . R._coreRuntime $ flowRt)
-          . L.logMessage' Error ("REDIS_LATENCY" :: String)
-          $ Message
-              (Just $ A.toJSON $ "Redis operation slow on <" <> cName
-                 <> "> : took " <> Text.pack (show elapsedMillis) <> "ms (includes connection checkout)")
-              Nothing
-      else
-        runLogger mbFlowGuid (R._loggerRuntime . R._coreRuntime $ flowRt)
-          . L.logMessage' Debug ("REDIS_LATENCY" :: String)
-          $ Message
-              (Just $ A.toJSON $ "Redis operation on <" <> cName
-                 <> "> completed in " <> Text.pack (show elapsedMillis) <> "ms")
-              Nothing
+    when (elapsedMillis >= redisWarnMillis) $
+      runLogger mbFlowGuid (R._loggerRuntime . R._coreRuntime $ flowRt)
+        . L.logMessage' Error ("REDIS_LATENCY" :: String)
+        $ Message
+            (Just $ A.toJSON $ "Redis operation slow on <" <> cName
+               <> "> : took " <> Text.pack (show elapsedMillis) <> "ms (includes connection checkout)")
+            Nothing
     void $ EEMF.incrementRedisLatencyMetric flowRt (tock-tick)
     pure val
   where
