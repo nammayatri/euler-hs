@@ -1098,7 +1098,7 @@ findOneFromRedis meshCfg whereClause = do
       clusterName = if meshCfg.kvRedis == meshCfg.kvRedisSecondary then "secondaryCluster" else "primaryCluster"
 
   Metrics.withKVLatencyMetric "REDIS_FIND_ONE" modelName clusterName $ do
-    eitherKeyRes <- mapM (getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap) andCombinationsFiltered
+    eitherKeyRes <- mapM (\combo -> getPrimaryKeyFromFieldsAndValues modelName meshCfg (validKeyMapForClause (pinnedKeyMap @(table Identity)) keyHashMap combo) combo) andCombinationsFiltered
     result <- case foldEither eitherKeyRes of
       Right keyRes -> do
         let lenKeyRes = lengthOfLists keyRes
@@ -1645,7 +1645,7 @@ redisFindAll meshCfg whereClause = do
       clusterName = if meshCfg.kvRedis == meshCfg.kvRedisSecondary then "secondaryCluster" else "primaryCluster"
 
   Metrics.withKVLatencyMetric "REDIS_FIND_ALL" modelName clusterName $ do
-    eitherKeyRes <- mapM (getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap) andCombinationsFiltered
+    eitherKeyRes <- mapM (\combo -> getPrimaryKeyFromFieldsAndValues modelName meshCfg (validKeyMapForClause (pinnedKeyMap @(table Identity)) keyHashMap combo) combo) andCombinationsFiltered
     result <- case foldEither eitherKeyRes of
       Right keyRes -> do
         let allKeys = concat keyRes

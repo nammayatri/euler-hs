@@ -672,6 +672,22 @@ getFieldsAndValuesFromClause dt = \case
       A.Bool b -> T.pack $ show b
       A.Null -> T.pack ""
 
+-- | The keyMap a given where-clause combination is allowed to use. A pinned (partial) key set is
+--   written only for its pinned values, so an empty SMEMBERS on it is not evidence of "no rows"
+--   and must never participate in the key-set intersection of 'getPrimaryKeyFromFieldsAndValues'.
+--   Pinned fields are therefore a fallback only: if the clause has any regular (non-pinned) key,
+--   all pinned fields are removed from the map; otherwise only pinned fields whose queried value
+--   is actually pinned survive. Removed fields still apply later via in-app row matching.
+validKeyMapForClause :: HM.HashMap Text [Text] -> HM.HashMap Text Bool -> [(Text, Text)] -> HM.HashMap Text Bool
+validKeyMapForClause pinnedKeyHashMap keyHashMap fieldsAndValues
+  | HM.null pinnedKeyHashMap = keyHashMap
+  | hasRegularKey = foldr HM.delete keyHashMap (HM.keys pinnedKeyHashMap)
+  | otherwise = foldr HM.delete keyHashMap uncoveredPinnedFields
+  where
+    isPinned k = HM.member k pinnedKeyHashMap
+    hasRegularKey = any (\(k, _) -> HM.member k keyHashMap && not (isPinned k)) fieldsAndValues
+    uncoveredPinnedFields = [k | (k, v) <- fieldsAndValues, maybe False (v `notElem`) (HM.lookup k pinnedKeyHashMap)]
+
 getPrimaryKeyFromFieldsAndValues :: (L.MonadFlow m) => Text -> MeshConfig -> HM.HashMap Text Bool -> [(Text, Text)] -> m (MeshResult [ByteString])
 getPrimaryKeyFromFieldsAndValues _ _ _ [] = pure $ Right []
 getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = do
