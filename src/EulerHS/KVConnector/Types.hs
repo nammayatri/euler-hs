@@ -46,6 +46,8 @@ data SecondaryKey = SKey [(Text, Text)]
 class KVConnector table where
   tableName :: Text
   keyMap :: HM.HashMap Text Bool -- True implies it is primary key and False implies secondary
+  pinnedKeyMap :: HM.HashMap Text [Text]
+  pinnedKeyMap = HM.empty
   primaryKey :: table -> PrimaryKey
   secondaryKeys :: table -> [SecondaryKey]
   mkSQLObject :: table -> A.Value
