@@ -12,6 +12,7 @@ module EulerHS.KVConnector.Flow
     findWithKVConnector,
     updateWoReturningWithKVConnector,
     updateWithKVConnector,
+    updateOneWithLockKVConnector,
     findAllWithKVConnector,
     updateAllWithKVConnector,
     getFieldsAndValuesFromClause,
@@ -54,7 +55,7 @@ import EulerHS.KVConnector.Helper.Utils
 import EulerHS.KVConnector.InMemConfig.Flow (fetchRowFromDBAndAlterImc, pushToInMemConfigStream, searchInMemoryCache)
 import EulerHS.KVConnector.InMemConfig.Types (ImcStreamCommand (..))
 import qualified EulerHS.KVConnector.Metrics as Metrics
-import EulerHS.KVConnector.Types (DBCommandVersion (..), KVConnector (..), MeshConfig (..), MeshError (..), MeshMeta (..), MeshResult, SecondaryKey (..), Source (..), TableMappings (..), keyMap, tableName)
+import EulerHS.KVConnector.Types (DBCommandVersion (..), KVConnector (..), KVLockConfig (..), MeshConfig (..), MeshError (..), MeshMeta (..), MeshResult, SecondaryKey (..), Source (..), TableMappings (..), keyMap, tableName)
 import EulerHS.KVConnector.Utils
 import EulerHS.KVDB.Types (KVDBReply)
 import qualified EulerHS.Language as L
@@ -63,6 +64,7 @@ import qualified EulerHS.SqlDB.Language as DB
 import EulerHS.SqlDB.Types (BeamRunner, BeamRuntime, DBConfig, DBError (..))
 import Named (defaults, (!))
 import Sequelize (Clause (..), Model, OrderBy (..), Set (..), Where, columnize, fromColumnar', sqlDelete, sqlSelect, sqlSelect', sqlUpdate)
+import System.Random (randomRIO)
 
 createWoReturingKVConnector ::
   forall (table :: (Type -> Type) -> Type) be m beM.
@@ -304,6 +306,113 @@ updateWithKVConnector dbConf replicaDbConfig meshCfg setClause whereClause = do
             return $ Left $ UnexpectedError message
           Left e -> return $ Left $ MDBError e
   pure res
+
+data KVRowLookup table
+  = KVRowFound Text (table Identity)
+  | KVRowDeleted
+  | KVRowMissing
+
+-- | Update one row under a per-row Redis lock, building the set clause from the
+-- row as read inside the lock. Lock is taken only for KV-enabled tables.
+updateOneWithLockKVConnector ::
+  forall table m.
+  ( HasCallStack,
+    Model BP.Postgres table,
+    MeshMeta BP.Postgres table,
+    B.HasQBuilder BP.Postgres,
+    TableMappings (table Identity),
+    KVConnector (table Identity),
+    FromJSON (table Identity),
+    ToJSON (table Identity),
+    Serialize.Serialize (table Identity),
+    Show (table Identity),
+    L.MonadFlow m
+  ) =>
+  DBConfig BP.Pg ->
+  DBConfig BP.Pg ->
+  MeshConfig ->
+  KVLockConfig ->
+  (table Identity -> [Set BP.Postgres table]) ->
+  Where BP.Postgres table ->
+  m (MeshResult (Maybe (table Identity)))
+updateOneWithLockKVConnector dbConf replicaDbConfig meshCfg lockCfg mkSetClause whereClause =
+  if not isKVEnabledForTable
+    then updateFromDBRow
+    else do
+      gotLock <- acquireLock lockCfg.lockMaxRetries
+      if not gotLock
+        then pure . Left . LockAcquisitionFailed $ redisLockKey
+        else do
+          res <- lockedUpdate
+          void $ L.runKVDB meshCfg.kvRedis $ L.del [encodeUtf8 redisLockKey]
+          pure res
+  where
+    modelName = tableName @(table Identity)
+
+    redisLockKey = meshCfg.redisKeyPrefix <> "kvlock_" <> modelName <> "_" <> lockCfg.lockKey
+
+    isKVEnabledForTable = meshCfg.meshEnabled && not meshCfg.kvHardKilled
+
+    acquireLock :: Int -> m Bool
+    acquireLock attemptsLeft = do
+      res <-
+        L.runKVDB meshCfg.kvRedis $
+          L.setOpts
+            (encodeUtf8 redisLockKey)
+            ("1" :: ByteString)
+            (L.Seconds lockCfg.lockTtlSeconds)
+            L.SetIfNotExist
+      case res of
+        Right True -> pure True
+        _
+          | attemptsLeft <= 1 -> pure False
+          | otherwise -> do
+            jitterPct <- L.runIO' "kv lock retry jitter" $ randomRIO (50, 150 :: Int)
+            let delayMs = max 1 $ (lockCfg.lockRetryDelayMs * jitterPct) `div` 100
+            L.runIO' "kv lock retry delay" $ threadDelayMilisec (fromIntegral delayMs)
+            acquireLock (attemptsLeft - 1)
+
+    lockedUpdate :: m (MeshResult (Maybe (table Identity)))
+    lockedUpdate =
+      resolveRowFromKV >>= \case
+        Left err -> pure $ Left err
+        Right KVRowDeleted -> pure $ Right Nothing
+        Right KVRowMissing -> updateFromDBRow
+        Right (KVRowFound redisConn row) -> do
+          let setClause = mkSetClause row
+              updVals = jsonKeyValueUpdates V1 setClause
+          mapRight Just
+            <$> updateObjectRedis @BP.Pg @BP.Postgres meshCfg redisConn updVals setClause False whereClause row
+
+    resolveRowFromKV :: m (MeshResult (KVRowLookup table))
+    resolveRowFromKV =
+      lookupIn (meshCfg {secondaryRedisEnabled = False}) meshCfg.kvRedis >>= \case
+        Left err -> pure $ Left err
+        Right KVRowMissing
+          | meshCfg.secondaryRedisEnabled ->
+            lookupIn
+              (meshCfg {kvRedis = meshCfg.kvRedisSecondary, secondaryRedisEnabled = False})
+              meshCfg.kvRedisSecondary
+        Right found -> pure $ Right found
+
+    lookupIn :: MeshConfig -> Text -> m (MeshResult (KVRowLookup table))
+    lookupIn cfg redisConn =
+      findOneFromRedis cfg whereClause >>= \case
+        Left err -> pure $ Left err
+        Right (liveRows, deadRows) ->
+          case findAllMatching whereClause liveRows of
+            [row] -> pure . Right $ KVRowFound redisConn row
+            _ : _ -> pure . Left $ MMultipleKeysFound modelName
+            []
+              | not (null (findAllMatching whereClause deadRows)) -> pure $ Right KVRowDeleted
+              | otherwise -> pure $ Right KVRowMissing
+
+    updateFromDBRow :: m (MeshResult (Maybe (table Identity)))
+    updateFromDBRow =
+      findOneFromDB dbConf whereClause >>= \case
+        Left err -> pure $ Left err
+        Right Nothing -> pure $ Right Nothing
+        Right (Just row) -> updateWithKVConnector dbConf replicaDbConfig meshCfg (mkSetClause row) whereClause
 
 modifyOneKV ::
   forall be table beM m.
