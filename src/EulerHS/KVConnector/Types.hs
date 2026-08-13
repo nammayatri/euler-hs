@@ -43,6 +43,23 @@ data PrimaryKey = PKey [(Text, Text)]
 
 data SecondaryKey = SKey [(Text, Text)]
 
+data KVLockConfig = KVLockConfig
+  { lockKey :: Text,
+    lockTtlSeconds :: Integer,
+    lockMaxRetries :: Int,
+    lockRetryDelayMs :: Int
+  }
+  deriving (Show, Generic)
+
+defaultKVLockConfig :: Text -> KVLockConfig
+defaultKVLockConfig key =
+  KVLockConfig
+    { lockKey = key,
+      lockTtlSeconds = 2,
+      lockMaxRetries = 10,
+      lockRetryDelayMs = 10
+    }
+
 class KVConnector table where
   tableName :: Text
   keyMap :: HM.HashMap Text Bool -- True implies it is primary key and False implies secondary
@@ -91,6 +108,7 @@ data MeshError
   | UnexpectedError Text
   | RedisPipelineError Text
   | AsyncKVCallFailed Text
+  | LockAcquisitionFailed Text
   deriving (Show, Generic, Exception, Data)
 
 instance ToJSON MeshError where
