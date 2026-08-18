@@ -26,6 +26,7 @@
 -- =============================================================================
 module KvLiveTests (runKvLiveTests, runRecacheTests) where
 
+import Control.Concurrent.Async (mapConcurrently)
 import qualified Data.Aeson as A
 import Data.Aeson.Types (Parser, parseMaybe)
 import qualified Data.ByteString as BS
@@ -49,10 +50,11 @@ import EulerHS.KVConnector.Flow
     findWithKVConnector,
     updateAllReturningWithKVConnector,
     updateAllWithKVConnector,
+    updateOneWithLockKVConnector,
     updateWithKVConnector,
     updateWoReturningWithKVConnector,
   )
-import EulerHS.KVConnector.Types (MeshConfig (..), MeshMeta (..), MeshResult, TermWrap)
+import EulerHS.KVConnector.Types (KVLockConfig (..), MeshConfig (..), MeshMeta (..), MeshResult, TermWrap, defaultKVLockConfig)
 import EulerHS.KVConnector.Utils (getPKeyWithShard)
 import qualified EulerHS.Language as L
 import EulerHS.Prelude hiding (id, note, putStrLn, show)
@@ -183,7 +185,7 @@ insertDbRow r = do
 flushTestKeys :: L.Flow ()
 flushTestKeys =
   forM_ [connName, connNameSecondary] $ \conn ->
-    forM_ ["kvLive*", "Z::kvLive*"] $ \pat -> do
+    forM_ ["kvLive*", "Z::kvLive*", "kvlock_kvLive*"] $ \pat -> do
       eks <- L.runKVDB conn $ L.rawRequest ["KEYS", enc pat]
       case eks of
         Right (ks :: [ByteString]) -> unless (null ks) . void . L.runKVDB conn $ L.del ks
@@ -292,7 +294,19 @@ runKvLiveTests = do
         tUpdateMaybeToNothing,
         tHardKilled,
         tParseClauses,
-        tJsonbFallbackOnSchemaDrift
+        tJsonbFallbackOnSchemaDrift,
+        tLockAccumulates,
+        tLockSerialisesConcurrentWriters,
+        tLockUnlockedControl,
+        tLockKVMiss,
+        tLockTombstone,
+        tLockContended,
+        tLockHardKilled,
+        tLockMovesSecondaryIndex,
+        tLockEmptySetClause,
+        tLockWritesDrainerStream,
+        tLockSecondaryRedisWrite,
+        tLockMultipleMatches
       ]
 
   let passed = length (filter (== True) results)
@@ -783,6 +797,305 @@ tParseClauses = do
 -- and IS_RECACHING_ENABLED=True (these are read once per process as CAFs, so
 -- they can't be toggled in the main run). See the orchestrator's --recache-phase.
 -- =============================================================================
+-- =============================================================================
+-- updateOneWithLockKVConnector
+-- =============================================================================
+
+-- Retry budget generous enough that queued writers wait rather than fail.
+lkCfg :: Text -> KVLockConfig
+lkCfg k = (defaultKVLockConfig k) {lockMaxRetries = 200, lockRetryDelayMs = 5}
+
+tLockAccumulates :: IO Bool
+tLockAccumulates = do
+  putStrLn "\n[35] updateOneWithLockKVConnector — set clause built from the row read inside the lock"
+  let row = mkRow "lk1" "gLK35" "active" 5 Nothing 100
+  (res, reread) <- runFlow $ do
+    _ <- createWithKVConnector dbConf meshCfg row
+    r <-
+      updateOneWithLockKVConnector
+        dbConf
+        dbConf
+        meshCfg
+        (lkCfg "lk1")
+        (\cur -> [Set cnt (cnt cur + 10)])
+        [Is id (Eq ("lk1" :: Text))]
+    f <- findWithKVConnector dbConf meshCfg [Is id (Eq ("lk1" :: Text))]
+    pure (r, f)
+  ok1 <- check "returns row with cnt = 15 (5 + 10)" $ (fmap cnt <$> res) =?= Just 15
+  ok2 <- check "reread sees cnt = 15" $ (fmap cnt <$> reread) =?= Just 15
+  pure (ok1 && ok2)
+
+-- The point of the whole function: N independent runtimes each doing cnt+1 on
+-- the same row must all land. Each runFlow builds its own FlowRuntime and its
+-- own connection pools, so this is genuinely N writers, not N threads sharing
+-- one client.
+tLockSerialisesConcurrentWriters :: IO Bool
+tLockSerialisesConcurrentWriters = do
+  putStrLn "\n[36] updateOneWithLockKVConnector — N concurrent +1 writers all land"
+  let n = 10 :: Int
+      row = mkRow "lk2" "gLK36" "active" 0 Nothing 100
+  runFlow $ void $ createWithKVConnector dbConf meshCfg row
+  _ <-
+    mapConcurrently
+      ( \_ ->
+          runFlow $
+            updateOneWithLockKVConnector
+              dbConf
+              dbConf
+              meshCfg
+              (lkCfg "lk2")
+              (\cur -> [Set cnt (cnt cur + 1)])
+              [Is id (Eq ("lk2" :: Text))]
+      )
+      [1 .. n]
+  final <- runFlow $ findWithKVConnector dbConf meshCfg [Is id (Eq ("lk2" :: Text))]
+  check ("all " <> show n <> " increments landed (cnt = " <> show n <> ")") $ (fmap cnt <$> final) =?= Just n
+
+-- Control: the same workload through the ordinary read-then-update path, which
+-- is what call sites do today. Reports how many increments were lost; passes as
+-- long as it did not somehow exceed n.
+tLockUnlockedControl :: IO Bool
+tLockUnlockedControl = do
+  putStrLn "\n[37] control — same workload without the lock (read outside, update after)"
+  let n = 10 :: Int
+      row = mkRow "lk7" "gLK37" "active" 0 Nothing 100
+  runFlow $ void $ createWithKVConnector dbConf meshCfg row
+  _ <-
+    mapConcurrently
+      ( \_ ->
+          runFlow $ do
+            cur <- findWithKVConnector dbConf meshCfg [Is id (Eq ("lk7" :: Text))]
+            case cur of
+              Right (Just c) ->
+                void $
+                  updateWithKVConnector
+                    dbConf
+                    dbConf
+                    meshCfg
+                    [Set cnt (cnt c + 1)]
+                    [Is id (Eq ("lk7" :: Text))]
+              _ -> pure ()
+      )
+      [1 .. n]
+  final <- runFlow $ findWithKVConnector dbConf meshCfg [Is id (Eq ("lk7" :: Text))]
+  let got = case final of
+        Right (Just c) -> cnt c
+        _ -> -1
+  putStrLn $ "         (unlocked landed " <> show got <> "/" <> show n <> " — lost " <> show (n - got) <> ")"
+  check "unlocked path never exceeds n" $ got <= n
+
+tLockKVMiss :: IO Bool
+tLockKVMiss = do
+  putStrLn "\n[38] updateOneWithLockKVConnector — row present only in DB (KV miss)"
+  let row = mkRow "lk3" "gLK38" "active" 7 Nothing 100
+  insertDbRow row
+  res <-
+    runFlow $
+      updateOneWithLockKVConnector
+        dbConf
+        dbConf
+        meshCfg
+        (lkCfg "lk3")
+        (\cur -> [Set cnt (cnt cur + 3)])
+        [Is id (Eq ("lk3" :: Text))]
+  ok1 <- check "returns cnt = 10 (7 + 3), base taken from the DB row" $ (fmap cnt <$> res) =?= Just 10
+  reread <- runFlow $ findWithKVConnector dbConf meshCfg [Is id (Eq ("lk3" :: Text))]
+  ok2 <- check "reread sees cnt = 10" $ (fmap cnt <$> reread) =?= Just 10
+  pure (ok1 && ok2)
+
+tLockTombstone :: IO Bool
+tLockTombstone = do
+  putStrLn "\n[39] updateOneWithLockKVConnector — tombstoned row is a no-op"
+  let row = mkRow "lk4" "gLK39" "active" 4 Nothing 100
+  res <- runFlow $ do
+    _ <- createWithKVConnector dbConf meshCfg row
+    _ <- deleteWithKVConnector dbConf meshCfg [Is id (Eq ("lk4" :: Text))]
+    updateOneWithLockKVConnector
+      dbConf
+      dbConf
+      meshCfg
+      (lkCfg "lk4")
+      (\cur -> [Set cnt (cnt cur + 1)])
+      [Is id (Eq ("lk4" :: Text))]
+  check "returns Right Nothing (row already deleted)" $ (fmap cnt <$> res) =?= Nothing
+
+tLockContended :: IO Bool
+tLockContended = do
+  putStrLn "\n[40] updateOneWithLockKVConnector — held lock ⇒ LockAcquisitionFailed"
+  let row = mkRow "lk5" "gLK40" "active" 1 Nothing 100
+      cfg = (defaultKVLockConfig "lk5") {lockMaxRetries = 3, lockRetryDelayMs = 5}
+  (res, reread) <- runFlow $ do
+    _ <- createWithKVConnector dbConf meshCfg row
+    -- Occupy the lock the way another writer would.
+    _ <- L.runKVDB connName $ L.setOpts (enc "kvlock_kvLive_lk5") "1" (L.Seconds 30) L.SetAlways
+    r <-
+      updateOneWithLockKVConnector
+        dbConf
+        dbConf
+        meshCfg
+        cfg
+        (\cur -> [Set cnt (cnt cur + 1)])
+        [Is id (Eq ("lk5" :: Text))]
+    f <- findWithKVConnector dbConf meshCfg [Is id (Eq ("lk5" :: Text))]
+    pure (r, f)
+  ok1 <- check "returns Left LockAcquisitionFailed" $ case res of
+    Left e -> "LockAcquisitionFailed" `T.isInfixOf` T.pack (show e)
+    Right _ -> False
+  ok2 <- check "row is untouched (cnt still 1)" $ (fmap cnt <$> reread) =?= Just 1
+  pure (ok1 && ok2)
+
+tLockHardKilled :: IO Bool
+tLockHardKilled = do
+  putStrLn "\n[41] updateOneWithLockKVConnector — kvHardKilled ⇒ no lock, plain SQL update"
+  let row = mkRow "lk6" "gLK41" "active" 2 Nothing 100
+      killed = meshCfg {kvHardKilled = True}
+  -- Seed straight into Postgres: with KV hard killed the base row is read from
+  -- the DB, and createWithKVConnector writes only Redis + the drainer stream.
+  insertDbRow row
+  res <- runFlow $ do
+    updateOneWithLockKVConnector
+      dbConf
+      dbConf
+      killed
+      (lkCfg "lk6")
+      (\cur -> [Set cnt (cnt cur + 6)])
+      [Is id (Eq ("lk6" :: Text))]
+  ok1 <- check "returns cnt = 8 (2 + 6)" $ (fmap cnt <$> res) =?= Just 8
+  held <- runFlow $ L.runKVDB connName $ L.get (enc "kvlock_kvLive_lk6")
+  ok2 <- check "no lock key was created" $ case held of
+    Right Nothing -> True
+    _ -> False
+  pure (ok1 && ok2)
+
+-- Total drainer-stream entries across all shards. Every KV write must add
+-- exactly one, or the DB will never converge on the new value.
+streamLen :: L.Flow Integer
+streamLen = do
+  eks <- L.runKVDB connName $ L.rawRequest ["KEYS", enc "db-sync-stream*"]
+  case (eks :: Either T.KVDBReply [ByteString]) of
+    Left _ -> pure 0
+    Right ks -> do
+      lens <- forM ks $ \k -> do
+        er <- L.runKVDB connName $ L.rawRequest ["XLEN", k]
+        pure $ case (er :: Either T.KVDBReply Integer) of
+          Right n -> n
+          Left _ -> 0
+      pure (sum lens)
+
+tLockMovesSecondaryIndex :: IO Bool
+tLockMovesSecondaryIndex = do
+  putStrLn "\n[42] updateOneWithLockKVConnector — changing a secondary-key column moves the index"
+  let row = mkRow "lk9" "gLKOLD" "active" 1 Nothing 100
+  (oldHas, newHas, foundNew) <- runFlow $ do
+    _ <- createWithKVConnector dbConf meshCfg row
+    _ <-
+      updateOneWithLockKVConnector
+        dbConf
+        dbConf
+        meshCfg
+        (lkCfg "lk9")
+        (\_ -> [Set groupId ("gLKNEW" :: Text)])
+        [Is id (Eq ("lk9" :: Text))]
+    a <- sIsMember connName (groupSetKey "gLKOLD") (pkOf row)
+    b <- sIsMember connName (groupSetKey "gLKNEW") (pkOf row)
+    f <- findWithKVConnector dbConf meshCfg [Is groupId (Eq ("gLKNEW" :: Text))]
+    pure (a, b, f)
+  ok1 <- check "old SET no longer holds the pkey" (not oldHas)
+  ok2 <- check "new SET holds the pkey" newHas
+  ok3 <- check "row is findable under the new secondary key" $ (fmap id <$> foundNew) =?= Just "lk9"
+  pure (ok1 && ok2 && ok3)
+
+-- A callback is far more likely than a literal list to yield no sets at all
+-- (every branch of a conditional list comprehension false). An empty set clause
+-- drains as "UPDATE t SET  WHERE ..." which is a syntax error, so it must never
+-- reach the stream.
+tLockEmptySetClause :: IO Bool
+tLockEmptySetClause = do
+  putStrLn "\n[43] updateOneWithLockKVConnector — callback yielding no sets must not poison the stream"
+  let row = mkRow "lk10" "gLK43" "active" 3 Nothing 100
+  (res, reread, before, after) <- runFlow $ do
+    _ <- createWithKVConnector dbConf meshCfg row
+    b <- streamLen
+    r <- updateOneWithLockKVConnector dbConf dbConf meshCfg (lkCfg "lk10") (const []) [Is id (Eq ("lk10" :: Text))]
+    f <- findWithKVConnector dbConf meshCfg [Is id (Eq ("lk10" :: Text))]
+    a <- streamLen
+    pure (r, f, b, a)
+  ok1 <- check "row is unchanged (cnt = 3)" $ (fmap cnt <$> reread) =?= Just 3
+  ok2 <- check "returns without error" $ case res of
+    Right _ -> True
+    Left _ -> False
+  ok3 <- check "no command pushed to the drainer stream" (after == before)
+  pure (ok1 && ok2 && ok3)
+
+tLockWritesDrainerStream :: IO Bool
+tLockWritesDrainerStream = do
+  putStrLn "\n[44] updateOneWithLockKVConnector — a real update reaches the drainer stream"
+  let row = mkRow "lk11" "gLK44" "active" 1 Nothing 100
+  (before, after) <- runFlow $ do
+    _ <- createWithKVConnector dbConf meshCfg row
+    b <- streamLen
+    _ <-
+      updateOneWithLockKVConnector
+        dbConf
+        dbConf
+        meshCfg
+        (lkCfg "lk11")
+        (\cur -> [Set cnt (cnt cur + 4)])
+        [Is id (Eq ("lk11" :: Text))]
+    a <- streamLen
+    pure (b, a)
+  check "exactly one command pushed to the drainer stream" (after == before + 1)
+
+tLockSecondaryRedisWrite :: IO Bool
+tLockSecondaryRedisWrite = do
+  putStrLn "\n[45] updateOneWithLockKVConnector — row only in secondary cloud: update lands there"
+  let row = mkRow "lk12" "gLK45" "active" 2 Nothing 100
+  (res, inSecondary, inPrimary) <- runFlow $ do
+    -- seed the other cloud only
+    _ <- createWithKVConnector dbConf cfgSecondaryAsPrimary row
+    r <-
+      updateOneWithLockKVConnector
+        dbConf
+        dbConf
+        cfgMultiCloud
+        (lkCfg "lk12")
+        (\cur -> [Set cnt (cnt cur + 5)])
+        [Is id (Eq ("lk12" :: Text))]
+    a <- L.runKVDB connName $ L.rawRequest ["EXISTS", pkOf row]
+    f <- findWithKVConnector dbConf cfgMultiCloud [Is id (Eq ("lk12" :: Text))]
+    pure (r, f, a)
+  ok1 <- check "returns cnt = 7 (2 + 5)" $ (fmap cnt <$> res) =?= Just 7
+  ok2 <- check "reread across clouds sees cnt = 7" $ (fmap cnt <$> inSecondary) =?= Just 7
+  ok3 <- check "primary cloud did not gain a copy" $ case (inPrimary :: Either T.KVDBReply Integer) of
+    Right 0 -> True
+    _ -> False
+  pure (ok1 && ok2 && ok3)
+
+tLockMultipleMatches :: IO Bool
+tLockMultipleMatches = do
+  putStrLn "\n[46] updateOneWithLockKVConnector — clause matching many rows is refused"
+  let r1 = mkRow "lk13a" "gLK46" "active" 1 Nothing 100
+      r2 = mkRow "lk13b" "gLK46" "active" 1 Nothing 100
+  (res, c1, c2) <- runFlow $ do
+    _ <- createWithKVConnector dbConf meshCfg r1
+    _ <- createWithKVConnector dbConf meshCfg r2
+    r <-
+      updateOneWithLockKVConnector
+        dbConf
+        dbConf
+        meshCfg
+        (lkCfg "lk13")
+        (\cur -> [Set cnt (cnt cur + 1)])
+        [Is groupId (Eq ("gLK46" :: Text))]
+    a <- findWithKVConnector dbConf meshCfg [Is id (Eq ("lk13a" :: Text))]
+    b <- findWithKVConnector dbConf meshCfg [Is id (Eq ("lk13b" :: Text))]
+    pure (r, a, b)
+  ok1 <- check "returns Left rather than updating an arbitrary row" $ case res of
+    Left _ -> True
+    Right _ -> False
+  ok2 <- check "neither row was modified" $ (fmap cnt <$> c1) =?= Just 1 && (fmap cnt <$> c2) =?= Just 1
+  pure (ok1 && ok2)
+
 runRecacheTests :: IO Bool
 runRecacheTests = do
   putStrLn "\n############################################################"
