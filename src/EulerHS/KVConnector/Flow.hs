@@ -377,7 +377,7 @@ updateOneWithLockKVConnector dbConf replicaDbConfig meshCfg lockCfg mkSetClause 
       resolveRowFromKV >>= \case
         Left err -> pure $ Left err
         Right KVRowDeleted -> pure $ Right Nothing
-        Right KVRowMissing -> updateFromDBRow
+        Right KVRowMissing -> updateFromKVMiss
         Right (KVRowFound redisConn row) -> do
           let setClause = mkSetClause row
               updVals = jsonKeyValueUpdates V1 setClause
@@ -413,6 +413,22 @@ updateOneWithLockKVConnector dbConf replicaDbConfig meshCfg lockCfg mkSetClause 
         Left err -> pure $ Left err
         Right Nothing -> pure $ Right Nothing
         Right (Just row) -> updateWithKVConnector dbConf replicaDbConfig meshCfg (mkSetClause row) whereClause
+
+    updateFromKVMiss :: m (MeshResult (Maybe (table Identity)))
+    updateFromKVMiss
+      | not isRecachingEnabled = updateFromDBRow
+      | otherwise =
+        findOneFromDB dbConf whereClause >>= \case
+          Left err -> pure $ Left err
+          Right Nothing -> pure $ Right Nothing
+          Right (Just row) -> do
+            let setClause = mkSetClause row
+                updVals = jsonKeyValueUpdates V1 setClause
+            reCacheDBRows meshCfg [row] >>= \case
+              Left err -> pure . Left . RedisError $ show err <> " for " <> modelName <> " in updateFromKVMiss"
+              Right _ ->
+                mapRight Just
+                  <$> updateObjectRedis @BP.Pg @BP.Postgres meshCfg meshCfg.kvRedis updVals setClause False whereClause row
 
 modifyOneKV ::
   forall be table beM m.
