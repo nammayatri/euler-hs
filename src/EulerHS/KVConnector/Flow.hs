@@ -1347,12 +1347,6 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
                       )
               dbRes <- runQuery dbConf findAllQueryUpdated
               case dbRes of
-                -- DB unreachable (e.g. outage): we already have matchedKVLiveRows from Redis
-                -- above -- degrade to serving that instead of discarding it and failing the
-                -- whole call. Result may be an incomplete page (rows only in Postgres, or
-                -- correct cross-source pagination, are unavailable while DB is down), but a
-                -- partial/best-effort answer beats a hard error when the alternative is total
-                -- unavailability.
                 Left _ -> do
                   if not (null matchedKVLiveRows)
                     then Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVHitDBMiss
@@ -1396,8 +1390,6 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
                       )
               dbRes <- runQuery dbConf findAllQueryUpdated
               case dbRes of
-                -- Same outage-degradation as the secondary-Redis branch above: serve the
-                -- already-fetched matchedKVLiveRows instead of discarding them on DB failure.
                 Left _ -> do
                   if not (null matchedKVLiveRows)
                     then Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVHitDBMiss
