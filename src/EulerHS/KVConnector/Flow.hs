@@ -1628,7 +1628,13 @@ findAllWithKVConnector dbConf meshCfg whereClause = do
                 Left err -> return $ Left err -- Should never happen since both inputs are Right, but needed for completeness
             (Left err, _, _) -> return $ Left err
             (_, Left err, _) -> return $ Left err
-            (_, _, Left err) -> return $ Left $ MDBError err
+            (Right _, Right _, Left _) -> do
+              case extractMultiCloudKVRows primaryKvRows secondaryKvRows of
+                Right (primaryKvLiveRows, _, secondaryKvLiveRows, _) -> do
+                  let allMatchedKVLiveRows = matchAndDeduplicateKVRows meshCfg whereClause primaryKvLiveRows secondaryKvLiveRows
+                  Metrics.incrementKVHitMissMetric "FIND_ALL" modelName (if not (null allMatchedKVLiveRows) then Metrics.KVHitDBMiss else Metrics.KVMissDBMiss)
+                  pure $ Right allMatchedKVLiveRows
+                Left err -> return $ Left err
         else do
           -- Original single Redis logic
           (kvRows, dbRows) <- callKVDBAsync (redisFindAll meshCfg whereClause) (findAllSql dbConf whereClause)
@@ -1652,7 +1658,10 @@ findAllWithKVConnector dbConf meshCfg whereClause = do
                   )
               pure $ Right $ matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRes allKVRows
             (Left err, _) -> return $ Left err
-            (_, Left err) -> return $ Left $ MDBError err
+            (Right kvRes, Left _) -> do
+              let matchedKVLiveRows = findAllMatching whereClause (fst kvRes)
+              Metrics.incrementKVHitMissMetric "FIND_ALL" modelName (if not (null matchedKVLiveRows) then Metrics.KVHitDBMiss else Metrics.KVMissDBMiss)
+              pure $ Right matchedKVLiveRows
     else do
       mapLeft MDBError <$> runQuery dbConf findAllQuery
 
