@@ -495,11 +495,11 @@
     "hedis": {
       "flake": false,
       "locked": {
-        "lastModified": 1784659501,
-        "narHash": "sha256-ovlZQ5Pe/7QVYSHAxaN3iLIq13bWXbwTWlMOFqWF7rs=",
+        "lastModified": 1788350339,
+        "narHash": "sha256-XGh+r3UXIpQFfyvkmYVRwj/6t/6Vfa1h6G67HMSDG4c=",
         "owner": "nammayatri",
         "repo": "hedis",
-        "rev": "7c8a33b2f69e33e428f983a0b7d68ef9d7ecef86",
+        "rev": "f94c508e9d10c46e81658682019801b6638bb03f",
         "type": "github"
       },
       "original": {
