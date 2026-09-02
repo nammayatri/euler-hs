@@ -39,6 +39,8 @@ module EulerHS.SqlDB.Types
 
     -- ** Helpers
     withTransaction,
+    withPoolResourceTimed,
+    DBQueryTimeoutException (..),
     mysqlErrorToDbError,
     sqliteErrorToDbError,
     postgresErrorToDbError,
@@ -51,9 +53,11 @@ module EulerHS.SqlDB.Types
   )
 where
 
+import Data.Aeson (encode, object, (.=))
+import qualified Data.ByteString.Lazy.Char8 as BSL8
 import Data.Data (Data)
 import qualified Data.Pool as DP
-import Data.Time.Clock (NominalDiffTime)
+import Data.Time.Clock (NominalDiffTime, diffUTCTime, getCurrentTime)
 import qualified Database.Beam as B
 import qualified Database.Beam.Backend.SQL as B
 import qualified Database.Beam.Backend.SQL.BeamExtensions as B
@@ -70,6 +74,8 @@ import EulerHS.SqlDB.Postgres
   ( PostgresConfig (..),
     createPostgresConn,
   )
+import qualified Juspay.Extra.Config as Conf
+import System.Timeout (timeout)
 
 class
   (B.BeamSqlBackend be, B.MonadBeam be beM) =>
@@ -77,8 +83,8 @@ class
     | be -> beM,
       beM -> be
   where
-  rtSelectReturningList :: B.FromBackendRow be a => B.SqlSelect be a -> beM [a]
-  rtSelectReturningOne :: B.FromBackendRow be a => B.SqlSelect be a -> beM (Maybe a)
+  rtSelectReturningList :: (B.FromBackendRow be a) => B.SqlSelect be a -> beM [a]
+  rtSelectReturningOne :: (B.FromBackendRow be a) => B.SqlSelect be a -> beM (Maybe a)
   rtInsert :: B.SqlInsert be table -> beM ()
   rtInsertReturningList :: forall table. (B.Beamable table, B.FromBackendRow be (table Identity)) => B.SqlInsert be table -> beM [table Identity]
   rtUpdate :: B.SqlUpdate be table -> beM ()
@@ -154,12 +160,72 @@ withTransaction ::
   (NativeSqlConn -> IO a) ->
   IO (Either SomeException a)
 withTransaction conn f = tryAny $ case conn of
-  PostgresPool _ pool -> DP.withResource pool (go PGS.withTransaction NativePGConn)
-  MySQLPool _ pool -> DP.withResource pool (go MySQL.withTransaction NativeMySQLConn)
-  SQLitePool _ pool -> DP.withResource pool (go SQLite.withTransaction NativeSQLiteConn)
+  PostgresPool tag pool -> withPoolResourceTimed (logDbPoolAcquireEvent tag) tag pool (go PGS.withTransaction NativePGConn)
+  MySQLPool tag pool -> withPoolResourceTimed (logDbPoolAcquireEvent tag) tag pool (go MySQL.withTransaction NativeMySQLConn)
+  SQLitePool tag pool -> withPoolResourceTimed (logDbPoolAcquireEvent tag) tag pool (go SQLite.withTransaction NativeSQLiteConn)
   where
     go :: forall b. (b -> IO a -> IO a) -> (b -> NativeSqlConn) -> b -> IO a
     go hof wrap conn' = hof conn' (f . wrap $ conn')
+
+dbPoolAcquireTimeoutMicros :: Int
+dbPoolAcquireTimeoutMicros =
+  round . (* (1000000 :: Double)) . fromMaybe (2 :: Double) $ readMaybe =<< Conf.lookupEnvT @String "DB_POOL_ACQUIRE_TIMEOUT"
+
+dbPoolAcquireWarnMillis :: Double
+dbPoolAcquireWarnMillis = 2000
+
+dbQueryTimeoutMicros :: Int
+dbQueryTimeoutMicros =
+  round . (* (1000000 :: Double)) . fromMaybe (30 :: Double) $ readMaybe =<< Conf.lookupEnvT @String "DB_QUERY_TIMEOUT"
+
+newtype DBQueryTimeoutException = DBQueryTimeoutException ConnTag
+  deriving stock (Show)
+
+instance Exception DBQueryTimeoutException
+
+logDbPoolAcquireEvent :: ConnTag -> Text -> Double -> IO ()
+logDbPoolAcquireEvent tag event waitedMillis = do
+  now <- getCurrentTime
+  BSL8.putStrLn
+    . encode
+    . object
+    $ [ "timestamp" .= (show now :: Text),
+        "lvl" .= ("WARNING" :: Text),
+        "tag" .= ("DB_POOL_ACQUIRE" :: Text),
+        "msg"
+          .= object
+            [ "event" .= event,
+              "pool" .= tag,
+              "waited_ms" .= waitedMillis
+            ]
+      ]
+
+withPoolResourceTimed :: (Text -> Double -> IO ()) -> ConnTag -> DP.Pool a -> (a -> IO b) -> IO b
+withPoolResourceTimed logEvent tag pool act = do
+  startedAt <- getCurrentTime
+  mAcquired <- timeout dbPoolAcquireTimeoutMicros (DP.takeResource pool)
+  (resource, localPool) <- case mAcquired of
+    Just acquired -> do
+      acquiredAt <- getCurrentTime
+      let waitedMillis = realToFrac (diffUTCTime acquiredAt startedAt) * 1000
+      when (waitedMillis >= dbPoolAcquireWarnMillis) $
+        logEvent "pool_acquire_slow" waitedMillis
+      pure acquired
+    Nothing -> do
+      timedOutAt <- getCurrentTime
+      let waitedMillis = realToFrac (diffUTCTime timedOutAt startedAt) * 1000
+      logEvent "pool_acquire_timeout" waitedMillis
+      DP.takeResource pool
+  mask $ \restore -> do
+    result <- restore (timedAct resource) `onException` DP.destroyResource pool localPool resource
+    DP.putResource localPool resource
+    pure result
+  where
+    timedAct resource = do
+      mResult <- timeout dbQueryTimeoutMicros (act resource)
+      case mResult of
+        Just result -> pure result
+        Nothing -> throwM (DBQueryTimeoutException tag)
 
 -- | Representation of native DB pools that we store in FlowRuntime
 data NativeSqlPool
