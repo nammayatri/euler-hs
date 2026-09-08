@@ -72,6 +72,7 @@ import EulerHS.Types
     getResponseCode,
   )
 import qualified EulerHS.Types as T
+import GHC.Clock (getMonotonicTime)
 import Servant.Client (BaseUrl (..), ClientError (..), Scheme (..))
 import Servant.Server (err403, errBody)
 import Test.Hspec
@@ -504,6 +505,15 @@ spec loggerCfg = do
                 await (Just $ T.Microseconds 1000) awaitable
           result <- runFlow rt flow
           result `shouldBe` Left T.AwaitingTimeout
+        it "Fork and await wakes when the fork finishes, not at a poll tick" $ \rt -> do
+          let flow = do
+                awaitable <- forkFlow' "101" (runIO (threadDelay 10000) >> pure i)
+                await (Just $ T.Microseconds 5000000) awaitable
+          start <- getMonotonicTime
+          result <- runFlow rt flow
+          elapsed <- subtract start <$> getMonotonicTime
+          result `shouldBe` Right 101
+          elapsed `shouldSatisfy` (< 0.25)
         it "Fork and successful await for 2 flows" $ \rt -> do
           let flow = do
                 awaitable1 <- forkFlow' "101" (runIO (threadDelay 10000) >> pure i)

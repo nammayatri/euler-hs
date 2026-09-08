@@ -85,6 +85,7 @@ import           Network.HTTP.Client.Internal
 import qualified Network.HTTP.Types as HTTP
 import qualified Servant.Client as S
 import           System.Process (readCreateProcess, shell)
+import           System.Timeout (timeout)
 import           Unsafe.Coerce (unsafeCoerce)
 import qualified EulerHS.Extra.Monitoring.Flow as EEMF
 import qualified Data.Bool as Bool
@@ -111,22 +112,14 @@ disconnect (MySQLPool _ pool)    = DP.destroyAllResources pool
 disconnect (SQLitePool _ pool)   = DP.destroyAllResources pool
 
 awaitMVarWithTimeout :: MVar (Either Text a) -> Int -> IO (Either AwaitingError a)
-awaitMVarWithTimeout mvar mcs | mcs <= 0  = go 0
-                              | otherwise = go mcs
+awaitMVarWithTimeout mvar mcs
+  | mcs <= 0  = toAwaitResult <$> tryReadMVar mvar
+  | otherwise = toAwaitResult <$> timeout mcs (readMVar mvar)
   where
-    portion = (mcs `div` 10) + 1
-    go rest
-      | rest <= 0 = do
-        mValue <- tryReadMVar mvar
-        pure $ case mValue of
-          Nothing          -> Left AwaitingTimeout
-          Just (Right val) -> Right val
-          Just (Left err)  -> Left $ ForkedFlowError err
-      | otherwise = do
-          tryReadMVar mvar >>= \case
-            Just (Right val) -> pure $ Right val
-            Just (Left err)  -> pure $ Left $ ForkedFlowError err
-            Nothing          -> threadDelay portion >> go (rest - portion)
+    toAwaitResult = \case
+      Nothing          -> Left AwaitingTimeout
+      Just (Right val) -> Right val
+      Just (Left err)  -> Left $ ForkedFlowError err
 
 -- | Utility function to convert HttpApi HTTPRequests to http-client HTTP
 -- requests
