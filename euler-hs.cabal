@@ -126,7 +126,7 @@ library
     , case-insensitive
     , casing
     , cereal
-    , connection
+    , crypton-connection
     , containers
     , cryptostore
     , ctrie
@@ -185,10 +185,10 @@ library
     , validation
     , validation-selective
     , vector
-    , x509
-    , x509-store
-    , x509-system
-    , x509-validation
+    , crypton-x509
+    , crypton-x509-store
+    , crypton-x509-system
+    , crypton-x509-validation
     , safe-exceptions
     , pcre-heavy
     , pcre-light
@@ -318,9 +318,9 @@ test-suite language
     , vector
     , warp
     , warp-tls
-    , x509-store
+    , crypton-x509-store
     , tls
-    , connection
+    , crypton-connection
     , time
     , tinylog
     , template-haskell
@@ -331,4 +331,3 @@ test-suite language
 
   ghc-options:    -threaded -O2
   hs-source-dirs: test/language
-
