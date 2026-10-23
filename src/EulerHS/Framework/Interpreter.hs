@@ -239,8 +239,8 @@ interpretFlowMethod _ R.FlowRuntime {_httpClientManagers, _defaultHttpClientMana
 
 interpretFlowMethod mbFlowGuid flowRt (L.CallServantAPI mngr bUrl (EulerClient f) next) =
     fmap next $ do
-          let S.ClientEnv manager baseUrl cookieJar makeClientRequest = S.mkClientEnv mngr bUrl
-              clientE = S.ClientEnv manager baseUrl cookieJar (\url -> getResponseTimeout . makeClientRequest url)
+          let S.ClientEnv manager baseUrl cookieJar makeClientRequest middleware = S.mkClientEnv mngr bUrl
+              clientE = S.ClientEnv manager baseUrl cookieJar (\url req -> (pure . getResponseTimeout) =<< makeClientRequest url req) middleware
           eitherResult <- tryRunClient $! S.runClientM (runEulerClient (if shouldLogAPI
                                                                           then dbgLogger
                                                                           else emtpyLogger
