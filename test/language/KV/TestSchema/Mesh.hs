@@ -27,7 +27,8 @@ meshConfig =
       tableShardModRange = (0, 128),
       redisKeyPrefix = "",
       forceDrainToDB = False,
-      recacheFindEnabled = False
+      recacheFindEnabled = False,
+      exactPagingEnabled = False
     }
 
 dbMeshTrackerTables :: Set.Set Text

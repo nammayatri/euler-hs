@@ -10,6 +10,7 @@ import qualified Data.Aeson as A
 import Data.Aeson.Encode.Pretty (encodePretty)
 import qualified Data.Aeson.Key as AKey
 import qualified Data.Aeson.KeyMap as AKM
+import qualified Data.Aeson.Types as AT
 import qualified Data.ByteString.Lazy as BSL
 -- import           Servant (err500)
 
@@ -46,6 +47,7 @@ import EulerHS.KVConnector.Types
     PrimaryKey (..),
     SecondaryKey (..),
     Source (..),
+    TermWrap (..),
   )
 import EulerHS.KVDB.Types (KVDBReply)
 import qualified EulerHS.Language as L
@@ -337,6 +339,19 @@ getPKeyAndValueList table = do
     go hm x = case AKM.lookup (AKey.fromText $ fst x) hm of
       Just val -> (fst x, val)
       Nothing -> error $ "Cannot find " <> (fst x) <> " field in the row"
+
+-- Where clause that excludes this row by primary key: pk <> v, or for a composite key
+-- NOT (a = x AND b = y) written as Or [a <> x, b <> y]. Left when a key value can't be parsed into
+-- the table's column type.
+getPKeyExclusionClause :: forall be table. (HasCallStack, KVConnector (table Identity), A.ToJSON (table Identity), MeshMeta be table) => table Identity -> Either String (Clause be table)
+getPKeyExclusionClause table = do
+  terms <- traverse (\(field, value) -> AT.parseEither (`parseFieldAndGetClause` field) value) (getPKeyAndValueList table)
+  pure $ case map notThisValue terms of
+    [single] -> single
+    several -> Or several
+  where
+    notThisValue :: TermWrap be table -> Clause be table
+    notThisValue (TermWrap col value) = Is col (Not (Eq value))
 
 getSortedKey :: [(Text, Text)] -> Text
 getSortedKey kvTup = do
