@@ -135,7 +135,8 @@ data MeshConfig = MeshConfig
     tableShardModRange :: (Int, Int),
     redisKeyPrefix :: Text,
     forceDrainToDB :: Bool,
-    recacheFindEnabled :: Bool
+    recacheFindEnabled :: Bool,
+    exactPagingEnabled :: Bool
   }
   deriving (Generic, Eq, Show, A.ToJSON)
 

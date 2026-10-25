@@ -114,7 +114,8 @@ meshCfg =
       tableShardModRange = (0, 128),
       redisKeyPrefix = "",
       forceDrainToDB = False,
-      recacheFindEnabled = False
+      recacheFindEnabled = False,
+      exactPagingEnabled = False
     }
 
 -- Treat the secondary Redis as this pod's primary (used to seed the "other cloud").
@@ -306,7 +307,8 @@ runKvLiveTests = do
         tLockEmptySetClause,
         tLockWritesDrainerStream,
         tLockSecondaryRedisWrite,
-        tLockMultipleMatches
+        tLockMultipleMatches,
+        tFindAllWithOptionsPagingMixed
       ]
 
   let passed = length (filter (== True) results)
@@ -473,6 +475,41 @@ tFindAllWithOptions = do
     pure (a, b)
   ok1 <- check "desc updatedAt limit 2 ⇒ [o3,o2]" $ (ids <$> top2) =?= ["o3", "o2"]
   ok2 <- check "desc updatedAt limit 1 offset 1 ⇒ [o2]" $ (ids <$> off1) =?= ["o2"]
+  pure (ok1 && ok2)
+
+-- Offset paging over a mix of Redis and Postgres rows, ordered by updatedAt desc:
+--   pn1, pn2      Redis only (created, not drained)
+--   pj4, pj5      in Postgres and updated in Redis
+--   pj3           in Postgres, deleted through KV (tombstone)
+--   pj1           in Postgres, updated in Redis so it no longer matches (cnt 0); found via the groupId index
+--   the rest      Postgres only
+-- Every (limit, offset) page must equal a slice of the merged order.
+tFindAllWithOptionsPagingMixed :: IO Bool
+tFindAllWithOptionsPagingMixed = do
+  putStrLn "\n[47] findAllWithOptionsKVConnector (exactPagingEnabled) — offset paging over Redis + Postgres rows"
+  let g = "gPG47" :: Text
+      jRow n = mkRow ("pj" <> T.pack (show n)) g "active" n Nothing (fromIntegral n * 10)
+      redisOnly = [mkRow "pn1" g "active" 11 Nothing 110, mkRow "pn2" g "active" 12 Nothing 120]
+      updatedInRedis = map (\r -> r {note = Just "updated"}) [jRow 4, jRow 5]
+      noLongerMatchingInRedis = (jRow 1) {cnt = 0}
+      whereC = [Is groupId (Eq g), Is cnt (GreaterThan (0 :: Int))]
+      expected = ["pn2", "pn1", "pj10", "pj9", "pj8", "pj7", "pj6", "pj5", "pj4", "pj2"]
+      pageCases = [(l, o) | l <- [1 .. 4], o <- [0 .. 11]]
+      want (l, o) = take l (drop o expected)
+  mapM_ (insertDbRow . jRow) [1 .. 10]
+  (single, multi) <- runFlow $ do
+    forM_ (redisOnly ++ updatedInRedis ++ [noLongerMatchingInRedis, jRow 3]) (createWithKVConnector dbConf meshCfg)
+    _ <- deleteWithKVConnector dbConf meshCfg [Is id (Eq ("pj3" :: Text))]
+    let pagesWith cfg = forM pageCases $ \(l, o) -> do
+          r <- findAllWithOptionsKVConnector dbConf cfg whereC (Desc updatedAt) (Just l) (Just o)
+          pure ((l, o), ids <$> r)
+    (,) <$> pagesWith meshCfg {exactPagingEnabled = True} <*> pagesWith cfgMultiCloud {exactPagingEnabled = True}
+  let wrong pages = [(lo, either (const ["<error>"]) (\xs -> xs) r) | (lo, r) <- pages, either (const True) (/= want lo) r]
+      report label pages = do
+        forM_ (wrong pages) $ \(lo, got) -> putStrLn $ "    " <> label <> " page " <> show lo <> " expected " <> show (want lo) <> " got " <> show got
+        check (label <> ": every (limit, offset) page is a slice of the merged order") (null (wrong pages))
+  ok1 <- report "single Redis" single
+  ok2 <- report "multi-cloud" multi
   pure (ok1 && ok2)
 
 tFindAllWithOptionsNoOrder :: IO Bool

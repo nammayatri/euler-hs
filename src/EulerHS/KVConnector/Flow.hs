@@ -1326,82 +1326,81 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
               (redisFindAll primaryOnlyCfg whereClause)
               (redisFindAll secondaryAsPrimaryCfg whereClause)
           case extractMultiCloudKVRows primaryKvRows secondaryKvRows of
-            Right (primaryKvLiveRows, primaryKvDeadRows, secondaryKvLiveRows, secondaryKvDeadRows) -> do
-              let -- Merge all KV rows
-                  allKvLiveRows = primaryKvLiveRows ++ secondaryKvLiveRows
-                  allKvDeadRows = primaryKvDeadRows ++ secondaryKvDeadRows
-                  -- Match and deduplicate rows from both Redis instances
-                  matchedKVLiveRows = matchAndDeduplicateKVRows meshCfg whereClause primaryKvLiveRows secondaryKvLiveRows
-                  matchedKVDeadRows = deduplicateKVDeadRows meshCfg primaryKvDeadRows secondaryKvDeadRows
-                  offset = fromMaybe 0 mbOffset
-                  shift = length matchedKVLiveRows + length matchedKVDeadRows
-                  updatedOffset = max (offset - shift) 0
-                  findAllQueryUpdated =
-                    DB.findRows
-                      ( sqlSelect'
-                          ! #where_ whereClause
-                          ! #orderBy (if isJust orderBy then Just [DMaybe.fromJust orderBy] else Nothing)
-                          ! #limit ((shift +) <$> mbLimit)
-                          ! #offset (Just updatedOffset) -- Offset is 0 in case mbOffset Nothing
-                          ! defaults
-                      )
-              dbRes <- runQuery dbConf findAllQueryUpdated
-              case dbRes of
-                Left err -> pure $ Left $ MDBError err
-                Right [] -> do
-                  if not (null matchedKVLiveRows)
-                    then Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVHitDBMiss
-                    else Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVMissDBMiss
-                  pure $ Right $ applyOptions offset matchedKVLiveRows
-                Right dbRows -> do
-                  if not (null matchedKVLiveRows)
-                    then Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVHit
-                    else Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVMissDBHit
-                  let allKVRows = allKvLiveRows ++ allKvDeadRows
-                      mergedRows = matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRows allKVRows
-                  if isJust mbOffset
-                    then do
-                      let noOfRowsFelledLeftSide = calculateLeftFelledRedisEntries matchedKVLiveRows dbRows
-                      pure $ Right $ applyOptions ((if updatedOffset == 0 then offset else shift) - noOfRowsFelledLeftSide) mergedRows
-                    else pure $ Right $ applyOptions 0 mergedRows
+            Right (primaryKvLiveRows, primaryKvDeadRows, secondaryKvLiveRows, secondaryKvDeadRows)
+              | meshCfg.exactPagingEnabled ->
+                findAllPagedWithKVRows
+                  (matchAndDeduplicateKVRows meshCfg whereClause primaryKvLiveRows secondaryKvLiveRows)
+                  (primaryKvLiveRows ++ secondaryKvLiveRows ++ primaryKvDeadRows ++ secondaryKvDeadRows)
+              | otherwise -> do
+                let -- Merge all KV rows
+                    allKvLiveRows = primaryKvLiveRows ++ secondaryKvLiveRows
+                    allKvDeadRows = primaryKvDeadRows ++ secondaryKvDeadRows
+                    -- Match and deduplicate rows from both Redis instances
+                    matchedKVLiveRows = matchAndDeduplicateKVRows meshCfg whereClause primaryKvLiveRows secondaryKvLiveRows
+                    matchedKVDeadRows = deduplicateKVDeadRows meshCfg primaryKvDeadRows secondaryKvDeadRows
+                    offset = fromMaybe 0 mbOffset
+                    shift = length matchedKVLiveRows + length matchedKVDeadRows
+                    updatedOffset = max (offset - shift) 0
+                    findAllQueryUpdated =
+                      DB.findRows
+                        ( sqlSelect'
+                            ! #where_ whereClause
+                            ! #orderBy (if isJust orderBy then Just [DMaybe.fromJust orderBy] else Nothing)
+                            ! #limit ((shift +) <$> mbLimit)
+                            ! #offset (Just updatedOffset) -- Offset is 0 in case mbOffset Nothing
+                            ! defaults
+                        )
+                dbRes <- runQuery dbConf findAllQueryUpdated
+                case dbRes of
+                  Left err -> pure $ Left $ MDBError err
+                  Right [] -> do
+                    incrementFindAllMetric modelName matchedKVLiveRows []
+                    pure $ Right $ applyOptions offset matchedKVLiveRows
+                  Right dbRows -> do
+                    incrementFindAllMetric modelName matchedKVLiveRows dbRows
+                    let allKVRows = allKvLiveRows ++ allKvDeadRows
+                        mergedRows = matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRows allKVRows
+                    if isJust mbOffset
+                      then do
+                        let noOfRowsFelledLeftSide = calculateLeftFelledRedisEntries matchedKVLiveRows dbRows
+                        pure $ Right $ applyOptions ((if updatedOffset == 0 then offset else shift) - noOfRowsFelledLeftSide) mergedRows
+                      else pure $ Right $ applyOptions 0 mergedRows
             Left err -> pure $ Left err
         else do
           -- Original single Redis logic
           kvRes <- redisFindAll meshCfg whereClause
           case kvRes of
-            Right kvRows -> do
-              let matchedKVLiveRows = findAllMatching whereClause (fst kvRows)
-                  matchedKVDeadRows = snd kvRows
-                  offset = fromMaybe 0 mbOffset
-                  shift = length matchedKVLiveRows + length matchedKVDeadRows
-                  updatedOffset = max (offset - shift) 0
-                  findAllQueryUpdated =
-                    DB.findRows
-                      ( sqlSelect'
-                          ! #where_ whereClause
-                          ! #orderBy (if isJust orderBy then Just [DMaybe.fromJust orderBy] else Nothing)
-                          ! #limit ((shift +) <$> mbLimit)
-                          ! #offset (Just updatedOffset) -- Offset is 0 in case mbOffset Nothing
-                          ! defaults
-                      )
-              dbRes <- runQuery dbConf findAllQueryUpdated
-              case dbRes of
-                Left err -> pure $ Left $ MDBError err
-                Right [] -> do
-                  if not (null matchedKVLiveRows)
-                    then Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVHitDBMiss
-                    else Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVMissDBMiss
-                  pure $ Right $ applyOptions offset matchedKVLiveRows
-                Right dbRows -> do
-                  if not (null matchedKVLiveRows)
-                    then Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVHit
-                    else Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVMissDBHit
-                  let mergedRows = matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRows (snd kvRows ++ fst kvRows)
-                  if isJust mbOffset
-                    then do
-                      let noOfRowsFelledLeftSide = calculateLeftFelledRedisEntries matchedKVLiveRows dbRows
-                      pure $ Right $ applyOptions ((if updatedOffset == 0 then offset else shift) - noOfRowsFelledLeftSide) mergedRows
-                    else pure $ Right $ applyOptions 0 mergedRows
+            Right kvRows
+              | meshCfg.exactPagingEnabled -> findAllPagedWithKVRows (findAllMatching whereClause (fst kvRows)) (snd kvRows ++ fst kvRows)
+              | otherwise -> do
+                let matchedKVLiveRows = findAllMatching whereClause (fst kvRows)
+                    matchedKVDeadRows = snd kvRows
+                    offset = fromMaybe 0 mbOffset
+                    shift = length matchedKVLiveRows + length matchedKVDeadRows
+                    updatedOffset = max (offset - shift) 0
+                    findAllQueryUpdated =
+                      DB.findRows
+                        ( sqlSelect'
+                            ! #where_ whereClause
+                            ! #orderBy (if isJust orderBy then Just [DMaybe.fromJust orderBy] else Nothing)
+                            ! #limit ((shift +) <$> mbLimit)
+                            ! #offset (Just updatedOffset) -- Offset is 0 in case mbOffset Nothing
+                            ! defaults
+                        )
+                dbRes <- runQuery dbConf findAllQueryUpdated
+                case dbRes of
+                  Left err -> pure $ Left $ MDBError err
+                  Right [] -> do
+                    incrementFindAllMetric modelName matchedKVLiveRows []
+                    pure $ Right $ applyOptions offset matchedKVLiveRows
+                  Right dbRows -> do
+                    incrementFindAllMetric modelName matchedKVLiveRows dbRows
+                    let mergedRows = matchedKVLiveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRows (snd kvRows ++ fst kvRows)
+                    if isJust mbOffset
+                      then do
+                        let noOfRowsFelledLeftSide = calculateLeftFelledRedisEntries matchedKVLiveRows dbRows
+                        pure $ Right $ applyOptions ((if updatedOffset == 0 then offset else shift) - noOfRowsFelledLeftSide) mergedRows
+                      else pure $ Right $ applyOptions 0 mergedRows
             Left err -> pure $ Left err
     else do
       let findAllQuery =
@@ -1419,12 +1418,66 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
     applyOptions shift rows = do
       let resWithoutLimit = case orderBy of
             Nothing -> drop shift rows
-            Just res -> do
-              let cmp = case res of
-                    Asc col -> compareCols (fromColumnar' . col . columnize) True
-                    Desc col -> compareCols (fromColumnar' . col . columnize) False
-              (drop shift . sortBy cmp) rows
+            Just res -> (drop shift . sortBy (orderCmp res)) rows
       maybe resWithoutLimit (`take` resWithoutLimit) mbLimit
+
+    orderCmp :: OrderBy table -> table Identity -> table Identity -> Ordering
+    orderCmp res = case res of
+      Asc col -> compareCols (fromColumnar' . col . columnize) True
+      Desc col -> compareCols (fromColumnar' . col . columnize) False
+
+    findAllPagedWithKVRows :: [table Identity] -> [table Identity] -> m (MeshResult [table Identity])
+    findAllPagedWithKVRows matchedKVLiveRows allKVRows = do
+      let modelName = tableName @(table Identity)
+          offset = fromMaybe 0 mbOffset
+          kvRows = maybe matchedKVLiveRows (\res -> sortBy (orderCmp res) matchedKVLiveRows) orderBy
+          kvCount = length kvRows
+          dbOffset = max (offset - kvCount) 0
+      case traverse getPKeyExclusionClause allKVRows of
+        Right exclusion -> do
+          dbRes <- runQuery dbConf $ findAllDbQuery (whereClause <> exclusion) ((+ min offset kvCount) <$> mbLimit) dbOffset
+          case dbRes of
+            Left err -> pure $ Left $ MDBError err
+            Right dbRows -> do
+              incrementFindAllMetric modelName kvRows dbRows
+              pure $ Right $ pageFromRows offset dbOffset kvRows dbRows
+        Left err -> do
+          L.logErrorT "findAllWithOptionsHelper" $ "Primary key exclusion failed for " <> modelName <> ", paging in memory: " <> T.pack err
+          dbRes <- runQuery dbConf $ findAllDbQuery whereClause ((\limit -> offset + limit + length allKVRows) <$> mbLimit) 0
+          case dbRes of
+            Left dbErr -> pure $ Left $ MDBError dbErr
+            Right dbRows -> do
+              incrementFindAllMetric modelName kvRows dbRows
+              pure $ Right $ applyOptions offset (kvRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRows allKVRows)
+
+    findAllDbQuery :: Where be table -> Maybe Int -> Int -> DB.SqlDB beM [table Identity]
+    findAllDbQuery dbWhereClause dbLimit dbOffset =
+      DB.findRows
+        ( sqlSelect'
+            ! #where_ dbWhereClause
+            ! #orderBy (if isJust orderBy then Just [DMaybe.fromJust orderBy] else Nothing)
+            ! #limit dbLimit
+            ! #offset (Just dbOffset)
+            ! defaults
+        )
+
+    pageFromRows :: Int -> Int -> [table Identity] -> [table Identity] -> [table Identity]
+    pageFromRows offset dbOffset kvRows dbRows
+      | dbOffset == 0 = applyOptions offset (kvRows ++ dbRows)
+      | otherwise = case dbRows of
+        [] -> []
+        firstDbRow : _ -> do
+          let sortsBeforeFirstDbRow row = maybe True (\res -> orderCmp res row firstDbRow == LT) orderBy
+              kvBefore = length $ takeWhile sortsBeforeFirstDbRow kvRows
+          applyOptions (offset - dbOffset - kvBefore) (drop kvBefore kvRows ++ dbRows)
+
+    incrementFindAllMetric :: Text -> [table Identity] -> [table Identity] -> m ()
+    incrementFindAllMetric modelName kvRows dbRows =
+      Metrics.incrementKVHitMissMetric "FIND_ALL" modelName $ case (null kvRows, null dbRows) of
+        (False, False) -> Metrics.KVHit
+        (False, True) -> Metrics.KVHitDBMiss
+        (True, False) -> Metrics.KVMissDBHit
+        (True, True) -> Metrics.KVMissDBMiss
 
     calculateLeftFelledRedisEntries :: [table Identity] -> [table Identity] -> Int
     calculateLeftFelledRedisEntries kvRows dbRows = do
