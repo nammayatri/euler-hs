@@ -341,15 +341,17 @@ getPKeyAndValueList table = do
       Nothing -> error $ "Cannot find " <> (fst x) <> " field in the row"
 
 -- Where clause that excludes this row by primary key: pk <> v, or for a composite key
--- NOT (a = x AND b = y) written as Or [a <> x, b <> y]. Left when a key value can't be parsed into
--- the table's column type.
+-- NOT (a = x AND b = y) written as Or [a <> x, b <> y]. Key values are read from the row's ToJSON.
+-- Left when a key value can't be parsed into the table's column type.
 getPKeyExclusionClause :: forall be table. (HasCallStack, KVConnector (table Identity), A.ToJSON (table Identity), MeshMeta be table) => table Identity -> Either String (Clause be table)
 getPKeyExclusionClause table = do
-  terms <- traverse (\(field, value) -> AT.parseEither (`parseFieldAndGetClause` field) value) (getPKeyAndValueList table)
+  let (PKey keyValues) = primaryKey table
+  terms <- traverse (\(field, _) -> AT.parseEither (keyTerm field) (A.toJSON table)) keyValues
   pure $ case map notThisValue terms of
     [single] -> single
     several -> Or several
   where
+    keyTerm field = A.withObject "row" $ \row -> row A..: AKey.fromText field >>= (`parseFieldAndGetClause` field)
     notThisValue :: TermWrap be table -> Clause be table
     notThisValue (TermWrap col value) = Is col (Not (Eq value))
 
