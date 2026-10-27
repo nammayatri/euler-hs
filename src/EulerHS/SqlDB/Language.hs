@@ -34,7 +34,7 @@ import qualified EulerHS.SqlDB.Types as T
 type SqlDB beM = F (SqlDBMethodF beM)
 
 data SqlDBMethodF (beM :: Type -> Type) next where
-  SqlDBMethod :: HasCallStack => (T.NativeSqlConn -> (Text -> IO ()) -> IO a) -> (a -> next) -> SqlDBMethodF beM next
+  SqlDBMethod :: HasCallStack => (T.NativeSqlConn -> T.RowDecodeMode -> (Text -> IO ()) -> IO a) -> (a -> next) -> SqlDBMethodF beM next
   SqlThrowException :: (HasCallStack, Exception e) => e -> (a -> next) -> SqlDBMethodF beM next
 
 instance Functor (SqlDBMethodF beM) where
@@ -45,7 +45,7 @@ sqlDBMethod ::
   (HasCallStack, T.BeamRunner beM) =>
   beM a ->
   SqlDB beM a
-sqlDBMethod act = liftFC $ SqlDBMethod (`T.getBeamDebugRunner` act) id
+sqlDBMethod act = liftFC $ SqlDBMethod (\conn mode -> T.getBeamDebugRunner conn mode act) id
 
 -- For testing purpose
 sqlThrowException :: forall a e beM. (HasCallStack, Exception e) => e -> SqlDB beM a

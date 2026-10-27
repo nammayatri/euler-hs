@@ -58,6 +58,12 @@ data UseMasterRedis = UseMasterRedis
 
 instance OptionEntity UseMasterRedis Bool
 
+data LenientDecodeEnabled = LenientDecodeEnabled
+  deriving stock (Eq, Show, Generic, Ord)
+  deriving anyclass (FromJSON, ToJSON)
+
+instance OptionEntity LenientDecodeEnabled Bool
+
 instance OptionEntity LocalLatencyId (Maybe Text)
 
 instance OptionEntity DBMetricInfoKey DBMetricInfo
