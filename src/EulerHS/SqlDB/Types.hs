@@ -14,6 +14,7 @@ module EulerHS.SqlDB.Types
     deleteReturningListPG,
     updateReturningListPG,
     BeamRunner (..),
+    RowDecodeMode (..),
     NativeSqlPool (..),
     NativeSqlConn (..),
     ConnTag,
@@ -56,6 +57,7 @@ import qualified Data.Pool as DP
 import Data.Time.Clock (NominalDiffTime)
 import qualified Database.Beam as B
 import qualified Database.Beam.Backend.SQL as B
+import Database.Beam.Backend.SQL.Row (BeamRowReadError)
 import qualified Database.Beam.Backend.SQL.BeamExtensions as B
 import qualified Database.Beam.MySQL as BM
 import qualified Database.Beam.Postgres as BP
@@ -130,23 +132,29 @@ instance BeamRuntime BM.MySQL BM.MySQLM where
   rtDelete = B.runDelete
   rtDeleteReturningList = error "Not implemented"
 
+data RowDecodeMode
+  = StrictRowDecode
+  | LenientRowDecode (BeamRowReadError -> IO ())
+
 class BeamRunner beM where
-  getBeamDebugRunner :: NativeSqlConn -> beM a -> ((Text -> IO ()) -> IO a)
+  getBeamDebugRunner :: NativeSqlConn -> RowDecodeMode -> beM a -> ((Text -> IO ()) -> IO a)
 
 instance BeamRunner BS.SqliteM where
-  getBeamDebugRunner (NativeSQLiteConn conn) beM =
+  getBeamDebugRunner (NativeSQLiteConn conn) _ beM =
     \logger -> SQLite.runBeamSqliteDebug logger conn beM
-  getBeamDebugRunner _ _ = \_ -> error "Not a SQLite connection"
+  getBeamDebugRunner _ _ _ = \_ -> error "Not a SQLite connection"
 
 instance BeamRunner BP.Pg where
-  getBeamDebugRunner (NativePGConn conn) beM =
+  getBeamDebugRunner (NativePGConn conn) StrictRowDecode beM =
     \logger -> BP.runBeamPostgresDebug (logger) conn beM
-  getBeamDebugRunner _ _ = \_ -> error "Not a Postgres connection"
+  getBeamDebugRunner (NativePGConn conn) (LenientRowDecode onSkipped) beM =
+    \logger -> BP.runBeamPostgresDebugLenient logger onSkipped conn beM
+  getBeamDebugRunner _ _ _ = \_ -> error "Not a Postgres connection"
 
 instance BeamRunner BM.MySQLM where
-  getBeamDebugRunner (NativeMySQLConn conn) beM =
+  getBeamDebugRunner (NativeMySQLConn conn) _ beM =
     \logger -> BM.runBeamMySQLDebug logger conn beM
-  getBeamDebugRunner _ _ = \_ -> error "Not a MySQL connection"
+  getBeamDebugRunner _ _ _ = \_ -> error "Not a MySQL connection"
 
 withTransaction ::
   forall beM a.
