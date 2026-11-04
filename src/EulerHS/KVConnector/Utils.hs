@@ -45,9 +45,11 @@ import EulerHS.KVConnector.Types
     MeshResult,
     Operation (..),
     PrimaryKey (..),
+    SKeyFilter (..),
     SecondaryKey (..),
     Source (..),
     TermWrap (..),
+    skeyValueCovered,
   )
 import EulerHS.KVDB.Types (KVDBReply)
 import qualified EulerHS.Language as L
@@ -323,6 +325,22 @@ secondaryKeysFiltered table = filter filterEmptyValues (secondaryKeys table)
   where
     filterEmptyValues :: SecondaryKey -> Bool
     filterEmptyValues (SKey sKeyPairs) = not $ any (\p -> snd p == "") sKeyPairs
+
+skeyPairsCovered :: HM.HashMap Text SKeyFilter -> [(Text, Text)] -> Bool
+skeyPairsCovered filters = all (\(k, v) -> maybe True (`skeyValueCovered` v) (HM.lookup k filters))
+
+applySKeyFilters :: HM.HashMap Text SKeyFilter -> [SecondaryKey] -> [SecondaryKey]
+applySKeyFilters filters
+  | HM.null filters = id
+  | otherwise = filter (\(SKey pairs) -> skeyPairsCovered filters pairs)
+
+secondaryKeysWithFilters :: forall table. (KVConnector (table Identity)) => table Identity -> [SecondaryKey]
+secondaryKeysWithFilters table = applySKeyFilters (skeyFilterMap @(table Identity)) (secondaryKeysFiltered table)
+
+getSecondaryLookupKeysWithFilters :: forall table. (KVConnector (table Identity)) => Text -> table Identity -> [Text]
+getSecondaryLookupKeysWithFilters redisKeyPrefix table =
+  let tName = tableName @(table Identity)
+   in map (\(SKey s) -> redisKeyPrefix <> tName <> keyDelim <> getSortedKey s) (secondaryKeysWithFilters table)
 
 applyFPair :: (t -> b) -> (t, t) -> (b, b)
 applyFPair f (x, y) = (f x, f y)
@@ -702,6 +720,22 @@ validKeyMapForClause pinnedKeyHashMap keyHashMap fieldsAndValues
     isPinned k = HM.member k pinnedKeyHashMap
     hasRegularKey = any (\(k, _) -> HM.member k keyHashMap && not (isPinned k)) fieldsAndValues
     uncoveredPinnedFields = [k | (k, v) <- fieldsAndValues, maybe False (v `notElem`) (HM.lookup k pinnedKeyHashMap)]
+
+validKeyMapForClauseWithFilters :: HM.HashMap Text SKeyFilter -> HM.HashMap Text [Text] -> HM.HashMap Text Bool -> [(Text, Text)] -> HM.HashMap Text Bool
+validKeyMapForClauseWithFilters filters pinnedKeyHashMap keyHashMap fieldsAndValues =
+  validKeyMapForClause pinnedKeyHashMap (dropSKeyFilteredKeys filters keyHashMap fieldsAndValues) fieldsAndValues
+
+dropSKeyFilteredKeys :: HM.HashMap Text SKeyFilter -> HM.HashMap Text Bool -> [(Text, Text)] -> HM.HashMap Text Bool
+dropSKeyFilteredKeys filters keyHashMap fieldsAndValues
+  | HM.null filters || null uncoveredFields = keyHashMap
+  | otherwise = HM.filterWithKey (\k isPrimary -> isPrimary || not (any (keyContainsField k) uncoveredFields)) keyHashMap
+  where
+    uncoveredFields = HM.keys (HM.filterWithKey fieldUncovered filters)
+    fieldUncovered f skeyFilter =
+      case [v | (k, v) <- fieldsAndValues, k == f] of
+        [] -> any (\(k, _) -> keyContainsField k f) fieldsAndValues
+        queriedValues -> any (not . skeyValueCovered skeyFilter) queriedValues
+    keyContainsField k f = (keyDelim <> f <> keyDelim) `T.isInfixOf` (keyDelim <> k <> keyDelim)
 
 getPrimaryKeyFromFieldsAndValues :: (L.MonadFlow m) => Text -> MeshConfig -> HM.HashMap Text Bool -> [(Text, Text)] -> m (MeshResult [ByteString])
 getPrimaryKeyFromFieldsAndValues _ _ _ [] = pure $ Right []

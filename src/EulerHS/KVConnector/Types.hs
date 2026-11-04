@@ -21,6 +21,7 @@ import qualified Data.Aeson as A
 import Data.Aeson.Types (Parser)
 import Data.Data (Data)
 import qualified Data.HashMap.Strict as HM
+import qualified Data.HashSet as HS
 import qualified Data.Map.Strict as Map
 import Data.Time (UTCTime)
 import qualified Database.Beam as B
@@ -42,6 +43,12 @@ data DBCommandVersion = V1 | V2
 data PrimaryKey = PKey [(Text, Text)]
 
 data SecondaryKey = SKey [(Text, Text)]
+
+data SKeyFilter = SKeyExclude (HS.HashSet Text)
+  deriving (Eq, Show)
+
+skeyValueCovered :: SKeyFilter -> Text -> Bool
+skeyValueCovered (SKeyExclude vals) v = not (HS.member v vals)
 
 data KVLockConfig = KVLockConfig
   { lockKey :: Text,
@@ -65,6 +72,8 @@ class KVConnector table where
   keyMap :: HM.HashMap Text Bool -- True implies it is primary key and False implies secondary
   pinnedKeyMap :: HM.HashMap Text [Text]
   pinnedKeyMap = HM.empty
+  skeyFilterMap :: HM.HashMap Text SKeyFilter
+  skeyFilterMap = HM.empty
   primaryKey :: table -> PrimaryKey
   secondaryKeys :: table -> [SecondaryKey]
   mkSQLObject :: table -> A.Value
