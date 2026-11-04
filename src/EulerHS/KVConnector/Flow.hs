@@ -168,7 +168,7 @@ createKV meshCfg value = do
               _ <- L.runKVDB meshCfg.kvRedis $ L.sadd sKey [pKey]
               L.runKVDB meshCfg.kvRedis $ L.expire sKey meshCfg.redisTtl
           )
-          $ getSecondaryLookupKeys meshCfg.redisKeyPrefix val
+          $ getSecondaryLookupKeysWithFilters meshCfg.redisKeyPrefix val
       case foldEither revMappingRes of
         Left err -> pure $ Left $ RedisError (show err <> "Primary key => " <> show pKey <> " Secondary key => " <> show (getSecondaryLookupKeys meshCfg.redisKeyPrefix val) <> " in createKV")
         Right _ -> do
@@ -208,7 +208,7 @@ createInRedis meshCfg val = do
           _ <- L.runKVDB meshCfg.kvRedis $ L.sadd sKey [pKey]
           L.runKVDB meshCfg.kvRedis $ L.expire sKey meshCfg.redisTtl
       )
-      $ getSecondaryLookupKeys meshCfg.redisKeyPrefix val
+      $ getSecondaryLookupKeysWithFilters meshCfg.redisKeyPrefix val
   case foldEither revMappingRes of
     Left err -> pure $ Left $ RedisError (show err <> "Primary key => " <> show pKey <> " Secondary key => " <> show (getSecondaryLookupKeys meshCfg.redisKeyPrefix val))
     Right _ -> do
@@ -666,7 +666,7 @@ updateObjectRedis meshCfg redisConn updVals setClauses addPrimaryKeyToWhereClaus
 
         case resultToEither $ A.fromJSON updatedModel of
           Right value -> do
-            let olderSkeys = map (\(SKey s) -> s) (secondaryKeysFiltered obj)
+            let olderSkeys = map (\(SKey s) -> s) (secondaryKeysWithFilters obj)
             skeysUpdationRes <- modifySKeysRedis olderSkeys value
             case skeysUpdationRes of
               Right _ -> do
@@ -695,7 +695,7 @@ updateObjectRedis meshCfg redisConn updVals setClauses addPrimaryKeyToWhereClaus
           (modifiedSkeysOld, unModifiedSkeys) =
             applyFPair (map (getSortedKeyAndValue tName)) $
               segregateList (`isKeyModified` updValsMap) olderSkeys
-          newSkeys = map (\(SKey s) -> s) (secondaryKeys table)
+          newSkeys = map (\(SKey s) -> s) (applySKeyFilters (skeyFilterMap @(table Identity)) (secondaryKeys table))
           (modifiedSkeysNew, _) =
             applyFPair (map (getSortedKeyAndValue tName)) $
               segregateList (`isKeyModified` updValsMap) newSkeys
@@ -1234,7 +1234,7 @@ findOneFromRedis meshCfg whereClause = do
       clusterName = if meshCfg.kvRedis == meshCfg.kvRedisSecondary then "secondaryCluster" else "primaryCluster"
 
   Metrics.withKVLatencyMetric "REDIS_FIND_ONE" modelName clusterName $ do
-    eitherKeyRes <- mapM (\combo -> getPrimaryKeyFromFieldsAndValues modelName meshCfg (validKeyMapForClause (pinnedKeyMap @(table Identity)) keyHashMap combo) combo) andCombinationsFiltered
+    eitherKeyRes <- mapM (\combo -> getPrimaryKeyFromFieldsAndValues modelName meshCfg (validKeyMapForClauseWithFilters (skeyFilterMap @(table Identity)) (pinnedKeyMap @(table Identity)) keyHashMap combo) combo) andCombinationsFiltered
     result <- case foldEither eitherKeyRes of
       Right keyRes -> do
         let lenKeyRes = lengthOfLists keyRes
@@ -1834,7 +1834,7 @@ redisFindAll meshCfg whereClause = do
       clusterName = if meshCfg.kvRedis == meshCfg.kvRedisSecondary then "secondaryCluster" else "primaryCluster"
 
   Metrics.withKVLatencyMetric "REDIS_FIND_ALL" modelName clusterName $ do
-    eitherKeyRes <- mapM (\combo -> getPrimaryKeyFromFieldsAndValues modelName meshCfg (validKeyMapForClause (pinnedKeyMap @(table Identity)) keyHashMap combo) combo) andCombinationsFiltered
+    eitherKeyRes <- mapM (\combo -> getPrimaryKeyFromFieldsAndValues modelName meshCfg (validKeyMapForClauseWithFilters (skeyFilterMap @(table Identity)) (pinnedKeyMap @(table Identity)) keyHashMap combo) combo) andCombinationsFiltered
     result <- case foldEither eitherKeyRes of
       Right keyRes -> do
         let allKeys = concat keyRes
@@ -1933,7 +1933,7 @@ reCacheDBRows meshCfg dbRows = do
                     Right _ ->
                       L.runKVDB meshCfg.kvRedis $ L.expire sKey meshCfg.redisTtl
               )
-              $ getSecondaryLookupKeys meshCfg.redisKeyPrefix obj
+              $ getSecondaryLookupKeysWithFilters meshCfg.redisKeyPrefix obj
           return $ sequence res
       )
       dbRows
