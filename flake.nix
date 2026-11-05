@@ -1,7 +1,7 @@
 {
   inputs = {
     # Common is used only to get the GHC 9.2 package set.
-    common.url = "github:nammayatri/common";
+    common.url = "github:nammayatri/common?ref=ghc-98-upgrade";
 
     nixpkgs.follows = "common/nixpkgs";
     flake-parts.follows = "common/flake-parts";
@@ -17,18 +17,27 @@
     cereal.url = "github:juspay/cereal";
     cereal.flake = false;
 
-    juspay-extra.url = "github:juspay/euler-haskell-common";
+    # commits diff: 4892071 ... 23cb247
+    # 23cb247 (HEAD -> ghc-98-upgrade, origin/ghc-98-upgrade) GHC 9.8 upgrade
+    # c7105f0 (origin/main, origin/HEAD, main) Merge pull request #7 from saket-juspay/fix/nix-common-commit-update
+    # fee2150 chnaged nix common commit
+    # 79eb7b0 Merge pull request #5 from Nisarg1112/improvement/add-comments
+    # 80bf944 Merge pull request #6 from saket-juspay/feature/update-synced
+    # 4c2b145 Update branch with latest changes: Previously behind, now synchronized to the latest state(added some util functions).
+    # d96308c Comments added in few modules
+    # 4892071 Merge pull request #4 from srid/patch-1
+    juspay-extra.url = "github:roman-bodavskiy/euler-haskell-common?ref=ghc-98-upgrade";
     juspay-extra.inputs.haskell-flake.follows = "haskell-flake";
 
-    euler-events-hs.url = "github:juspay/euler-events-hs/main";
+    euler-events-hs.url = "github:roman-bodavskiy/euler-events-hs?ref=ghc-98-upgrade";
     euler-events-hs.inputs.haskell-flake.follows = "haskell-flake";
 
-    sequelize.url = "github:nammayatri/haskell-sequelize/backend/decoupled-drainer-changes";
+    sequelize.url = "github:nammayatri/haskell-sequelize/ghc-98-upgrade";
     sequelize.inputs.nixpkgs.follows = "nixpkgs";
     sequelize.inputs.haskell-flake.follows = "haskell-flake";
     sequelize.inputs.flake-parts.follows = "flake-parts";
 
-    hedis.url = "github:nammayatri/hedis/enh/zone-aware-replica-usage";
+    hedis.url = "github:nammayatri/hedis?ref=ghc-98-upgrade";
     hedis.flake = false;
 
     servant-mock.url = "github:arjunkathuria/servant-mock?rev=17e90cb831820a30b3215d4f164cf8268607891e";
@@ -42,7 +51,8 @@
     flake-parts.lib.mkFlake { inherit inputs; } {
       systems = nixpkgs.lib.systems.flakeExposed;
       imports = [
-        inputs.common.flakeModules.ghc927
+        # inputs.common.flakeModules.ghc927
+        inputs.common.flakeModules.ghc98
         inputs.haskell-flake.flakeModule
         inputs.flake-root.flakeModule
         inputs.treefmt-nix.flakeModule
@@ -85,6 +95,7 @@
         pre-commit.settings.hooks.treefmt.enable = lib.mkForce true;
 
         packages.default = self'.packages.euler-hs;
+
         haskellProjects.default = {
           devShell.tools = _: lib.mkForce ({
             haskell-language-server = null;
@@ -101,7 +112,7 @@
             inputs.juspay-extra.haskellFlakeProjectModules.output
             inputs.sequelize.haskellFlakeProjectModules.output
           ];
-          basePackages = config.haskellProjects.ghc927.outputs.finalPackages;
+          basePackages = config.haskellProjects.ghc98.outputs.finalPackages;
           packages = {
             hedis.source = inputs.hedis;
             cereal.source = inputs.cereal;
@@ -111,6 +122,7 @@
           settings = {
             bytestring-conversion.broken = false;
             hedis.check = false;
+            hedis.jailbreak = true;
             sequelize.check = false;
             # The euler-hs test-suites (language/db/extra, gated behind the
             # `enable-tests` cabal flag) pull in a few deps that are not part of
@@ -141,6 +153,19 @@
             servant = {
               jailbreak = true;
             };
+            juspay-extra = {
+              check = false;
+            };
+
+            cryptostore = { self, ... }: {
+              cabalFlags.use_crypton = true;
+              extraBuildDepends = [
+                self.crypton
+                self.crypton-x509
+                self.crypton-x509-validation
+              ];
+            };
+
           };
           autoWire = [ "packages" "checks" "devShells" "apps" ];
         };
