@@ -23,6 +23,7 @@ module EulerHS.KVConnector.Flow
     deleteReturningWithKVConnector,
     deleteAllReturningWithKVConnector,
     findAllWithKVAndConditionalDBInternal,
+    findAllWithKVInBatchConnector,
     findOneFromKvRedis,
     findAllFromKvRedis,
   )
@@ -33,6 +34,7 @@ import qualified Data.Aeson as A
 import qualified Data.ByteString.Lazy as BSL
 import Data.Either.Extra (mapLeft, mapRight)
 import qualified Data.HashMap.Strict as HM
+import qualified Data.HashSet as HS
 import Data.List (maximum)
 import qualified Data.Maybe as DMaybe
 import qualified Data.Serialize as Serialize
@@ -1807,6 +1809,77 @@ findAllWithKVAndConditionalDBInternal dbConf meshCfg whereClause orderBy = do
                   ! defaults
               )
       mapLeft MDBError <$> runQuery dbConf findAllQuery
+
+-- | Redis-first find-all for an IN list over one key column (e.g. driverId).
+-- Redis is read once for the whole clause; Postgres is queried only for the requested
+-- keys that have no live KV row. A key's live KV rows are all returned, so a key with
+-- several rows in Redis keeps every one of them.
+--
+-- A KV hit for a key is taken as complete for that key: a row for the same key that
+-- exists only in Postgres is not read. Use it for clauses that return at most one row
+-- per key (as findAllWithKVAndConditionalDBInternal does for a single lookup).
+findAllWithKVInBatchConnector ::
+  forall be table beM m.
+  ( HasCallStack,
+    BeamRuntime be beM,
+    Model be table,
+    MeshMeta be table,
+    KVConnector (table Identity),
+    FromJSON (table Identity),
+    Serialize.Serialize (table Identity),
+    L.MonadFlow m,
+    B.HasQBuilder be,
+    BeamRunner beM
+  ) =>
+  DBConfig beM ->
+  MeshConfig ->
+  Where be table ->
+  -- | The row's value for the key column
+  (table Identity -> Text) ->
+  -- | The requested key values (the IN list)
+  [Text] ->
+  -- | The clause for a subset of the key values
+  ([Text] -> Where be table) ->
+  m (MeshResult [table Identity])
+findAllWithKVInBatchConnector dbConf meshCfg whereClause rowKey keys mkWhere = do
+  let modelName = tableName @(table Identity)
+      findAllInDB clause = runQuery dbConf $ DB.findRows (sqlSelect' ! #where_ clause ! #orderBy Nothing ! defaults)
+  if meshCfg.kvHardKilled
+    then mapLeft MDBError <$> findAllInDB whereClause
+    else do
+      kvRes <-
+        if meshCfg.secondaryRedisEnabled && meshCfg.meshEnabled
+          then do
+            let (primaryOnlyCfg, secondaryAsPrimaryCfg) = createMultiCloudConfigs meshCfg
+            (primaryKvRows, secondaryKvRows) <-
+              callKVKVAsync
+                (redisFindAll primaryOnlyCfg whereClause)
+                (redisFindAll secondaryAsPrimaryCfg whereClause)
+            pure $
+              mapRight
+                ( \(primaryLive, primaryDead, secondaryLive, secondaryDead) ->
+                    (matchAndDeduplicateKVRows meshCfg whereClause primaryLive secondaryLive, primaryDead ++ secondaryDead)
+                )
+                (extractMultiCloudKVRows primaryKvRows secondaryKvRows)
+          else mapRight (\(live, dead) -> (findAllMatching whereClause live, dead)) <$> redisFindAll meshCfg whereClause
+      case kvRes of
+        Left err -> pure $ Left err
+        Right (liveRows, deadRows) -> do
+          let hitKeys = HS.fromList $ rowKey <$> liveRows
+              missedKeys = filter (not . (`HS.member` hitKeys)) keys
+          if null missedKeys
+            then do
+              Metrics.incrementKVHitMissMetric "FIND_ALL_BATCH" modelName Metrics.KVHit
+              pure $ Right liveRows
+            else do
+              dbRes <- findAllInDB (mkWhere missedKeys)
+              case dbRes of
+                Right dbRows -> do
+                  Metrics.incrementKVHitMissMetric "FIND_ALL_BATCH" modelName $
+                    if null dbRows then Metrics.KVMissDBMiss else Metrics.KVMissDBHit
+                  -- Postgres rows already in KV (live or dead) are dropped, so a row deleted in KV stays deleted
+                  pure $ Right $ liveRows ++ getUniqueDBRes meshCfg.redisKeyPrefix dbRows (liveRows ++ deadRows)
+                Left err -> pure $ Left $ MDBError err
 
 redisFindAll ::
   forall be table beM m.
