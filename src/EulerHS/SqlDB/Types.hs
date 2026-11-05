@@ -57,8 +57,8 @@ import qualified Data.Pool as DP
 import Data.Time.Clock (NominalDiffTime)
 import qualified Database.Beam as B
 import qualified Database.Beam.Backend.SQL as B
-import Database.Beam.Backend.SQL.Row (BeamRowReadError)
 import qualified Database.Beam.Backend.SQL.BeamExtensions as B
+import Database.Beam.Backend.SQL.Row (BeamRowReadError)
 import qualified Database.Beam.MySQL as BM
 import qualified Database.Beam.Postgres as BP
 import qualified Database.Beam.Sqlite as BS
