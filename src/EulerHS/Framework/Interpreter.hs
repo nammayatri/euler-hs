@@ -62,7 +62,7 @@ import           EulerHS.KVDB.Types (KVDBAnswer,
 import           EulerHS.Logger.Interpreter (runLogger)
 import qualified EulerHS.Logger.Language as L
 import qualified EulerHS.Logger.Runtime as R
-import           EulerHS.Logger.Types (LogLevel (Debug, Error, Info),
+import           EulerHS.Logger.Types (LogLevel (Debug, Error, Info, Warning),
                                        Message (Message), Action , Entity, ErrorL(..), Latency, RespCode)
 import           EulerHS.Prelude hiding (readIORef, writeIORef)
 import           EulerHS.PubSub.Interpreter (runPubSub)
@@ -87,6 +87,9 @@ import qualified Network.HTTP.Types as HTTP
 import qualified Servant.Client as S
 import           System.Process (readCreateProcess, shell)
 import           System.Timeout (timeout)
+import           System.Environment (lookupEnv)
+import           System.IO.Unsafe (unsafePerformIO)
+import           Data.Char (toLower)
 import           Unsafe.Coerce (unsafeCoerce)
 import qualified EulerHS.Extra.Monitoring.Flow as EEMF
 import qualified Data.Bool as Bool
@@ -669,13 +672,27 @@ interpretFlowMethod mbFlowGuid flowRt (L.RunDB conn sqlDbMethod runInTransaction
       connPoolExceptionWrapper (Left e) = (Left $ DBError ConnectionFailed $ show e, [])
       connPoolExceptionWrapper (Right r) = r
 
+      logConnectRetry :: ConnTag -> Bool -> Int -> Int -> SomeException -> IO ()
+      logConnectRetry connTag isLast attempt maxAttempts err =
+        runLogger mbFlowGuid (R._loggerRuntime . R._coreRuntime $ flowRt)
+          . L.logMessage' (if isLast then Error else Warning) ("CONNECT_RETRY" :: String)
+          $ Message
+              (Just $ A.object
+                [ "event" A..= (if isLast then "connect_failed" else "connect_retry" :: Text)
+                , "target" A..= ("postgres pool " <> connTag)
+                , "attempt" A..= attempt
+                , "max_attempts" A..= maxAttempts
+                , "error" A..= (show err :: Text)
+                ])
+              Nothing
+
       poolAcquireWarnMillis :: Double
       poolAcquireWarnMillis = 2000
 
       withResourceTimed :: ConnTag -> DP.Pool a -> (a -> IO b) -> IO b
       withResourceTimed connTag pool act = Exception.mask $ \restore -> do
         startedAt <- EEMF.getCurrentDateInMillisIO
-        (resource, localPool) <- restore (DP.takeResource pool)
+        (resource, localPool) <- restore $ acquireWithConnectRetry (logConnectRetry connTag) (DP.takeResource pool)
         acquiredAt <- EEMF.getCurrentDateInMillisIO
         let waitedMillis = acquiredAt - startedAt
         when (waitedMillis >= poolAcquireWarnMillis) $
@@ -748,3 +765,44 @@ kvdbConfigToTag = \case
 
 kvdbConnToTag :: KVDBConn -> Text
 kvdbConnToTag (Redis t _) = t
+
+data DbConnectRetryPolicy = DbConnectRetryPolicy
+  { dcrMaxAttempts :: Int
+  , dcrDelayMicros :: Int
+  , dcrMaxDelayMicros :: Int
+  }
+
+{-# NOINLINE dbConnectRetryPolicy #-}
+dbConnectRetryPolicy :: Maybe DbConnectRetryPolicy
+dbConnectRetryPolicy = unsafePerformIO $ do
+  enabled <- maybe False ((== "true") . map toLower) <$> lookupEnv "CONNECT_RETRY_ENABLED"
+  if enabled
+    then do
+      attempts <- fromMaybe 3 . (>>= readMaybe) <$> lookupEnv "CONNECT_RETRY_RUNTIME_MAX_ATTEMPTS"
+      delayMs <- fromMaybe 50 . (>>= readMaybe) <$> lookupEnv "CONNECT_RETRY_RUNTIME_DELAY_MS"
+      maxDelayMs <- fromMaybe 500 . (>>= readMaybe) <$> lookupEnv "CONNECT_RETRY_RUNTIME_MAX_DELAY_MS"
+      pure $ Just DbConnectRetryPolicy
+        { dcrMaxAttempts = max 1 attempts
+        , dcrDelayMicros = max 0 delayMs * 1000
+        , dcrMaxDelayMicros = max 0 maxDelayMs * 1000
+        }
+    else pure Nothing
+
+acquireWithConnectRetry :: (Bool -> Int -> Int -> SomeException -> IO ()) -> IO a -> IO a
+acquireWithConnectRetry logRetry acquire = go 1
+  where
+    go attempt = do
+      r <- try acquire
+      case r of
+        Right a -> pure a
+        Left (err :: SomeException)
+          | Just (_ :: Exception.SomeAsyncException) <- fromException err -> throwIO err
+          | Just policy <- dbConnectRetryPolicy -> do
+              let isLast = attempt >= dcrMaxAttempts policy
+              logRetry isLast attempt (dcrMaxAttempts policy) err
+              if isLast
+                then throwIO err
+                else do
+                  threadDelay (min (dcrMaxDelayMicros policy) (dcrDelayMicros policy * 2 ^ min 20 (attempt - 1)))
+                  go (attempt + 1)
+          | otherwise -> throwIO err
