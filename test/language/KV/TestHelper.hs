@@ -7,7 +7,7 @@ import qualified Data.Text as Text
 import Database.Beam.MySQL (MySQLM)
 import qualified Database.Beam.MySQL as BM
 import qualified EulerHS.KVConnector.Flow as DB
-import EulerHS.KVConnector.Types hiding (kvRedis)
+import EulerHS.KVConnector.Types
 import EulerHS.KVConnector.Utils (decodeToField, getPKeyWithShard, getSecondaryLookupKeys)
 import qualified EulerHS.Language as L
 import EulerHS.Prelude

@@ -22,7 +22,7 @@ import Data.Time.LocalTime (addLocalTime)
 import qualified Database.Beam as B
 import EulerHS.CachedSqlDBQuery (runQuery)
 import EulerHS.KVConnector.InMemConfig.Types
-import EulerHS.KVConnector.Types (KVConnector (..), MeshConfig, MeshError (MDBError, UnexpectedError), MeshMeta (..), MeshResult, Source (..), tableName)
+import EulerHS.KVConnector.Types (KVConnector (..), MeshConfig, MeshError (MDBError, UnexpectedError), MeshMeta (..), MeshResult, Source (..), localKvRedis, tableName)
 import EulerHS.KVConnector.Utils
 import qualified EulerHS.Language as L
 import EulerHS.Prelude hiding (bracket)
@@ -51,7 +51,7 @@ checkAndStartLooper meshCfg decodeTable = do
         streamName <- getRandomStream
         when shouldLogFindDBCallLogs $ L.logDebug @Text "checkAndStartLooper" $ "Connecting with Stream <" <> streamName <> "> for table " <> tableName @(table Identity)
         L.setOption (LooperStarted (tableName @(table Identity))) True
-        L.fork $ looperForRedisStream decodeTable meshCfg.kvRedis streamName meshCfg
+        L.fork $ looperForRedisStream decodeTable (localKvRedis meshCfg) streamName meshCfg
 
 looperForRedisStream ::
   forall table m.
@@ -388,7 +388,7 @@ pushToInMemConfigStream meshCfg imcCommand alteredModel = do
             tableRow = Just alteredModel
           }
       strmValueT = decodeUtf8 . A.encode $ strmValue
-  mapM_ (pushToConfigStream meshCfg.kvRedis (tableName @(table Identity)) strmValueT) getConfigStreamNames
+  mapM_ (pushToConfigStream (localKvRedis meshCfg) (tableName @(table Identity)) strmValueT) getConfigStreamNames
   pure ()
 
 fetchRowFromDBAndAlterImc ::

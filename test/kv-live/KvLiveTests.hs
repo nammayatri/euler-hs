@@ -20,8 +20,8 @@
 --
 -- Infra (same as sorted-set-live):
 --   postgres on 5432, database euler_sorted_test  (table kv_live is auto-created)
---   redis-server --port 6379   (primary cloud)
---   redis-server --port 6380   (secondary cloud)
+--   redis-server --port 6379   (local cloud)
+--   redis-server --port 6380   (peer cloud A)
 --   cabal run euler-hs:exe:kv-live-test
 -- =============================================================================
 module KvLiveTests (runKvLiveTests, runRecacheTests) where
@@ -35,6 +35,7 @@ import Data.Time (UTCTime (..), addUTCTime, fromGregorian, secondsToDiffTime)
 import qualified Database.Beam.Postgres as BP
 import qualified Database.PostgreSQL.Simple as PGS
 import qualified EulerHS.Interpreters as I
+import EulerHS.KVConnector.CloudTag (cloudCodeOfGuid, preferredConnForGuid, tagGuidWithCloud)
 import EulerHS.KVConnector.Flow
   ( createWithKVConnector,
     createWoReturingKVConnector,
@@ -54,7 +55,6 @@ import EulerHS.KVConnector.Flow
     updateWithKVConnector,
     updateWoReturningWithKVConnector,
   )
-import EulerHS.KVConnector.CloudTag (cloudCodeOfGuid, preferredConnForGuid, tagGuidWithCloud)
 import EulerHS.KVConnector.Types (KVLockConfig (..), MeshConfig (..), MeshMeta (..), MeshResult, TermWrap, defaultKVLockConfig)
 import EulerHS.KVConnector.Utils (getPKeyWithShard)
 import qualified EulerHS.Language as L
@@ -69,6 +69,7 @@ import EulerHS.Types
 import qualified EulerHS.Types as T
 import Schema
 import Sequelize (Clause (..), OrderBy (..), Set (..), Term (..))
+import System.Environment (setEnv)
 import Prelude (Show (show), putStrLn)
 
 -- =============================================================================
@@ -88,19 +89,19 @@ dbConf =
       }
     PoolConfig {stripes = 1, keepAlive = 10, resourcesPerStripe = 4}
 
-connName, connNameSecondary, connNameThird :: Text
+connName, connNamePeerA, connNamePeerB :: Text
 connName = "KVRedis"
-connNameSecondary = "KVRedisSecondary"
-connNameThird = "KVRedisThird"
+connNamePeerA = "KVRedisPeerA"
+connNamePeerB = "KVRedisPeerB"
 
 redisCfg :: T.KVDBConfig
 redisCfg = T.mkKVDBConfig connName T.defaultKVDBConnConfig
 
-redisCfgSecondary :: T.KVDBConfig
-redisCfgSecondary = T.mkKVDBConfig connNameSecondary (T.defaultKVDBConnConfig {T.connectPort = 6380})
+redisCfgPeerA :: T.KVDBConfig
+redisCfgPeerA = T.mkKVDBConfig connNamePeerA (T.defaultKVDBConnConfig {T.connectPort = 6380})
 
-redisCfgThird :: T.KVDBConfig
-redisCfgThird = T.mkKVDBConfig connNameThird (T.defaultKVDBConnConfig {T.connectPort = 6381})
+redisCfgPeerB :: T.KVDBConfig
+redisCfgPeerB = T.mkKVDBConfig connNamePeerB (T.defaultKVDBConnConfig {T.connectPort = 6381})
 
 -- Primary-only (single cloud) config — the common case.
 meshCfg :: MeshConfig
@@ -111,12 +112,9 @@ meshCfg =
       memcacheEnabled = False,
       meshDBName = "ECRDB",
       ecRedisDBStream = "db-sync-stream",
-      kvRedis = connName,
-      kvRedisSecondary = connName,
-      kvRedisPeers = [],
-      kvRedisCloudCodes = [],
+      kvRedisClouds = [],
       kvRedisCloudFallback = False,
-      secondaryRedisEnabled = False,
+      multiCloudReadEnabled = False,
       redisTtl = 3600,
       kvHardKilled = False,
       tableShardModRange = (0, 128),
@@ -126,26 +124,23 @@ meshCfg =
       exactPagingEnabled = False
     }
 
--- Treat the secondary Redis as this pod's primary (used to seed the "other cloud").
-cfgSecondaryAsPrimary :: MeshConfig
-cfgSecondaryAsPrimary = meshCfg {kvRedis = connNameSecondary}
+-- Treat peer A's Redis as this pod's local cloud (used to seed the "other cloud").
+cfgPeerAAsLocal :: MeshConfig
+cfgPeerAAsLocal = meshCfg {kvRedisClouds = [(1, connNamePeerA)]}
 
--- Real multi-cloud: primary = 6379, secondary = 6380, cross-cloud reads on.
+-- Real multi-cloud: local = 6379, peer A = 6380, cross-cloud reads on.
 cfgMultiCloud :: MeshConfig
-cfgMultiCloud = meshCfg {kvRedis = connName, kvRedisSecondary = connNameSecondary, secondaryRedisEnabled = True, kvRedisCloudFallback = True}
+cfgMultiCloud = meshCfg {kvRedisClouds = [(0, connName), (1, connNamePeerA)], multiCloudReadEnabled = True, kvRedisCloudFallback = True}
 
-cfgThirdAsPrimary :: MeshConfig
-cfgThirdAsPrimary = meshCfg {kvRedis = connNameThird}
+cfgPeerBAsLocal :: MeshConfig
+cfgPeerBAsLocal = meshCfg {kvRedisClouds = [(2, connNamePeerB)]}
 
 cfgThreeCloud :: MeshConfig
 cfgThreeCloud =
   meshCfg
-    { kvRedis = connName,
-      kvRedisSecondary = connNameSecondary,
-      kvRedisPeers = [connNameSecondary, connNameThird],
-      kvRedisCloudCodes = [(0, connName), (1, connNameSecondary), (2, connNameThird)],
+    { kvRedisClouds = [(0, connName), (1, connNamePeerA), (2, connNamePeerB)],
       kvRedisCloudFallback = True,
-      secondaryRedisEnabled = True
+      multiCloudReadEnabled = True
     }
 
 baseTime :: UTCTime
@@ -173,8 +168,8 @@ runFlow flow =
     I.runFlow rt $ do
       _ <- L.initSqlDBConnection dbConf
       _ <- L.initKVDBConnection redisCfg
-      _ <- L.initKVDBConnection redisCfgSecondary
-      _ <- L.initKVDBConnection redisCfgThird
+      _ <- L.initKVDBConnection redisCfgPeerA
+      _ <- L.initKVDBConnection redisCfgPeerB
       flow
 
 runRaw :: Text -> IO ()
@@ -208,7 +203,7 @@ insertDbRow r = do
 -- keyspace (kvLive_*, its Z:: sorted-index mirror) is touched — never a global FLUSH.
 flushTestKeys :: L.Flow ()
 flushTestKeys =
-  forM_ [connName, connNameSecondary, connNameThird] $ \conn ->
+  forM_ [connName, connNamePeerA, connNamePeerB] $ \conn ->
     forM_ ["kvLive*", "Z::kvLive*", "kvlock_kvLive*"] $ \pat -> do
       eks <- L.runKVDB conn $ L.rawRequest ["KEYS", enc pat]
       case eks of
@@ -276,6 +271,7 @@ sortedIds (Left e) = Left (show e)
 --   Redis keys, so the caller need only ensure the servers are up.
 runKvLiveTests :: IO Bool
 runKvLiveTests = do
+  setEnv "CLOUD_TYPE" "AWS"
   putStrLn "\n############################################################"
   putStrLn "#  kv-live — full KV connector surface (live PG + Redis)"
   putStrLn "############################################################"
@@ -313,7 +309,7 @@ runKvLiveTests = do
         tMultiCloudFindPrimaryWins,
         tMultiCloudDedup,
         tFindOneOfMany,
-        tMultiCloudSecondaryOnlyRead,
+        tMultiCloudPeerOnlyRead,
         tDeleteTombstoneMarker,
         tUpdateMaybeToNothing,
         tHardKilled,
@@ -329,7 +325,7 @@ runKvLiveTests = do
         tLockMovesSecondaryIndex,
         tLockEmptySetClause,
         tLockWritesDrainerStream,
-        tLockSecondaryRedisWrite,
+        tLockPeerRedisWrite,
         tLockMultipleMatches,
         tFindAllWithOptionsPagingMixed,
         tCloudTagRoundTrip,
@@ -702,14 +698,14 @@ tDeleteAllReturning = do
 
 tMultiCloudFindPrimaryWins :: IO Bool
 tMultiCloudFindPrimaryWins = do
-  putStrLn "\n[26] multi-cloud findWithKVConnector — a primary HIT wins, secondary not consulted"
-  let primaryRow = mkRow "mc1" "gMC26" "active" 1 (Just "primary") 100
-      secondaryRow = mkRow "mc1" "gMC26" "active" 1 (Just "secondary") 100
+  putStrLn "\n[26] multi-cloud findWithKVConnector — a local HIT wins, peers not consulted"
+  let localRow = mkRow "mc1" "gMC26" "active" 1 (Just "local") 100
+      peerRow = mkRow "mc1" "gMC26" "active" 1 (Just "peer") 100
   found <- runFlow $ do
-    _ <- createWithKVConnector dbConf meshCfg primaryRow -- 6379
-    _ <- createWithKVConnector dbConf cfgSecondaryAsPrimary secondaryRow -- 6380
+    _ <- createWithKVConnector dbConf meshCfg localRow -- 6379
+    _ <- createWithKVConnector dbConf cfgPeerAAsLocal peerRow -- 6380
     findWithKVConnector dbConf cfgMultiCloud [Is id (Eq ("mc1" :: Text))]
-  check "primary copy (note=Just primary) wins" $ (fmap note <$> found) =?= (Just (Just "primary"))
+  check "local copy (note=Just local) wins" $ (fmap note <$> found) =?= (Just (Just "local"))
 
 tMultiCloudDedup :: IO Bool
 tMultiCloudDedup = do
@@ -717,7 +713,7 @@ tMultiCloudDedup = do
   let row = mkRow "mc2" "gMC27" "active" 1 Nothing 100
   res <- runFlow $ do
     _ <- createWithKVConnector dbConf meshCfg row -- 6379
-    _ <- createWithKVConnector dbConf cfgSecondaryAsPrimary row -- 6380
+    _ <- createWithKVConnector dbConf cfgPeerAAsLocal row -- 6380
     findAllWithOptionsKVConnector dbConf cfgMultiCloud [Is groupId (Eq ("gMC27" :: Text))] (Desc updatedAt) (Just 10) Nothing
   check "row present in both clouds ⇒ returned once" $ (ids <$> res) =?= ["mc2"]
 
@@ -739,29 +735,29 @@ tFindOneOfMany = do
 -- =============================================================================
 -- ADDED STRICT TESTS — close the gaps a strictness audit found:
 --   * the cross-cloud read path was never actually exercised (rows were always
---     in the primary too, so the primary-hit short-circuit masked it);
+--     in the local cloud too, so the local-hit short-circuit masked it);
 --   * delete only checked find⇒Nothing, indistinguishable from a hard DEL;
 --   * setting a Maybe column back to Nothing was untested.
 -- =============================================================================
 
--- [29] The REAL multi-cloud invariant: a row that lives ONLY in the secondary
--- cloud (6380) must be returned by a multi-cloud read (primary MISS → secondary).
--- A primary-only read must NOT see it — proving it is genuinely secondary-only,
--- so this would fail if the secondary-read branch were broken.
-tMultiCloudSecondaryOnlyRead :: IO Bool
-tMultiCloudSecondaryOnlyRead = do
-  putStrLn "\n[29] multi-cloud: a SECONDARY-only row (6380) is read via primary-miss→secondary"
-  let row = mkRow "scs1" "gSCS" "active" 1 (Just "only-on-secondary") 100
-  (viaMultiByPk, viaMultiBySecKey, primaryOnly, viaMultiAll) <- runFlow $ do
-    _ <- createWithKVConnector dbConf cfgSecondaryAsPrimary row -- write to 6380 ONLY
+-- [29] The REAL multi-cloud invariant: a row that lives ONLY in a peer
+-- cloud (6380) must be returned by a multi-cloud read (local MISS → peer).
+-- A local-only read must NOT see it — proving it is genuinely peer-only,
+-- so this would fail if the peer-read branch were broken.
+tMultiCloudPeerOnlyRead :: IO Bool
+tMultiCloudPeerOnlyRead = do
+  putStrLn "\n[29] multi-cloud: a PEER-only row (6380) is read via local-miss→peer"
+  let row = mkRow "scs1" "gSCS" "active" 1 (Just "only-on-peer") 100
+  (viaMultiByPk, viaMultiBySecKey, localOnly, viaMultiAll) <- runFlow $ do
+    _ <- createWithKVConnector dbConf cfgPeerAAsLocal row -- write to 6380 ONLY
     a <- findWithKVConnector dbConf cfgMultiCloud [Is id (Eq ("scs1" :: Text))]
     b <- findWithKVConnector dbConf cfgMultiCloud [Is groupId (Eq ("gSCS" :: Text))]
-    c <- findWithKVConnector dbConf meshCfg [Is id (Eq ("scs1" :: Text))] -- primary-only cfg
+    c <- findWithKVConnector dbConf meshCfg [Is id (Eq ("scs1" :: Text))] -- local-only cfg
     d <- findAllWithKVConnector dbConf cfgMultiCloud [Is groupId (Eq ("gSCS" :: Text))]
     pure (a, b, c, d)
-  ok1 <- check "multi-cloud find by pk ⇒ Just (read from secondary)" $ viaMultiByPk =?= Just row
+  ok1 <- check "multi-cloud find by pk ⇒ Just (read from a peer)" $ viaMultiByPk =?= Just row
   ok2 <- check "multi-cloud find by secondary index ⇒ Just" $ viaMultiBySecKey =?= Just row
-  ok3 <- check "primary-only find ⇒ Nothing (row is genuinely NOT on primary)" $ primaryOnly =?= Nothing
+  ok3 <- check "local-only find ⇒ Nothing (row is genuinely NOT on the local cloud)" $ localOnly =?= Nothing
   ok4 <- check "multi-cloud findAll ⇒ {scs1}" $ sortedIds viaMultiAll =?= ["scs1"]
   pure (ok1 && ok2 && ok3 && ok4)
 
@@ -1113,13 +1109,13 @@ tLockWritesDrainerStream = do
     pure (b, a)
   check "exactly one command pushed to the drainer stream" (after == before + 1)
 
-tLockSecondaryRedisWrite :: IO Bool
-tLockSecondaryRedisWrite = do
-  putStrLn "\n[45] updateOneWithLockKVConnector — row only in secondary cloud: update lands there"
+tLockPeerRedisWrite :: IO Bool
+tLockPeerRedisWrite = do
+  putStrLn "\n[45] updateOneWithLockKVConnector — row only in a peer cloud: update lands there"
   let row = mkRow "lk12" "gLK45" "active" 2 Nothing 100
-  (res, inSecondary, inPrimary) <- runFlow $ do
+  (res, inSecondary, inLocal) <- runFlow $ do
     -- seed the other cloud only
-    _ <- createWithKVConnector dbConf cfgSecondaryAsPrimary row
+    _ <- createWithKVConnector dbConf cfgPeerAAsLocal row
     r <-
       updateOneWithLockKVConnector
         dbConf
@@ -1133,7 +1129,7 @@ tLockSecondaryRedisWrite = do
     pure (r, f, a)
   ok1 <- check "returns cnt = 7 (2 + 5)" $ (fmap cnt <$> res) =?= Just 7
   ok2 <- check "reread across clouds sees cnt = 7" $ (fmap cnt <$> inSecondary) =?= Just 7
-  ok3 <- check "primary cloud did not gain a copy" $ case (inPrimary :: Either T.KVDBReply Integer) of
+  ok3 <- check "local cloud did not gain a copy" $ case (inLocal :: Either T.KVDBReply Integer) of
     Right 0 -> True
     _ -> False
   pure (ok1 && ok2 && ok3)
@@ -1224,8 +1220,9 @@ tCloudTagRoundTrip = do
   ok2 <- check "tagged id keeps UUID shape (36 chars, 4 dashes)" $ all (\t -> T.length t == 36 && T.count "-" t == 4) tagged
   ok3 <- check "only the last char changes" $ all (\t -> T.take 35 t == T.take 35 base) tagged
   ok4 <- check "non-guid id is not tagged" $ tagGuidWithCloud 1 "plain-id" == "plain-id" && cloudCodeOfGuid "plain-id12" == Nothing
-  ok5 <- check "preferredConnForGuid maps code to connection" $
-    preferredConnForGuid [(0, "a"), (1, "b")] (tagGuidWithCloud 1 base) == Just "b"
+  ok5 <-
+    check "preferredConnForGuid maps code to connection" $
+      preferredConnForGuid [(0, "a"), (1, "b")] (tagGuidWithCloud 1 base) == Just "b"
   ok6 <- check "unknown code gives no hint" $ preferredConnForGuid [(0, "a")] (tagGuidWithCloud 5 base) == Nothing
   pure (and [ok1, ok2, ok3, ok4, ok5, ok6])
 
@@ -1233,8 +1230,8 @@ tThreeCloudTaggedRead :: IO Bool
 tThreeCloudTaggedRead = do
   putStrLn "\n[N2] 3 clouds: a row tagged for cloud 2 living only on 6381 is found by pk and by secondary key"
   let row = mkRow (guidFor 2 "001") "gN2" "active" 1 (Just "third") 100
-  (byPk, bySec, primaryOnly, secondOnly) <- runFlow $ do
-    _ <- createWithKVConnector dbConf cfgThirdAsPrimary row
+  (byPk, bySec, localOnly, secondOnly) <- runFlow $ do
+    _ <- createWithKVConnector dbConf cfgPeerBAsLocal row
     a <- findWithKVConnector dbConf cfgThreeCloud [Is id (Eq (id row))]
     b <- findWithKVConnector dbConf cfgThreeCloud [Is groupId (Eq ("gN2" :: Text))]
     c <- findWithKVConnector dbConf meshCfg [Is id (Eq (id row))]
@@ -1242,7 +1239,7 @@ tThreeCloudTaggedRead = do
     pure (a, b, c, d)
   ok1 <- check "find by pk across 3 clouds" $ byPk =?= Just row
   ok2 <- check "find by secondary key across 3 clouds" $ bySec =?= Just row
-  ok3 <- check "local-only read does not see it" $ primaryOnly =?= Nothing
+  ok3 <- check "local-only read does not see it" $ localOnly =?= Nothing
   ok4 <- check "2-cloud (6379+6380) read does not see it" $ secondOnly =?= Nothing
   pure (and [ok1, ok2, ok3, ok4])
 
@@ -1252,8 +1249,8 @@ tThreeCloudUntaggedRead = do
   let untagged = mkRow "n3-plain-id" "gN3" "active" 1 Nothing 100
       mistagged = mkRow (guidFor 0 "003") "gN3" "active" 2 Nothing 200
   (a, b) <- runFlow $ do
-    _ <- createWithKVConnector dbConf cfgThirdAsPrimary untagged
-    _ <- createWithKVConnector dbConf cfgSecondaryAsPrimary mistagged
+    _ <- createWithKVConnector dbConf cfgPeerBAsLocal untagged
+    _ <- createWithKVConnector dbConf cfgPeerAAsLocal mistagged
     x <- findWithKVConnector dbConf cfgThreeCloud [Is id (Eq (id untagged))]
     y <- findWithKVConnector dbConf cfgThreeCloud [Is id (Eq (id mistagged))]
     pure (x, y)
@@ -1269,9 +1266,9 @@ tCloudFallbackFlag = do
       mistagged = mkRow (guidFor 0 "021") "gN5" "active" 2 Nothing 200
       untagged = mkRow "n5-plain-id" "gN5" "active" 3 Nothing 300
   (taggedOff, mistaggedOff, untaggedOff, mistaggedOn, untaggedOn) <- runFlow $ do
-    _ <- createWithKVConnector dbConf cfgThirdAsPrimary tagged
-    _ <- createWithKVConnector dbConf cfgThirdAsPrimary mistagged
-    _ <- createWithKVConnector dbConf cfgThirdAsPrimary untagged
+    _ <- createWithKVConnector dbConf cfgPeerBAsLocal tagged
+    _ <- createWithKVConnector dbConf cfgPeerBAsLocal mistagged
+    _ <- createWithKVConnector dbConf cfgPeerBAsLocal untagged
     a <- findWithKVConnector dbConf cfgNoFallback [Is id (Eq (id tagged))]
     b <- findWithKVConnector dbConf cfgNoFallback [Is id (Eq (id mistagged))]
     c <- findWithKVConnector dbConf cfgNoFallback [Is id (Eq (id untagged))]
@@ -1293,9 +1290,9 @@ tThreeCloudFindAllUnion = do
       r2 = mkRow (guidFor 2 "012") "gN4" "active" 3 Nothing 300
   (allRows, paged) <- runFlow $ do
     _ <- createWithKVConnector dbConf meshCfg r0
-    _ <- createWithKVConnector dbConf cfgSecondaryAsPrimary r1
-    _ <- createWithKVConnector dbConf cfgThirdAsPrimary r2
-    _ <- createWithKVConnector dbConf cfgThirdAsPrimary r1
+    _ <- createWithKVConnector dbConf cfgPeerAAsLocal r1
+    _ <- createWithKVConnector dbConf cfgPeerBAsLocal r2
+    _ <- createWithKVConnector dbConf cfgPeerBAsLocal r1
     a <- findAllWithKVConnector dbConf cfgThreeCloud [Is groupId (Eq ("gN4" :: Text))]
     b <- findAllWithOptionsKVConnector dbConf cfgThreeCloud [Is groupId (Eq ("gN4" :: Text))] (Desc updatedAt) (Just 10) Nothing
     pure (a, b)
@@ -1308,11 +1305,11 @@ tThreeCloudUpdateRoutesToOwner = do
   putStrLn "\n[N5] 3 clouds: update of a row on 6381 is applied on 6381 only"
   let row = mkRow (guidFor 2 "020") "gN5" "active" 1 Nothing 100
   (res, onThird, onFirst, onSecond) <- runFlow $ do
-    _ <- createWithKVConnector dbConf cfgThirdAsPrimary row
+    _ <- createWithKVConnector dbConf cfgPeerBAsLocal row
     r <- updateWithKVConnector dbConf dbConf cfgThreeCloud [Set payload ("changed" :: Text)] [Is id (Eq (id row))]
-    t <- findWithKVConnector dbConf cfgThirdAsPrimary [Is id (Eq (id row))]
+    t <- findWithKVConnector dbConf cfgPeerBAsLocal [Is id (Eq (id row))]
     f <- redisGetRaw connName (pkOf row)
-    s <- redisGetRaw connNameSecondary (pkOf row)
+    s <- redisGetRaw connNamePeerA (pkOf row)
     pure (r, t, f, s)
   ok1 <- check "update returns the changed row" $ (fmap payload <$> res) =?= Just "changed"
   ok2 <- check "6381 copy reflects the change" $ (fmap payload <$> onThird) =?= Just "changed"
@@ -1325,10 +1322,10 @@ tThreeCloudDeleteRoutesToOwner = do
   putStrLn "\n[N6] 3 clouds: delete of a row on 6381 tombstones it on 6381 only"
   let row = mkRow (guidFor 2 "030") "gN6" "active" 1 Nothing 100
   (afterDel, rawThird, rawFirst) <- runFlow $ do
-    _ <- createWithKVConnector dbConf cfgThirdAsPrimary row
+    _ <- createWithKVConnector dbConf cfgPeerBAsLocal row
     _ <- deleteWithKVConnector dbConf cfgThreeCloud [Is id (Eq (id row))]
     a <- findWithKVConnector dbConf cfgThreeCloud [Is id (Eq (id row))]
-    t <- redisGetRaw connNameThird (pkOf row)
+    t <- redisGetRaw connNamePeerB (pkOf row)
     f <- redisGetRaw connName (pkOf row)
     pure (a, t, f)
   ok1 <- check "row is gone for a 3-cloud read" $ afterDel =?= Nothing

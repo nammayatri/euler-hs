@@ -57,7 +57,7 @@ import EulerHS.KVConnector.Helper.Utils
 import EulerHS.KVConnector.InMemConfig.Flow (fetchRowFromDBAndAlterImc, pushToInMemConfigStream, searchInMemoryCache)
 import EulerHS.KVConnector.InMemConfig.Types (ImcStreamCommand (..))
 import qualified EulerHS.KVConnector.Metrics as Metrics
-import EulerHS.KVConnector.Types (DBCommandVersion (..), KVConnector (..), KVLockConfig (..), MeshConfig (..), MeshError (..), MeshMeta (..), MeshResult, SecondaryKey (..), Source (..), TableMappings (..), keyMap, tableName)
+import EulerHS.KVConnector.Types (DBCommandVersion (..), KVConnector (..), KVLockConfig (..), MeshConfig (..), MeshError (..), MeshMeta (..), MeshResult, SecondaryKey (..), Source (..), TableMappings (..), keyMap, localKvRedis, tableName)
 import EulerHS.KVConnector.Utils
 import EulerHS.KVDB.Types (KVDBReply)
 import qualified EulerHS.Language as L
@@ -167,14 +167,14 @@ createKV meshCfg value = do
         mapM
           ( \secIdx -> do
               let sKey = fromString . T.unpack $ secIdx
-              _ <- L.runKVDB meshCfg.kvRedis $ L.sadd sKey [pKey]
-              L.runKVDB meshCfg.kvRedis $ L.expire sKey meshCfg.redisTtl
+              _ <- L.runKVDB (localKvRedis meshCfg) $ L.sadd sKey [pKey]
+              L.runKVDB (localKvRedis meshCfg) $ L.expire sKey meshCfg.redisTtl
           )
           $ getSecondaryLookupKeysWithFilters meshCfg.redisKeyPrefix val
       case foldEither revMappingRes of
         Left err -> pure $ Left $ RedisError (show err <> "Primary key => " <> show pKey <> " Secondary key => " <> show (getSecondaryLookupKeys meshCfg.redisKeyPrefix val) <> " in createKV")
         Right _ -> do
-          kvRes <- L.runKVDB meshCfg.kvRedis $
+          kvRes <- L.runKVDB (localKvRedis meshCfg) $
             L.multiExecWithHash (encodeUtf8 shard) $ do
               _ <-
                 L.xaddTx
@@ -207,15 +207,15 @@ createInRedis meshCfg val = do
     mapM
       ( \secIdx -> do
           let sKey = fromString . T.unpack $ secIdx
-          _ <- L.runKVDB meshCfg.kvRedis $ L.sadd sKey [pKey]
-          L.runKVDB meshCfg.kvRedis $ L.expire sKey meshCfg.redisTtl
+          _ <- L.runKVDB (localKvRedis meshCfg) $ L.sadd sKey [pKey]
+          L.runKVDB (localKvRedis meshCfg) $ L.expire sKey meshCfg.redisTtl
       )
       $ getSecondaryLookupKeysWithFilters meshCfg.redisKeyPrefix val
   case foldEither revMappingRes of
     Left err -> pure $ Left $ RedisError (show err <> "Primary key => " <> show pKey <> " Secondary key => " <> show (getSecondaryLookupKeys meshCfg.redisKeyPrefix val))
     Right _ -> do
       kvRes <-
-        L.runKVDB meshCfg.kvRedis $
+        L.runKVDB (localKvRedis meshCfg) $
           L.multiExecWithHash (encodeUtf8 shard) $
             L.setexTx pKey meshCfg.redisTtl (BSL.toStrict $ Encoding.encode_ meshCfg.cerealEnabled val)
       case kvRes of
@@ -346,7 +346,7 @@ updateOneWithLockKVConnector dbConf replicaDbConfig meshCfg lockCfg mkSetClause 
         then pure . Left . LockAcquisitionFailed $ redisLockKey
         else do
           res <- lockedUpdate
-          void $ L.runKVDB meshCfg.kvRedis $ L.del [encodeUtf8 redisLockKey]
+          void $ L.runKVDB (localKvRedis meshCfg) $ L.del [encodeUtf8 redisLockKey]
           pure res
   where
     modelName = tableName @(table Identity)
@@ -358,7 +358,7 @@ updateOneWithLockKVConnector dbConf replicaDbConfig meshCfg lockCfg mkSetClause 
     acquireLock :: Int -> m Bool
     acquireLock attemptsLeft = do
       res <-
-        L.runKVDB meshCfg.kvRedis $
+        L.runKVDB (localKvRedis meshCfg) $
           L.setOpts
             (encodeUtf8 redisLockKey)
             ("1" :: ByteString)
@@ -395,7 +395,7 @@ updateOneWithLockKVConnector dbConf replicaDbConfig meshCfg lockCfg mkSetClause 
           Left err -> pure $ Left err
           Right KVRowMissing | not (null restConns) -> lookupInPeers restConns
           Right found -> pure $ Right found
-      | otherwise = lookupIn (meshCfg {secondaryRedisEnabled = False}) meshCfg.kvRedis
+      | otherwise = lookupIn (meshCfg {multiCloudReadEnabled = False}) (localKvRedis meshCfg)
 
     lookupInPeers :: [Text] -> m (MeshResult (KVRowLookup table))
     lookupInPeers conns = do
@@ -451,7 +451,7 @@ updateOneWithLockKVConnector dbConf replicaDbConfig meshCfg lockCfg mkSetClause 
                 Left err -> pure . Left . RedisError $ show err <> " for " <> modelName <> " in updateFromKVMiss"
                 Right _ ->
                   mapRight Just
-                    <$> updateObjectRedis @BP.Pg @BP.Postgres meshCfg meshCfg.kvRedis updVals setClause False whereClause row
+                    <$> updateObjectRedis @BP.Pg @BP.Postgres meshCfg (localKvRedis meshCfg) updVals setClause False whereClause row
 
 modifyOneKV ::
   forall be table beM m.
@@ -485,22 +485,22 @@ modifyOneKV dbConf replicaDbConfig meshCfg whereClause mbSetClause updateWoRetur
   if isMultiCloudRead meshCfg
     then do
       cloudResults <- findOneFromRedisAcrossClouds meshCfg (\(live, dead) -> not (null live && null dead)) whereClause
-      case pickCloudResult meshCfg.kvRedis cloudResults of
+      case pickCloudResult (localKvRedis meshCfg) cloudResults of
         (conn, kvResult) -> processKvResult kvResult conn updVals setClause
     else do
-      let primaryOnlyCfg = meshCfg {secondaryRedisEnabled = False}
-      primaryKvResult <- findOneFromRedis primaryOnlyCfg whereClause
-      case primaryKvResult of
-        Right ([], []) -> updateInKVOrSQL Nothing updVals setClause meshCfg.kvRedis
+      let localOnlyCfg = meshCfg {multiCloudReadEnabled = False}
+      localKvResult <- findOneFromRedis localOnlyCfg whereClause
+      case localKvResult of
+        Right ([], []) -> updateInKVOrSQL Nothing updVals setClause (localKvRedis meshCfg)
         Right ([], _) -> do
           L.logDebugT "modifyOneKV" ("Modifying nothing - Row is deleted already for " <> tableName @(table Identity))
           pure (KV, Right Nothing)
-        Right (_, _) -> processKvResult primaryKvResult meshCfg.kvRedis updVals setClause
+        Right (_, _) -> processKvResult localKvResult (localKvRedis meshCfg) updVals setClause
         Left err -> pure (KV, Left err)
   where
     processKvResult :: MeshResult ([table Identity], [table Identity]) -> Text -> [(Text, A.Value)] -> [Set be table] -> m (Source, MeshResult (Maybe (table Identity)))
     processKvResult kvResult redisConn updVals setClause = case kvResult of
-      Right ([], []) -> updateInKVOrSQL Nothing updVals setClause meshCfg.kvRedis
+      Right ([], []) -> updateInKVOrSQL Nothing updVals setClause (localKvRedis meshCfg)
       Right ([], _) -> do
         L.logDebugT "modifyOneKV" ("Modifying nothing - Row is deleted already for " <> tableName @(table Identity))
         pure (KV, Right Nothing)
@@ -508,7 +508,7 @@ modifyOneKV dbConf replicaDbConfig meshCfg whereClause mbSetClause updateWoRetur
         findFromDBIfMatchingFailsRes <- findFromDBIfMatchingFails meshCfg replicaDbConfig whereClause kvLiveRows
         case findFromDBIfMatchingFailsRes of
           (_, Right []) -> pure (KV, Right Nothing)
-          (SQL, Right [dbRow]) -> updateInKVOrSQL (Just dbRow) updVals setClause meshCfg.kvRedis
+          (SQL, Right [dbRow]) -> updateInKVOrSQL (Just dbRow) updVals setClause (localKvRedis meshCfg)
           (KV, Right [obj]) ->
             (KV,) . mapRight Just
               <$> ( if isLive
@@ -651,7 +651,7 @@ updateObjectRedis ::
   m (MeshResult (table Identity))
 updateObjectRedis meshCfg redisConn updVals setClauses addPrimaryKeyToWhereClause whereClause obj = do
   let modelName = tableName @(table Identity)
-      clusterName = if redisConn /= meshCfg.kvRedis then "secondaryCluster" else "primaryCluster"
+      clusterName = redisConn
 
   Metrics.withKVLatencyMetric "REDIS_UPDATE" modelName clusterName $ do
     configUpdateResult <- updateObjectInMemConfig meshCfg whereClause updVals obj
@@ -774,18 +774,18 @@ updateAllReturningWithKVConnector dbConf replicaDbConfig meshCfg setClause where
   if not isDisabled
     then do
       let updVals = jsonKeyValueUpdates V1 setClause
-      -- Find from both Redis instances if secondary is enabled
+      -- Find from all clouds if multi-cloud read is enabled
       if isMultiCloudRead meshCfg
         then do
-          -- Find from primary Redis, secondary Redis, and DB in parallel
-          let (primaryOnlyCfg, peerCfgs) = createMultiCloudConfigs meshCfg
-          (primaryKvRows, peerKvRows, dbRows) <-
+          -- Find from the local and peer clouds and DB in parallel
+          let (localOnlyCfg, peerCfgs) = createMultiCloudConfigs meshCfg
+          (localKvRows, peerKvRows, dbRows) <-
             callMultiAsync
-              (redisFindAll primaryOnlyCfg whereClause)
+              (redisFindAll localOnlyCfg whereClause)
               (map (\(conn, cfg) -> (conn, redisFindAll cfg whereClause)) peerCfgs)
               (findAllSql replicaDbConfig whereClause)
           -- Process with segregated Redis results
-          updateKVAndDBResultsMultiCloud meshCfg whereClause dbRows primaryKvRows peerKvRows (Just updVals) False dbConf (Just setClause) True
+          updateKVAndDBResultsMultiCloud meshCfg whereClause dbRows localKvRows peerKvRows (Just updVals) False dbConf (Just setClause) True
         else do
           -- Original single Redis logic
           (kvRows, dbRows) <- callKVDBAsync (redisFindAll meshCfg whereClause) (findAllSql replicaDbConfig whereClause)
@@ -829,18 +829,18 @@ updateAllWithKVConnector dbConf replicaDbConfig meshCfg setClause whereClause = 
   if not isDisabled
     then do
       let updVals = jsonKeyValueUpdates V1 setClause
-      -- Find from both Redis instances if secondary is enabled
+      -- Find from all clouds if multi-cloud read is enabled
       if isMultiCloudRead meshCfg
         then do
-          -- Find from primary Redis, secondary Redis, and DB in parallel
-          let (primaryOnlyCfg, peerCfgs) = createMultiCloudConfigs meshCfg
-          (primaryKvRows, peerKvRows, dbRows) <-
+          -- Find from the local and peer clouds and DB in parallel
+          let (localOnlyCfg, peerCfgs) = createMultiCloudConfigs meshCfg
+          (localKvRows, peerKvRows, dbRows) <-
             callMultiAsync
-              (redisFindAll primaryOnlyCfg whereClause)
+              (redisFindAll localOnlyCfg whereClause)
               (map (\(conn, cfg) -> (conn, redisFindAll cfg whereClause)) peerCfgs)
               (findAllSql replicaDbConfig whereClause)
           -- Process with segregated Redis results
-          mapRight (const ()) <$> updateKVAndDBResultsMultiCloud meshCfg whereClause dbRows primaryKvRows peerKvRows (Just updVals) True dbConf (Just setClause) True
+          mapRight (const ()) <$> updateKVAndDBResultsMultiCloud meshCfg whereClause dbRows localKvRows peerKvRows (Just updVals) True dbConf (Just setClause) True
         else do
           -- Original single Redis logic
           (kvRows, dbRows) <- callKVDBAsync (redisFindAll meshCfg whereClause) (findAllSql replicaDbConfig whereClause)
@@ -904,12 +904,12 @@ updateKVAndDBResults meshCfg whereClause eitherDbRows eitherKvRows mbUpdateVals 
             Left err -> return $ Left $ RedisError (show err <> "Primary key => " <> show (getLookupKeyByPKey meshCfg.redisKeyPrefix <$> uniqueDbRows) <> " Secondary key => " <> show (getSecondaryLookupKeys meshCfg.redisKeyPrefix <$> uniqueDbRows) <> " in updateKVAndDBResults")
             Right _ -> do
               let allRows = matchedKVLiveRows ++ uniqueDbRows
-              sequence <$> mapM (updateObjectRedis meshCfg meshCfg.kvRedis updVals setClause True whereClause) allRows
+              sequence <$> mapM (updateObjectRedis meshCfg (localKvRedis meshCfg) updVals setClause True whereClause) allRows
         else do
           updateOrDelKVRowRes <-
             if isLive
-              then mapM (updateObjectRedis meshCfg meshCfg.kvRedis updVals setClause True whereClause) matchedKVLiveRows
-              else mapM (deleteObjectRedis meshCfg meshCfg.kvRedis True whereClause) matchedKVLiveRows
+              then mapM (updateObjectRedis meshCfg (localKvRedis meshCfg) updVals setClause True whereClause) matchedKVLiveRows
+              else mapM (deleteObjectRedis meshCfg (localKvRedis meshCfg) True whereClause) matchedKVLiveRows
           let kvres = foldEither updateOrDelKVRowRes
           case kvres of
             Left err -> return $ Left err
@@ -967,60 +967,60 @@ updateKVAndDBResultsMultiCloud ::
   Maybe [Set be table] ->
   Bool ->
   m (MeshResult [table Identity])
-updateKVAndDBResultsMultiCloud meshCfg whereClause eitherDbRows primaryKvRows peerKvRows mbUpdateVals updateWoReturning dbConf mbSetClause isLive = do
+updateKVAndDBResultsMultiCloud meshCfg whereClause eitherDbRows localKvRows peerKvRows mbUpdateVals updateWoReturning dbConf mbSetClause isLive = do
   let setClause = fromMaybe [] mbSetClause
       updVals = fromMaybe [] mbUpdateVals
-  case (eitherDbRows, primaryKvRows, sequencePeerResults peerKvRows) of
-    (Right allDBRows, Right primaryKVRows, Right peerKVRows) -> do
-      let primaryKvLiveRows = fst primaryKVRows
-          primaryKvDeadRows = snd primaryKVRows
+  case (eitherDbRows, localKvRows, sequencePeerResults peerKvRows) of
+    (Right allDBRows, Right localKVRows, Right peerKVRows) -> do
+      let localKvLiveRows = fst localKVRows
+          localKvDeadRows = snd localKVRows
           peerKvLiveRows = concatMap (fst . snd) peerKVRows
           peerKvDeadRows = concatMap (snd . snd) peerKVRows
           -- Merge all KV rows for deduplication
-          allKvLiveRows = primaryKvLiveRows ++ peerKvLiveRows
-          allKvDeadRows = primaryKvDeadRows ++ peerKvDeadRows
+          allKvLiveRows = localKvLiveRows ++ peerKvLiveRows
+          allKvDeadRows = localKvDeadRows ++ peerKvDeadRows
           allKvLiveAndDeadRows = allKvLiveRows ++ allKvDeadRows
           -- Segregate matches by source Redis
-          primaryMatchedKVLiveRows = findAllMatching whereClause primaryKvLiveRows
+          localMatchedKVLiveRows = findAllMatching whereClause localKvLiveRows
           peerMatchedKVLiveRows = map (\(conn, (live, _)) -> (conn, findAllMatching whereClause live)) peerKVRows
           updatePeerRows rows = (sequence . concat) <$> mapM (\(conn, connRows) -> mapM (updateObjectRedis meshCfg conn updVals setClause True whereClause) connRows) rows
           deletePeerRows rows = (sequence . concat) <$> mapM (\(conn, connRows) -> mapM (deleteObjectRedis meshCfg conn True whereClause) connRows) rows
-          uniquePeerRows = foldl' (\acc (_, connRows) -> acc ++ getUniqueDBRes meshCfg.redisKeyPrefix connRows (primaryMatchedKVLiveRows ++ acc)) [] peerMatchedKVLiveRows
+          uniquePeerRows = foldl' (\acc (_, connRows) -> acc ++ getUniqueDBRes meshCfg.redisKeyPrefix connRows (localMatchedKVLiveRows ++ acc)) [] peerMatchedKVLiveRows
       if isRecachingEnabled && meshCfg.meshEnabled && isLive
         then do
           let uniqueDbRows = getUniqueDBRes meshCfg.redisKeyPrefix allDBRows allKvLiveAndDeadRows
-          -- Recache DB rows to primary Redis only
+          -- Recache DB rows to the local Redis only
           reCacheDBRowsRes <- reCacheDBRows meshCfg uniqueDbRows
           case reCacheDBRowsRes of
             Left err -> return $ Left $ RedisError (show err <> "Primary key => " <> show (getLookupKeyByPKey meshCfg.redisKeyPrefix <$> uniqueDbRows) <> " Secondary key => " <> show (getSecondaryLookupKeys meshCfg.redisKeyPrefix <$> uniqueDbRows) <> " in updateKVAndDBResultsMultiCloud")
             Right _ -> do
-              -- Update primary Redis matches in primary Redis
-              primaryUpdateRes <- sequence <$> mapM (updateObjectRedis meshCfg meshCfg.kvRedis updVals setClause True whereClause) primaryMatchedKVLiveRows
+              -- Update local Redis matches in the local Redis
+              localUpdateRes <- sequence <$> mapM (updateObjectRedis meshCfg (localKvRedis meshCfg) updVals setClause True whereClause) localMatchedKVLiveRows
               -- Update peer Redis matches in their own Redis
-              secondaryUpdateRes <- updatePeerRows peerMatchedKVLiveRows
-              -- Update DB-only rows in primary Redis
-              dbUpdateRes <- sequence <$> mapM (updateObjectRedis meshCfg meshCfg.kvRedis updVals setClause True whereClause) uniqueDbRows
+              peerUpdateRes <- updatePeerRows peerMatchedKVLiveRows
+              -- Update DB-only rows in the local Redis
+              dbUpdateRes <- sequence <$> mapM (updateObjectRedis meshCfg (localKvRedis meshCfg) updVals setClause True whereClause) uniqueDbRows
               -- Combine all results
-              let allUpdateRes = foldEither [primaryUpdateRes, secondaryUpdateRes, dbUpdateRes]
+              let allUpdateRes = foldEither [localUpdateRes, peerUpdateRes, dbUpdateRes]
               case allUpdateRes of
                 Left err -> return $ Left err
                 Right _ -> do
                   -- Deduplicate results by primary key (in case row exists in both Redis instances)
-                  -- uniqueDbRows is already deduplicated against all KV rows, so we just need to deduplicate secondary against primary
-                  let deduplicatedRows = primaryMatchedKVLiveRows ++ uniquePeerRows ++ uniqueDbRows
+                  -- uniqueDbRows is already deduplicated against all KV rows, so we just need to deduplicate peer rows against local rows
+                  let deduplicatedRows = localMatchedKVLiveRows ++ uniquePeerRows ++ uniqueDbRows
                   return $ Right deduplicatedRows
         else do
-          -- Update primary Redis matches in primary Redis
-          primaryUpdateOrDelRes <-
+          -- Update local Redis matches in the local Redis
+          localUpdateOrDelRes <-
             if isLive
-              then sequence <$> mapM (updateObjectRedis meshCfg meshCfg.kvRedis updVals setClause True whereClause) primaryMatchedKVLiveRows
-              else sequence <$> mapM (deleteObjectRedis meshCfg meshCfg.kvRedis True whereClause) primaryMatchedKVLiveRows
+              then sequence <$> mapM (updateObjectRedis meshCfg (localKvRedis meshCfg) updVals setClause True whereClause) localMatchedKVLiveRows
+              else sequence <$> mapM (deleteObjectRedis meshCfg (localKvRedis meshCfg) True whereClause) localMatchedKVLiveRows
           -- Update peer Redis matches in their own Redis
-          secondaryUpdateOrDelRes <-
+          peerUpdateOrDelRes <-
             if isLive
               then updatePeerRows peerMatchedKVLiveRows
               else deletePeerRows peerMatchedKVLiveRows
-          let allUpdateOrDelRes = foldEither [primaryUpdateOrDelRes, secondaryUpdateOrDelRes]
+          let allUpdateOrDelRes = foldEither [localUpdateOrDelRes, peerUpdateOrDelRes]
           case allUpdateOrDelRes of
             Left err -> return $ Left err
             Right kvRes -> do
@@ -1244,7 +1244,7 @@ findOneFromRedis meshCfg whereClause
         let rights = [(conn, r) | (conn, Right r) <- cloudResults]
             errs = [e | (_, Left e) <- cloudResults]
             hasMatch = any (\(_, (live, _)) -> not (null (findAllMatching whereClause live))) rights
-            (localRows, peerRows) = partition ((== meshCfg.kvRedis) . fst) rights
+            (localRows, peerRows) = partition ((== localKvRedis meshCfg) . fst) rights
             ordered = peerRows ++ localRows
          in case errs of
               e : _ | not hasMatch -> Left e
@@ -1305,22 +1305,22 @@ findOneFromRedisSingle meshCfg whereClause = do
       keyHashMap = keyMap @(table Identity)
       andCombinationsFiltered = mkUniq $ filterPrimaryAndSecondaryKeys keyHashMap <$> andCombinations
       secondaryKeyLength = sum $ getSecondaryKeyLength keyHashMap <$> andCombinationsFiltered
-      clusterName = if meshCfg.kvRedis == meshCfg.kvRedisSecondary then "secondaryCluster" else "primaryCluster"
+      clusterName = localKvRedis meshCfg
 
   Metrics.withKVLatencyMetric "REDIS_FIND_ONE" modelName clusterName $ do
     eitherKeyRes <- mapM (\combo -> getPrimaryKeyFromFieldsAndValues modelName meshCfg (validKeyMapForClauseWithFilters (skeyFilterMap @(table Identity)) (pinnedKeyMap @(table Identity)) keyHashMap combo) combo) andCombinationsFiltered
     result <- case foldEither eitherKeyRes of
       Right keyRes -> do
         let lenKeyRes = lengthOfLists keyRes
-        allRowsRes <- foldEither <$> mapM (getDataFromPKeysRedis meshCfg.kvRedis) (mkUniq keyRes)
+        allRowsRes <- foldEither <$> mapM (getDataFromPKeysRedis (localKvRedis meshCfg)) (mkUniq keyRes)
         case allRowsRes of
           Right allRowsResPairList -> do
             let (allRowsResLiveListOfList, allRowsResDeadListOfList) = unzip allRowsResPairList
-                primaryLiveRows = concat allRowsResLiveListOfList
-                primaryDeadRows = concat allRowsResDeadListOfList
+                localLiveRows = concat allRowsResLiveListOfList
+                localDeadRows = concat allRowsResDeadListOfList
                 total_length = secondaryKeyLength + lenKeyRes
             Metrics.incrementRedisCallMetric "REDIS_FIND_ONE" modelName total_length (total_length > redisCallsSoftLimit) (total_length > redisCallsHardLimit)
-            return (Right (primaryLiveRows, primaryDeadRows), False)
+            return (Right (localLiveRows, localDeadRows), False)
           Left err -> return (Left err, False)
       Left err -> pure (Left err, False)
 
@@ -1375,28 +1375,28 @@ findAllWithOptionsHelper dbConf meshCfg whereClause orderBy mbLimit mbOffset = d
       modelName = tableName @(table Identity)
   if not isDisabled
     then do
-      -- Find from both Redis instances if secondary is enabled
+      -- Find from all clouds if multi-cloud read is enabled
       if isMultiCloudRead meshCfg
         then do
-          -- Find from primary Redis, secondary Redis in parallel
-          let (primaryOnlyCfg, peerCfgs) = createMultiCloudConfigs meshCfg
-          (primaryKvRows, peerKvRows) <-
+          -- Find from the local and peer clouds in parallel
+          let (localOnlyCfg, peerCfgs) = createMultiCloudConfigs meshCfg
+          (localKvRows, peerKvRows) <-
             callKVPeersAsync
-              (redisFindAll primaryOnlyCfg whereClause)
+              (redisFindAll localOnlyCfg whereClause)
               (map (\(conn, cfg) -> (conn, redisFindAll cfg whereClause)) peerCfgs)
-          case extractMultiCloudKVRows meshCfg primaryKvRows peerKvRows of
-            Right (primaryKvLiveRows, primaryKvDeadRows, secondaryKvLiveRows, secondaryKvDeadRows)
+          case extractMultiCloudKVRows meshCfg localKvRows peerKvRows of
+            Right (localKvLiveRows, localKvDeadRows, peerKvLiveRows, peerKvDeadRows)
               | meshCfg.exactPagingEnabled ->
                 findAllPagedWithKVRows
-                  (matchAndDeduplicateKVRows meshCfg whereClause primaryKvLiveRows secondaryKvLiveRows)
-                  (primaryKvLiveRows ++ secondaryKvLiveRows ++ primaryKvDeadRows ++ secondaryKvDeadRows)
+                  (matchAndDeduplicateKVRows meshCfg whereClause localKvLiveRows peerKvLiveRows)
+                  (localKvLiveRows ++ peerKvLiveRows ++ localKvDeadRows ++ peerKvDeadRows)
               | otherwise -> do
                 let -- Merge all KV rows
-                    allKvLiveRows = primaryKvLiveRows ++ secondaryKvLiveRows
-                    allKvDeadRows = primaryKvDeadRows ++ secondaryKvDeadRows
+                    allKvLiveRows = localKvLiveRows ++ peerKvLiveRows
+                    allKvDeadRows = localKvDeadRows ++ peerKvDeadRows
                     -- Match and deduplicate rows from both Redis instances
-                    matchedKVLiveRows = matchAndDeduplicateKVRows meshCfg whereClause primaryKvLiveRows secondaryKvLiveRows
-                    matchedKVDeadRows = deduplicateKVDeadRows meshCfg primaryKvDeadRows secondaryKvDeadRows
+                    matchedKVLiveRows = matchAndDeduplicateKVRows meshCfg whereClause localKvLiveRows peerKvLiveRows
+                    matchedKVDeadRows = deduplicateKVDeadRows meshCfg localKvDeadRows peerKvDeadRows
                     offset = fromMaybe 0 mbOffset
                     shift = length matchedKVLiveRows + length matchedKVDeadRows
                     updatedOffset = max (offset - shift) 0
@@ -1572,18 +1572,18 @@ findAllFromKvRedis dbConf meshCfg whereClause orderBy = do
       modelName = tableName @(table Identity)
   if not isDisabled
     then do
-      -- Find from both Redis instances if secondary is enabled
+      -- Find from all clouds if multi-cloud read is enabled
       if isMultiCloudRead meshCfg
         then do
-          -- Find from primary Redis, secondary Redis in parallel
-          let (primaryOnlyCfg, peerCfgs) = createMultiCloudConfigs meshCfg
-          (primaryKvRows, peerKvRows) <-
+          -- Find from the local and peer clouds in parallel
+          let (localOnlyCfg, peerCfgs) = createMultiCloudConfigs meshCfg
+          (localKvRows, peerKvRows) <-
             callKVPeersAsync
-              (redisFindAll primaryOnlyCfg whereClause)
+              (redisFindAll localOnlyCfg whereClause)
               (map (\(conn, cfg) -> (conn, redisFindAll cfg whereClause)) peerCfgs)
-          case extractMultiCloudKVRows meshCfg primaryKvRows peerKvRows of
-            Right (primaryKvLiveRows, _, secondaryKvLiveRows, _) -> do
-              let matchedKVLiveRows = matchAndDeduplicateKVRows meshCfg whereClause primaryKvLiveRows secondaryKvLiveRows
+          case extractMultiCloudKVRows meshCfg localKvRows peerKvRows of
+            Right (localKvLiveRows, _, peerKvLiveRows, _) -> do
+              let matchedKVLiveRows = matchAndDeduplicateKVRows meshCfg whereClause localKvLiveRows peerKvLiveRows
               if not (null matchedKVLiveRows)
                 then Metrics.incrementKVHitMissMetric "FIND_ALL_KV" modelName Metrics.KVHit
                 else Metrics.incrementKVHitMissMetric "FIND_ALL_KV" modelName Metrics.KVMissDBMiss
@@ -1691,27 +1691,27 @@ findAllWithKVConnector dbConf meshCfg whereClause = do
       modelName = tableName @(table Identity)
   if not isDisabled
     then do
-      -- Find from both Redis instances if secondary is enabled
+      -- Find from all clouds if multi-cloud read is enabled
       if isMultiCloudRead meshCfg
         then do
-          -- Find from primary Redis, secondary Redis, and DB in parallel
-          let (primaryOnlyCfg, peerCfgs) = createMultiCloudConfigs meshCfg
-          (primaryKvRows, peerKvRows, dbRows) <-
+          -- Find from the local and peer clouds and DB in parallel
+          let (localOnlyCfg, peerCfgs) = createMultiCloudConfigs meshCfg
+          (localKvRows, peerKvRows, dbRows) <-
             callMultiAsync
-              (redisFindAll primaryOnlyCfg whereClause)
+              (redisFindAll localOnlyCfg whereClause)
               (map (\(conn, cfg) -> (conn, redisFindAll cfg whereClause)) peerCfgs)
               (findAllSql dbConf whereClause)
-          case (primaryKvRows, sequencePeerResults peerKvRows, dbRows) of
+          case (localKvRows, sequencePeerResults peerKvRows, dbRows) of
             (Right _, Right _, Right dbRes) -> do
               -- Both Redis results are Right, so extractMultiCloudKVRows will always succeed
-              case extractMultiCloudKVRows meshCfg primaryKvRows peerKvRows of
-                Right (primaryKvLiveRows, primaryKvDeadRows, secondaryKvLiveRows, secondaryKvDeadRows) -> do
+              case extractMultiCloudKVRows meshCfg localKvRows peerKvRows of
+                Right (localKvLiveRows, localKvDeadRows, peerKvLiveRows, peerKvDeadRows) -> do
                   let -- Merge all KV rows
-                      allKvLiveRows = primaryKvLiveRows ++ secondaryKvLiveRows
-                      allKvDeadRows = primaryKvDeadRows ++ secondaryKvDeadRows
+                      allKvLiveRows = localKvLiveRows ++ peerKvLiveRows
+                      allKvDeadRows = localKvDeadRows ++ peerKvDeadRows
                       allKVRows = allKvLiveRows ++ allKvDeadRows
                       -- Match and deduplicate rows from both Redis instances
-                      allMatchedKVLiveRows = matchAndDeduplicateKVRows meshCfg whereClause primaryKvLiveRows secondaryKvLiveRows
+                      allMatchedKVLiveRows = matchAndDeduplicateKVRows meshCfg whereClause localKvLiveRows peerKvLiveRows
                       -- Get unique DB rows (not in any KV rows)
                       uniqueDbRows = getUniqueDBRes meshCfg.redisKeyPrefix dbRes allKVRows
                   when (not (null allMatchedKVLiveRows) || not (null dbRes)) $
@@ -1784,18 +1784,18 @@ findAllWithKVAndConditionalDBInternal dbConf meshCfg whereClause orderBy = do
       modelName = tableName @(table Identity)
   if not isDisabled
     then do
-      -- Find from both Redis instances if secondary is enabled
+      -- Find from all clouds if multi-cloud read is enabled
       if isMultiCloudRead meshCfg
         then do
-          -- Find from primary Redis, secondary Redis in parallel
-          let (primaryOnlyCfg, peerCfgs) = createMultiCloudConfigs meshCfg
-          (primaryKvRows, peerKvRows) <-
+          -- Find from the local and peer clouds in parallel
+          let (localOnlyCfg, peerCfgs) = createMultiCloudConfigs meshCfg
+          (localKvRows, peerKvRows) <-
             callKVPeersAsync
-              (redisFindAll primaryOnlyCfg whereClause)
+              (redisFindAll localOnlyCfg whereClause)
               (map (\(conn, cfg) -> (conn, redisFindAll cfg whereClause)) peerCfgs)
-          case extractMultiCloudKVRows meshCfg primaryKvRows peerKvRows of
-            Right (primaryKvLiveRows, primaryKvDeadRows, secondaryKvLiveRows, secondaryKvDeadRows) -> do
-              let matchedKVLiveRows = matchAndDeduplicateKVRows meshCfg whereClause primaryKvLiveRows secondaryKvLiveRows
+          case extractMultiCloudKVRows meshCfg localKvRows peerKvRows of
+            Right (localKvLiveRows, localKvDeadRows, peerKvLiveRows, peerKvDeadRows) -> do
+              let matchedKVLiveRows = matchAndDeduplicateKVRows meshCfg whereClause localKvLiveRows peerKvLiveRows
               if not (null matchedKVLiveRows)
                 then do
                   Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVHit
@@ -1817,7 +1817,7 @@ findAllWithKVAndConditionalDBInternal dbConf meshCfg whereClause orderBy = do
                   dbRes <- runQuery dbConf findAllQueryUpdated
                   case dbRes of
                     Right dbRows -> do
-                      let allKvDeadRows = primaryKvDeadRows ++ secondaryKvDeadRows
+                      let allKvDeadRows = localKvDeadRows ++ peerKvDeadRows
                       if not (null dbRows)
                         then Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVMissDBHit
                         else Metrics.incrementKVHitMissMetric "FIND_ALL" modelName Metrics.KVMissDBMiss
@@ -1907,17 +1907,17 @@ findAllWithKVInBatchConnector dbConf meshCfg whereClause rowKey keys mkWhere = d
       kvRes <-
         if isMultiCloudRead meshCfg
           then do
-            let (primaryOnlyCfg, peerCfgs) = createMultiCloudConfigs meshCfg
-            (primaryKvRows, peerKvRows) <-
+            let (localOnlyCfg, peerCfgs) = createMultiCloudConfigs meshCfg
+            (localKvRows, peerKvRows) <-
               callKVPeersAsync
-                (redisFindAll primaryOnlyCfg whereClause)
+                (redisFindAll localOnlyCfg whereClause)
                 (map (\(conn, cfg) -> (conn, redisFindAll cfg whereClause)) peerCfgs)
             pure $
               mapRight
-                ( \(primaryLive, primaryDead, secondaryLive, secondaryDead) ->
-                    (matchAndDeduplicateKVRows meshCfg whereClause primaryLive secondaryLive, primaryDead ++ secondaryDead)
+                ( \(localLive, localDead, peerLive, peerDead) ->
+                    (matchAndDeduplicateKVRows meshCfg whereClause localLive peerLive, localDead ++ peerDead)
                 )
-                (extractMultiCloudKVRows meshCfg primaryKvRows peerKvRows)
+                (extractMultiCloudKVRows meshCfg localKvRows peerKvRows)
           else mapRight (\(live, dead) -> (findAllMatching whereClause live, dead)) <$> redisFindAll meshCfg whereClause
       case kvRes of
         Left err -> pure $ Left err
@@ -1961,7 +1961,7 @@ redisFindAll meshCfg whereClause = do
       keyHashMap = keyMap @(table Identity)
       andCombinationsFiltered = mkUniq $ filterPrimaryAndSecondaryKeys keyHashMap <$> andCombinations
       secondaryKeyLength = sum $ getSecondaryKeyLength keyHashMap <$> andCombinationsFiltered
-      clusterName = if meshCfg.kvRedis == meshCfg.kvRedisSecondary then "secondaryCluster" else "primaryCluster"
+      clusterName = localKvRedis meshCfg
 
   Metrics.withKVLatencyMetric "REDIS_FIND_ALL" modelName clusterName $ do
     eitherKeyRes <- mapM (\combo -> getPrimaryKeyFromFieldsAndValues modelName meshCfg (validKeyMapForClauseWithFilters (skeyFilterMap @(table Identity)) (pinnedKeyMap @(table Identity)) keyHashMap combo) combo) andCombinationsFiltered
@@ -1969,7 +1969,7 @@ redisFindAll meshCfg whereClause = do
       Right keyRes -> do
         let allKeys = concat keyRes
         let lenKeyRes = length allKeys
-        allRowsRes <- (if isPipeliningEnabled then foldEither <$> mapM (getDataFromPKeysRedis' meshCfg) [(mkUniq allKeys)] else foldEither <$> mapM (getDataFromPKeysRedis meshCfg.kvRedis) (mkUniq keyRes))
+        allRowsRes <- (if isPipeliningEnabled then foldEither <$> mapM (getDataFromPKeysRedis' meshCfg) [(mkUniq allKeys)] else foldEither <$> mapM (getDataFromPKeysRedis (localKvRedis meshCfg)) (mkUniq keyRes))
         let total_length = secondaryKeyLength + lenKeyRes
         case allRowsRes of
           Right allRowsResPairList -> do
@@ -2057,11 +2057,11 @@ reCacheDBRows meshCfg dbRows = do
               ( \secIdx -> do
                   -- Recaching Skeys in redis
                   let sKey = fromString . T.unpack $ secIdx
-                  res1 <- L.runKVDB meshCfg.kvRedis $ L.sadd sKey [pKey]
+                  res1 <- L.runKVDB (localKvRedis meshCfg) $ L.sadd sKey [pKey]
                   case res1 of
                     Left err -> return $ Left err
                     Right _ ->
-                      L.runKVDB meshCfg.kvRedis $ L.expire sKey meshCfg.redisTtl
+                      L.runKVDB (localKvRedis meshCfg) $ L.expire sKey meshCfg.redisTtl
               )
               $ getSecondaryLookupKeysWithFilters meshCfg.redisKeyPrefix obj
           return $ sequence res
@@ -2188,13 +2188,13 @@ deleteAllReturningWithKVConnector dbConf meshCfg whereClause = do
       if isMultiCloudRead meshCfg
         then do
           -- Multi-cloud: find from both Redis instances and DB in parallel
-          let (primaryOnlyCfg, peerCfgs) = createMultiCloudConfigs meshCfg
-          (primaryKvRows, peerKvRows, dbRows) <-
+          let (localOnlyCfg, peerCfgs) = createMultiCloudConfigs meshCfg
+          (localKvRows, peerKvRows, dbRows) <-
             callMultiAsync
-              (redisFindAll primaryOnlyCfg whereClause)
+              (redisFindAll localOnlyCfg whereClause)
               (map (\(conn, cfg) -> (conn, redisFindAll cfg whereClause)) peerCfgs)
               (findAllSql dbConf whereClause)
-          updateKVAndDBResultsMultiCloud meshCfg whereClause dbRows primaryKvRows peerKvRows Nothing False dbConf Nothing False
+          updateKVAndDBResultsMultiCloud meshCfg whereClause dbRows localKvRows peerKvRows Nothing False dbConf Nothing False
         else do
           -- Original single Redis logic
           (kvResult, dbRows) <- callKVDBAsync (redisFindAll meshCfg whereClause) (findAllSql dbConf whereClause)

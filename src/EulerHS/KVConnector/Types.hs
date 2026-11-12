@@ -22,6 +22,7 @@ import Data.Aeson.Types (Parser)
 import Data.Data (Data)
 import qualified Data.HashMap.Strict as HM
 import qualified Data.HashSet as HS
+import Data.List (lookup)
 import qualified Data.Map.Strict as Map
 import Data.Time (UTCTime)
 import qualified Database.Beam as B
@@ -29,6 +30,7 @@ import Database.Beam.Backend (BeamSqlBackend, HasSqlValueSyntax (sqlValueSyntax)
 import qualified Database.Beam.Backend.SQL as B
 import Database.Beam.MySQL (MySQL)
 import Database.Beam.Schema (FieldModification, TableField)
+import EulerHS.KVConnector.CloudTag (localCloudCode)
 import qualified EulerHS.KVDB.Language as L
 import EulerHS.Prelude
 import qualified EulerHS.Types as T
@@ -130,18 +132,23 @@ instance ToJSON MeshError where
 
 data QueryPath = KVPath | SQLPath
 
+defaultKvRedis :: Text
+defaultKvRedis = "KVRedis"
+
+localKvRedis :: MeshConfig -> Text
+localKvRedis cfg = case cfg.kvRedisClouds of
+  [(_, conn)] -> conn
+  clouds -> fromMaybe defaultKvRedis (localCloudCode >>= \code -> lookup code clouds)
+
 data MeshConfig = MeshConfig
   { meshEnabled :: Bool,
     cerealEnabled :: Bool,
     memcacheEnabled :: Bool,
     meshDBName :: Text,
     ecRedisDBStream :: Text,
-    kvRedis :: Text,
-    kvRedisSecondary :: Text,
-    kvRedisPeers :: [Text],
-    kvRedisCloudCodes :: [(Int, Text)],
+    kvRedisClouds :: [(Int, Text)],
     kvRedisCloudFallback :: Bool,
-    secondaryRedisEnabled :: Bool,
+    multiCloudReadEnabled :: Bool,
     redisTtl :: L.KVDBDuration,
     kvHardKilled :: Bool,
     tableShardModRange :: (Int, Int),

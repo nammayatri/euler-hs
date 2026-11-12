@@ -1,10 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module EulerHS.KVConnector.CloudTag
-  ( cloudTagModulus,
-    tagGuidWithCloud,
+  ( tagGuidWithCloud,
     cloudCodeOfGuid,
     preferredConnForGuid,
+    cloudNameToCode,
+    localCloudCode,
   )
 where
 
@@ -12,17 +13,27 @@ import Data.Char (digitToInt, intToDigit, isDigit)
 import Data.List (lookup)
 import qualified Data.Text as T
 import EulerHS.Prelude
+import System.Environment (lookupEnv)
+import System.IO.Unsafe (unsafePerformIO)
 
-cloudTagModulus :: Int
-cloudTagModulus = 10
+cloudNameToCode :: String -> Maybe Int
+cloudNameToCode = \case
+  "AWS" -> Just 0
+  "GCP" -> Just 1
+  "NAMMA" -> Just 2
+  _ -> Nothing
+
+localCloudCode :: Maybe Int
+localCloudCode = unsafePerformIO $ (>>= cloudNameToCode) <$> lookupEnv "CLOUD_TYPE"
+{-# NOINLINE localCloudCode #-}
 
 isGuidShaped :: Text -> Bool
 isGuidShaped t = T.length t == 36 && T.count "-" t == 4
 
 tagGuidWithCloud :: Int -> Text -> Text
 tagGuidWithCloud cloudCode guid
-  | cloudCode < 0 || cloudCode >= cloudTagModulus || not (isGuidShaped guid) = guid
-  | otherwise = T.dropEnd 1 guid <> T.singleton (intToDigit cloudCode)
+  | isGuidShaped guid = T.dropEnd 1 guid <> T.singleton (intToDigit cloudCode)
+  | otherwise = guid
 
 cloudCodeOfGuid :: Text -> Maybe Int
 cloudCodeOfGuid guid

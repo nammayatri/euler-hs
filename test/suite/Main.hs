@@ -163,10 +163,10 @@ preflight = do
         _ -> putStrLn "   • database euler_sorted_test present"
       PGS.close c
 
-      -- Redis primary (6379) + secondary (6380) reachable?
+      -- Redis local (6379) + peer A (6380) reachable?
       p <- redisUp redisCfg "KVRedis"
-      s <- redisUp redisCfgSecondary "KVRedisSecondary"
-      t <- redisUp redisCfgThird "KVRedisThird"
+      s <- redisUp redisCfgPeerA "KVRedisPeerA"
+      t <- redisUp redisCfgPeerB "KVRedisPeerB"
       if p && s && t
         then do
           putStrLn "   • Postgres ✓   Redis 6379 ✓   Redis 6380 ✓   Redis 6381 ✓\n"
@@ -182,11 +182,11 @@ redisDownHint port =
 redisCfg :: ET.KVDBConfig
 redisCfg = ET.mkKVDBConfig "KVRedis" ET.defaultKVDBConnConfig
 
-redisCfgThird :: ET.KVDBConfig
-redisCfgThird = ET.mkKVDBConfig "KVRedisThird" (ET.defaultKVDBConnConfig {ET.connectPort = 6381})
+redisCfgPeerB :: ET.KVDBConfig
+redisCfgPeerB = ET.mkKVDBConfig "KVRedisPeerB" (ET.defaultKVDBConnConfig {ET.connectPort = 6381})
 
-redisCfgSecondary :: ET.KVDBConfig
-redisCfgSecondary = ET.mkKVDBConfig "KVRedisSecondary" (ET.defaultKVDBConnConfig {ET.connectPort = 6380})
+redisCfgPeerA :: ET.KVDBConfig
+redisCfgPeerA = ET.mkKVDBConfig "KVRedisPeerA" (ET.defaultKVDBConnConfig {ET.connectPort = 6380})
 
 redisUp :: ET.KVDBConfig -> Text -> IO Bool
 redisUp cfg nm = do
