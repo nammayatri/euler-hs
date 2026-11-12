@@ -71,6 +71,7 @@ library
     EulerHS.Types
     EulerHS.SqlDB.Language
     EulerHS.KVConnector.DBSync
+    EulerHS.KVConnector.CloudTag
     EulerHS.KVConnector.Compression 
     EulerHS.KVConnector.Encoding
     EulerHS.KVConnector.Flow
