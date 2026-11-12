@@ -31,6 +31,7 @@ import Data.Time.LocalTime (LocalTime, addLocalTime)
 import qualified Database.Beam as B
 import qualified Database.Beam.Schema.Tables as B
 import qualified Database.Redis as DR
+import EulerHS.KVConnector.CloudTag (preferredConnForGuid)
 import EulerHS.KVConnector.Encoding ()
 import qualified EulerHS.KVConnector.Encoding as Encoding
 import EulerHS.KVConnector.Metrics (KVMetric (..), incrementMetric, observeSecondaryKeyElements)
@@ -456,7 +457,7 @@ findOneMatching whereClause = find (`matchWhereClause` whereClause)
 findAllMatching :: B.Beamable table => Where be table -> [table Identity] -> [table Identity]
 findAllMatching whereClause = filter (`matchWhereClause` whereClause)
 
--- Helper function to match and deduplicate rows from both Redis instances
+-- Helper function to match and deduplicate rows from all Redis instances
 matchAndDeduplicateKVRows :: (KVConnector (table Identity), B.Beamable table) => MeshConfig -> Where be table -> [table Identity] -> [table Identity] -> [table Identity]
 matchAndDeduplicateKVRows meshCfg whereClause primaryKvLiveRows secondaryKvLiveRows =
   let primaryMatchedKVLiveRows = findAllMatching whereClause primaryKvLiveRows
@@ -464,72 +465,105 @@ matchAndDeduplicateKVRows meshCfg whereClause primaryKvLiveRows secondaryKvLiveR
       uniqueSecondaryRows = getUniqueDBRes meshCfg.redisKeyPrefix secondaryMatchedKVLiveRows primaryMatchedKVLiveRows
    in primaryMatchedKVLiveRows ++ uniqueSecondaryRows
 
--- Helper function to deduplicate dead rows from both Redis instances
+-- Helper function to deduplicate dead rows from all Redis instances
 deduplicateKVDeadRows :: (KVConnector (table Identity)) => MeshConfig -> [table Identity] -> [table Identity] -> [table Identity]
 deduplicateKVDeadRows meshCfg primaryKvDeadRows secondaryKvDeadRows =
   let uniqueSecondaryDeadRows = getUniqueDBRes meshCfg.redisKeyPrefix secondaryKvDeadRows primaryKvDeadRows
    in primaryKvDeadRows ++ uniqueSecondaryDeadRows
 
--- Helper function to create configs for multi-cloud Redis queries
-createMultiCloudConfigs :: MeshConfig -> (MeshConfig, MeshConfig)
+-- Connection names of every Redis other than the local one, in priority order
+meshPeerConns :: MeshConfig -> [Text]
+meshPeerConns meshCfg = DL.nub $ filter (/= meshCfg.kvRedis) (meshCfg.kvRedisSecondary : meshCfg.kvRedisPeers)
+
+isMultiCloudRead :: MeshConfig -> Bool
+isMultiCloudRead meshCfg = meshCfg.secondaryRedisEnabled && meshCfg.meshEnabled && not (null (meshPeerConns meshCfg))
+
+-- Helper function to create configs for multi-cloud Redis queries: local one plus one per peer cloud
+createMultiCloudConfigs :: MeshConfig -> (MeshConfig, [(Text, MeshConfig)])
 createMultiCloudConfigs meshCfg =
-  let primaryOnlyCfg = meshCfg {secondaryRedisEnabled = False}
-      secondaryAsPrimaryCfg = meshCfg {kvRedis = meshCfg.kvRedisSecondary, secondaryRedisEnabled = False}
-   in (primaryOnlyCfg, secondaryAsPrimaryCfg)
+  (cloudConfigFor meshCfg meshCfg.kvRedis, map (\conn -> (conn, cloudConfigFor meshCfg conn)) (meshPeerConns meshCfg))
+
+cloudConfigFor :: MeshConfig -> Text -> MeshConfig
+cloudConfigFor meshCfg conn
+  | conn == meshCfg.kvRedis = meshCfg {secondaryRedisEnabled = False}
+  | otherwise = meshCfg {kvRedis = conn, kvRedisSecondary = conn, kvRedisPeers = [], secondaryRedisEnabled = False}
+
+pickCloudResult :: Text -> [(Text, MeshResult ([table Identity], [table Identity]))] -> (Text, MeshResult ([table Identity], [table Identity]))
+pickCloudResult localConn results =
+  case ( [x | x@(_, Right (live, _)) <- results, not (null live)],
+         [x | x@(_, Left _) <- results],
+         [x | x@(_, Right (_, dead)) <- results, not (null dead)]
+       ) of
+    (x : _, _, _) -> x
+    (_, x : _, _) -> x
+    (_, _, x : _) -> x
+    _ -> (localConn, Right ([], []))
+
+mergePeerKVRows :: (KVConnector (table Identity)) => MeshConfig -> [(Text, ([table Identity], [table Identity]))] -> ([table Identity], [table Identity])
+mergePeerKVRows meshCfg = foldl' step ([], [])
+  where
+    step (liveAcc, deadAcc) (_, (live, dead)) =
+      ( liveAcc ++ getUniqueDBRes meshCfg.redisKeyPrefix live liveAcc,
+        deadAcc ++ getUniqueDBRes meshCfg.redisKeyPrefix dead deadAcc
+      )
+
+sequencePeerResults :: [(Text, MeshResult a)] -> MeshResult [(Text, a)]
+sequencePeerResults = traverse (\(conn, res) -> (conn,) <$> res)
 
 -- Helper function to extract and process multi-cloud Redis results
-extractMultiCloudKVRows :: MeshResult ([table Identity], [table Identity]) -> MeshResult ([table Identity], [table Identity]) -> MeshResult ([table Identity], [table Identity], [table Identity], [table Identity])
-extractMultiCloudKVRows primaryKvRows secondaryKvRows = case (primaryKvRows, secondaryKvRows) of
-  (Right primaryKvRes, Right secondaryKvRes) -> Right (fst primaryKvRes, snd primaryKvRes, fst secondaryKvRes, snd secondaryKvRes)
+extractMultiCloudKVRows :: (KVConnector (table Identity)) => MeshConfig -> MeshResult ([table Identity], [table Identity]) -> [(Text, MeshResult ([table Identity], [table Identity]))] -> MeshResult ([table Identity], [table Identity], [table Identity], [table Identity])
+extractMultiCloudKVRows meshCfg primaryKvRows peerKvRows = case (primaryKvRows, sequencePeerResults peerKvRows) of
+  (Right primaryKvRes, Right peerKvRes) ->
+    let (peerLive, peerDead) = mergePeerKVRows meshCfg peerKvRes
+     in Right (fst primaryKvRes, snd primaryKvRes, peerLive, peerDead)
   (Left err, _) -> Left err
   (_, Left err) -> Left err
 
--- Helper function to run two async operations in parallel
-callKVKVAsync :: (L.MonadFlow m) => m (MeshResult a) -> m (MeshResult b) -> m (MeshResult a, MeshResult b)
-callKVKVAsync action1 action2 = do
-  -- Fork both actions
-  awaitable1 <- L.awaitableFork action1
-  awaitable2 <- L.awaitableFork action2
+awaitAllKV :: (L.MonadFlow m) => [m (MeshResult a)] -> m [MeshResult a]
+awaitAllKV actions = do
+  awaitables <- mapM L.awaitableFork actions
+  results <- mapM (L.await Nothing) awaitables
+  pure $ map (either (Left . AsyncKVCallFailed . show) id) results
 
-  -- Wait for all results
-  res1 <- L.await Nothing awaitable1
-  res2 <- L.await Nothing awaitable2
+-- Helper function to run the local Redis and every peer Redis lookup in parallel
+callKVPeersAsync :: (L.MonadFlow m) => m (MeshResult a) -> [(Text, m (MeshResult a))] -> m (MeshResult a, [(Text, MeshResult a)])
+callKVPeersAsync primaryAction peerActions = do
+  results <- awaitAllKV (primaryAction : map snd peerActions)
+  case results of
+    primaryRes : peerRes -> pure (primaryRes, zip (map fst peerActions) peerRes)
+    [] -> pure (Left (AsyncKVCallFailed "no results"), [])
 
-  -- Handle results (convert errors to MeshResult format)
-  let res1' = case res1 of
-        Right r -> r
-        Left err -> Left $ AsyncKVCallFailed (show err)
-      res2' = case res2 of
-        Right r -> r
-        Left err -> Left $ AsyncKVCallFailed (show err)
+-- Helper function to run the local Redis, every peer Redis and the DB lookup in parallel
+callMultiAsync :: (L.MonadFlow m) => m (MeshResult a) -> [(Text, m (MeshResult a))] -> m (Either DBError c) -> m (MeshResult a, [(Text, MeshResult a)], Either DBError c)
+callMultiAsync primaryAction peerActions dbAction = do
+  dbAwaitable <- L.awaitableFork dbAction
+  (primaryRes, peerRes) <- callKVPeersAsync primaryAction peerActions
+  dbRes <- L.await Nothing dbAwaitable
+  pure (primaryRes, peerRes, either (Left . DBError AsyncDBCallFailed . show) id dbRes)
 
-  pure (res1', res2')
+preferredConnFromClause :: MeshConfig -> HM.HashMap Text Bool -> [[(Text, Text)]] -> Maybe Text
+preferredConnFromClause meshCfg keyHashMap combinations =
+  DM.listToMaybe
+    [ conn
+      | combo <- combinations,
+        (k, v) <- combo,
+        HM.lookup k keyHashMap == Just True,
+        Just conn <- [preferredConnForGuid meshCfg.kvRedisCloudCodes v]
+    ]
 
--- Helper function to run three async operations in parallel
-callMultiAsync :: (L.MonadFlow m) => m (MeshResult a) -> m (MeshResult b) -> m (Either DBError c) -> m (MeshResult a, MeshResult b, Either DBError c)
-callMultiAsync action1 action2 action3 = do
-  -- Fork all three actions
-  awaitable1 <- L.awaitableFork action1
-  awaitable2 <- L.awaitableFork action2
-  awaitable3 <- L.awaitableFork action3
+-- Order in which clouds are probed for a single row: the tagged cloud first, then the rest
+cloudProbePlan :: MeshConfig -> Maybe Text -> (Text, [Text])
+cloudProbePlan meshCfg mbPreferred =
+  case probeOrder meshCfg mbPreferred of
+    firstConn : restConns -> (firstConn, if meshCfg.kvRedisCloudFallback then restConns else [])
+    [] -> (meshCfg.kvRedis, [])
 
-  -- Wait for all results
-  res1 <- L.await Nothing awaitable1
-  res2 <- L.await Nothing awaitable2
-  res3 <- L.await Nothing awaitable3
-
-  -- Handle results (convert errors to MeshResult/DBError format)
-  let res1' = case res1 of
-        Right r -> r
-        Left err -> Left $ AsyncKVCallFailed (show err)
-      res2' = case res2 of
-        Right r -> r
-        Left err -> Left $ AsyncKVCallFailed (show err)
-      res3' = case res3 of
-        Right r -> r
-        Left err -> Left (DBError AsyncDBCallFailed (show err))
-
-  pure (res1', res2', res3')
+probeOrder :: MeshConfig -> Maybe Text -> [Text]
+probeOrder meshCfg mbPreferred =
+  let allConns = meshCfg.kvRedis : meshPeerConns meshCfg
+   in case mbPreferred of
+        Just pref | pref `elem` allConns -> pref : filter (/= pref) allConns
+        _ -> allConns
 
 matchWhereClause :: B.Beamable table => table Identity -> [Clause be table] -> Bool
 matchWhereClause row = all matchClauseQuery
@@ -754,17 +788,14 @@ getPrimaryKeyFromFieldsAndValues modelName meshCfg keyHashMap fieldsAndValues = 
             Left e -> pure $ Left $ RedisError $ (show e <> " for key: " <> show constructedKey)
             Right primaryKeys -> do
               observeSecondaryKeyElements modelName k "primaryCluster" (length primaryKeys)
-              -- If secondary Redis is enabled, also check it and merge results
-              if meshCfg.secondaryRedisEnabled && meshCfg.meshEnabled
+              if isMultiCloudRead meshCfg
                 then do
-                  secondaryRes <- L.runKVDB meshCfg.kvRedisSecondary $ L.smembers (fromString $ T.unpack constructedKey)
-                  case secondaryRes of
-                    Left e -> pure $ Left $ RedisError $ (show e <> " for secondary key: " <> show constructedKey)
-                    Right secondaryKeys -> do
-                      observeSecondaryKeyElements modelName k "secondaryCluster" (length secondaryKeys)
-                      -- Merge primary keys from both Redis instances (union)
-                      let mergedKeys = mkUniq (primaryKeys ++ secondaryKeys)
-                      pure $ Right $ Just mergedKeys
+                  peerResults <- awaitAllKV (map (\conn -> mapLeft (\e -> RedisError (show e <> " for secondary key: " <> show constructedKey)) <$> L.runKVDB conn (L.smembers (fromString $ T.unpack constructedKey))) (meshPeerConns meshCfg))
+                  case sequence peerResults of
+                    Left e -> pure $ Left e
+                    Right peerKeys -> do
+                      forM_ peerKeys $ \keys -> observeSecondaryKeyElements modelName k "secondaryCluster" (length keys)
+                      pure $ Right $ Just (mkUniq (primaryKeys ++ concat peerKeys))
                 else pure $ Right $ Just primaryKeys
         _ -> pure $ Right Nothing
 

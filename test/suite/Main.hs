@@ -70,7 +70,7 @@ orchestrate = do
   -- so the build stays green — the suite still compiled + linked.
   infraOk <- preflight
   unless infraOk $ do
-    putStrLn "\n⏭  SKIPPED — live Postgres (5432) / Redis (6379+6380) not reachable."
+    putStrLn "\n⏭  SKIPPED — live Postgres (5432) / Redis (6379+6380+6381) not reachable."
     putStrLn "   These are integration tests; the suite compiled fine. Start the infra"
     putStrLn "   and re-run `cabal test` to actually exercise them."
     exitSuccess
@@ -166,12 +166,13 @@ preflight = do
       -- Redis primary (6379) + secondary (6380) reachable?
       p <- redisUp redisCfg "KVRedis"
       s <- redisUp redisCfgSecondary "KVRedisSecondary"
-      if p && s
+      t <- redisUp redisCfgThird "KVRedisThird"
+      if p && s && t
         then do
-          putStrLn "   • Postgres ✓   Redis 6379 ✓   Redis 6380 ✓\n"
+          putStrLn "   • Postgres ✓   Redis 6379 ✓   Redis 6380 ✓   Redis 6381 ✓\n"
           pure True
         else do
-          putStrLn (redisDownHint (if p then 6380 else 6379))
+          putStrLn (redisDownHint (if not p then 6379 else if not s then 6380 else 6381))
           pure False
 
 redisDownHint :: Int -> String
@@ -180,6 +181,9 @@ redisDownHint port =
 
 redisCfg :: ET.KVDBConfig
 redisCfg = ET.mkKVDBConfig "KVRedis" ET.defaultKVDBConnConfig
+
+redisCfgThird :: ET.KVDBConfig
+redisCfgThird = ET.mkKVDBConfig "KVRedisThird" (ET.defaultKVDBConnConfig {ET.connectPort = 6381})
 
 redisCfgSecondary :: ET.KVDBConfig
 redisCfgSecondary = ET.mkKVDBConfig "KVRedisSecondary" (ET.defaultKVDBConnConfig {ET.connectPort = 6380})
