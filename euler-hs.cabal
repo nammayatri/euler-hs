@@ -85,6 +85,7 @@ library
     EulerHS.Extra.URLSanitization
     EulerHS.Extra.Monitoring.Types
     EulerHS.Extra.Monitoring.Flow
+    EulerHS.Extra.IOProfile
     EulerHS.Api
 
   other-modules:
