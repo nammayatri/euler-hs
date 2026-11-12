@@ -4,7 +4,7 @@
 module KV.InsertSpec where
 
 import qualified EulerHS.KVConnector.Flow as DB
-import EulerHS.KVConnector.Types hiding (kvRedis)
+import EulerHS.KVConnector.Types
 import EulerHS.KVConnector.Utils (getPKeyWithShard, getSecondaryLookupKeys)
 import EulerHS.Prelude hiding (id)
 import KV.FlowHelper
