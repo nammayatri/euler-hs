@@ -22,7 +22,7 @@ import EulerHS.Types (OptionEntity)
 data IOKind = SqlCall | KvRedisCall
   deriving stock (Eq, Show, Generic)
 
-data IOEv ent = IOEvent
+data IOEvent = IOEvent
   { ioKind :: IOKind,
     -- | SQL statements for 'SqlCall' (joined by "; "); connection name for 'KvRedisCall'.
     ioTarget :: Text,
