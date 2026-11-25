@@ -36,7 +36,7 @@ import Data.Time (UTCTime)
 import qualified Database.Beam as B
 import EulerHS.KVConnector.Types (TableMappings (..))
 import EulerHS.Prelude hiding (id, note)
-import KvConnectorTH (enableKVPG)
+import KvConnectorTH (enableKVPG, enableKVPGWithSQLObject)
 import Sequelize (ModelMeta (..))
 
 data KvLiveT f = KvLiveT
@@ -86,3 +86,41 @@ instance TableMappings (KvLiveT Identity) where
   getTableMappings = []
 
 $(enableKVPG ''KvLiveT ['id] [['groupId], ['status]])
+
+-- Table `kv_live_quoted` (id text PRIMARY KEY, group_id text, updated_at timestamptz), KV-enabled with
+-- mobility-core's mkSQLObject, whose Text values are quoted SQL literals.
+data KvLiveQuotedT f = KvLiveQuotedT
+  { quotedId :: B.C f Text,
+    quotedGroupId :: B.C f Text,
+    quotedUpdatedAt :: B.C f UTCTime
+  }
+  deriving (Generic, B.Beamable)
+
+instance B.Table KvLiveQuotedT where
+  data PrimaryKey KvLiveQuotedT f = KvLiveQuotedId (B.C f Text) deriving (Generic, B.Beamable)
+  primaryKey = KvLiveQuotedId . quotedId
+
+type KvLiveQuoted = KvLiveQuotedT Identity
+
+deriving instance Show KvLiveQuoted
+
+deriving instance Eq KvLiveQuoted
+
+kvLiveQuotedModSql :: KvLiveQuotedT (B.FieldModification (B.TableField KvLiveQuotedT))
+kvLiveQuotedModSql =
+  B.tableModification
+    { quotedId = B.fieldNamed "id",
+      quotedGroupId = B.fieldNamed "group_id",
+      quotedUpdatedAt = B.fieldNamed "updated_at"
+    }
+
+instance ModelMeta KvLiveQuotedT where
+  modelFieldModification = kvLiveQuotedModSql
+  modelTableName = "kv_live_quoted"
+  modelSchemaName = Nothing
+
+instance TableMappings (KvLiveQuotedT Identity) where
+  getTableName = "kv_live_quoted"
+  getTableMappings = []
+
+$(enableKVPGWithSQLObject ''KvLiveQuotedT ['quotedId] [['quotedGroupId]])

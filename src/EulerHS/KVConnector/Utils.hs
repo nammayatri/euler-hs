@@ -365,11 +365,15 @@ getPKeyAndValueList table = do
 -- the table's column type.
 getPKeyExclusionClause :: forall be table. (HasCallStack, KVConnector (table Identity), A.ToJSON (table Identity), MeshMeta be table) => table Identity -> Either String (Clause be table)
 getPKeyExclusionClause table = do
-  terms <- traverse (\(field, value) -> AT.parseEither (`parseFieldAndGetClause` field) value) (getPKeyAndValueList table)
+  let (PKey keyValues) = primaryKey table
+      row = A.toJSON table
+  terms <- traverse (\(field, _) -> AT.parseEither (keyTerm field) row) keyValues
   pure $ case map notThisValue terms of
     [single] -> single
     several -> Or several
   where
+    -- From toJSON, not mkSQLObject: mkSQLObject may hold SQL literals (quoted Text), which never match.
+    keyTerm field = A.withObject "row" $ \row -> row A..: AKey.fromText field >>= (`parseFieldAndGetClause` field)
     notThisValue :: TermWrap be table -> Clause be table
     notThisValue (TermWrap col value) = Is col (Not (Eq value))
 

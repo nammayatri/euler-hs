@@ -179,14 +179,15 @@ runRaw sql = do
   PGS.close c
 
 ensureTable :: IO ()
-ensureTable =
+ensureTable = do
   runRaw $
     "CREATE TABLE IF NOT EXISTS kv_live "
       <> "(id text PRIMARY KEY, group_id text NOT NULL, status text NOT NULL, "
       <> "cnt int NOT NULL, note text, updated_at timestamptz NOT NULL, payload text NOT NULL)"
+  runRaw "CREATE TABLE IF NOT EXISTS kv_live_quoted (id text PRIMARY KEY, group_id text NOT NULL, updated_at timestamptz NOT NULL)"
 
 cleanPg :: IO ()
-cleanPg = runRaw "DELETE FROM kv_live"
+cleanPg = runRaw "DELETE FROM kv_live" >> runRaw "DELETE FROM kv_live_quoted"
 
 -- Insert a row directly into Postgres (NOT via KV) — to exercise the DB-fallback path.
 insertDbRow :: KvLive -> IO ()
@@ -197,6 +198,12 @@ insertDbRow r = do
       c
       "INSERT INTO kv_live (id,group_id,status,cnt,note,updated_at,payload) VALUES (?,?,?,?,?,?,?)"
       (id r, groupId r, status r, cnt r, note r, updatedAt r, payload r)
+  PGS.close c
+
+insertQuotedDbRow :: KvLiveQuoted -> IO ()
+insertQuotedDbRow r = do
+  c <- PGS.connectPostgreSQL "host=localhost port=5432 user=postgres dbname=euler_sorted_test"
+  _ <- PGS.execute c "INSERT INTO kv_live_quoted (id,group_id,updated_at) VALUES (?,?,?)" (quotedId r, quotedGroupId r, quotedUpdatedAt r)
   PGS.close c
 
 -- Hermetic: drop every key this test owns on BOTH clouds. Only the test's own
@@ -328,6 +335,7 @@ runKvLiveTests = do
         tLockPeerRedisWrite,
         tLockMultipleMatches,
         tFindAllWithOptionsPagingMixed,
+        tFindAllWithOptionsQuotedPKey,
         tCloudTagRoundTrip,
         tThreeCloudTaggedRead,
         tThreeCloudUntaggedRead,
@@ -536,6 +544,25 @@ tFindAllWithOptionsPagingMixed = do
         check (label <> ": every (limit, offset) page is a slice of the merged order") (null (wrong pages))
   ok1 <- report "single Redis" single
   ok2 <- report "multi-cloud" multi
+  pure (ok1 && ok2)
+
+-- The table's mkSQLObject quotes Text values like mobility-core's. qb2 is in Redis and Postgres; the Postgres
+-- leg must exclude it by its real id, so it comes back once.
+tFindAllWithOptionsQuotedPKey :: IO Bool
+tFindAllWithOptionsQuotedPKey = do
+  putStrLn "\n[48] findAllWithOptionsKVConnector (exactPagingEnabled) — quoting mkSQLObject, a row in Redis and Postgres appears once"
+  let qRow :: Text -> Text -> Integer -> KvLiveQuoted
+      qRow i g secs = KvLiveQuotedT {quotedId = i, quotedGroupId = g, quotedUpdatedAt = addUTCTime (fromIntegral secs) baseTime}
+      inBoth = qRow "qb2" "gQ48b" 20
+      whereC = [Is quotedGroupId (In ["gQ48a", "gQ48b" :: Text])]
+      expected = ["qa1", "qb2", "qa3", "qa4"]
+  mapM_ insertQuotedDbRow [qRow "qa1" "gQ48a" 10, inBoth, qRow "qa3" "gQ48a" 30]
+  (single, multi) <- runFlow $ do
+    forM_ [inBoth, qRow "qa4" "gQ48a" 40] (createWithKVConnector dbConf meshCfg)
+    let pageWith cfg = findAllWithOptionsKVConnector dbConf cfg whereC (Asc quotedUpdatedAt) (Just 10) (Just 0)
+    (,) <$> pageWith meshCfg {exactPagingEnabled = True} <*> pageWith cfgMultiCloud {exactPagingEnabled = True}
+  ok1 <- check "single Redis: [qa1, qb2, qa3, qa4], qb2 once" $ (map quotedId <$> single) =?= expected
+  ok2 <- check "multi-cloud: [qa1, qb2, qa3, qa4], qb2 once" $ (map quotedId <$> multi) =?= expected
   pure (ok1 && ok2)
 
 tFindAllWithOptionsNoOrder :: IO Bool
