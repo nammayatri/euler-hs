@@ -115,6 +115,9 @@
             hedis.check = false;
             hedis.jailbreak = true;
             sequelize.check = false;
+            # store-0.7.20's test suite references `CTimer`, which base-4.19 (GHC 9.8)
+            # no longer exports; the library itself builds. Same as nammayatri/Backend.
+            store.check = false;
             # The euler-hs test-suites (language/db/extra, gated behind the
             # `enable-tests` cabal flag) pull in a few deps that are not part of
             # the library's own dependency closure. Force them into the dev

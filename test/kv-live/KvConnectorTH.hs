@@ -26,6 +26,7 @@
 -- =============================================================================
 module KvConnectorTH
   ( enableKVPG,
+    enableKVPGWithSQLObject,
     aesonDBMeshOptions,
     emptyValueMap,
     parseField,
@@ -51,6 +52,7 @@ import EulerHS.KVConnector.Types
 import EulerHS.Prelude hiding (Type, words)
 import Language.Haskell.TH
 import qualified Sequelize as S
+import Sequelize.SQLObject (SQLObject, ToSQLObject (convertToSQLObject))
 import Text.Casing (camel)
 import Prelude (head)
 
@@ -61,9 +63,24 @@ import Prelude (head)
 --   arg 2 = primary key fields (composite allowed),
 --   arg 3 = list of secondary indexes; each inner list = one (composite) index.
 enableKVPG :: Name -> [Name] -> [[Name]] -> Q [Dec]
-enableKVPG name pKeyN sKeysN = do
+enableKVPG = enableKVPGWith (FunD 'mkSQLObject [Clause [] (NormalB (VarE 'A.toJSON)) []])
+
+-- | enableKVPG with mobility-core's mkSQLObject (Kernel.Beam.Lib.UtilsTH.genMkSQLObjectD): every column goes
+--   through sequelize's convertToSQLObject, so a Text value becomes a quoted SQL literal.
+enableKVPGWithSQLObject :: Name -> [Name] -> [[Name]] -> Q [Dec]
+enableKVPGWithSQLObject name pKeyN sKeysN = do
+  fieldNames <- extractRecFields . head . extractConstructors <$> reify name
+  let tName = mkName "table"
+      sqlObjectT = AppT (ConT name) (ConT ''SQLObject)
+      fieldExps = (\fieldName -> (fieldName, AppE (VarE 'convertToSQLObject) (AppE (VarE fieldName) (VarE tName)))) <$> fieldNames
+      mkSQLObjectD = FunD 'mkSQLObject [Clause [VarP tName] (NormalB (AppE (AppTypeE (VarE 'A.toJSON) sqlObjectT) (RecConE (mkName $ nameBase name) fieldExps))) []]
+      sqlObjectToJSOND = InstanceD Nothing [] (AppT (ConT ''A.ToJSON) sqlObjectT) [FunD 'A.toJSON [Clause [] (NormalB (AppE (VarE 'A.genericToJSON) (VarE 'A.defaultOptions))) []]]
+  (sqlObjectToJSOND :) <$> enableKVPGWith mkSQLObjectD name pKeyN sKeysN
+
+enableKVPGWith :: Dec -> Name -> [Name] -> [[Name]] -> Q [Dec]
+enableKVPGWith mkSQLObjectD name pKeyN sKeysN = do
   tModMeshDec <- tableTModMeshD name
-  kvConnectorDec <- kvConnectorInstancesD name pKeyN sKeysN
+  kvConnectorDec <- kvConnectorInstancesD mkSQLObjectD name pKeyN sKeysN
   meshMetaDec <- meshMetaInstancesD name
   jsonDec <- jsonInstancesD name
   serializeDec <- serializeStubD name
@@ -91,8 +108,8 @@ tableTModMeshD name = do
 -- =============================================================================
 -- KVConnector instance
 -- =============================================================================
-kvConnectorInstancesD :: Name -> [Name] -> [[Name]] -> Q [Dec]
-kvConnectorInstancesD name pKeyN sKeysN = do
+kvConnectorInstancesD :: Dec -> Name -> [Name] -> [[Name]] -> Q [Dec]
+kvConnectorInstancesD mkSQLObjectD name pKeyN sKeysN = do
   let pKeyPair = TupE [Just (LitE $ StringL $ sortAndGetKey pKeyN), Just (ConE 'True)]
       sKeyPairs = map (\k -> TupE [Just (LitE $ StringL $ sortAndGetKey k), Just (ConE 'False)]) sKeysN
 
@@ -100,7 +117,6 @@ kvConnectorInstancesD name pKeyN sKeysN = do
       keyMapD = FunD 'keyMap [Clause [] (NormalB (AppE (VarE 'HM.fromList) (ListE (pKeyPair : sKeyPairs)))) []]
       primaryKeyD = FunD 'primaryKey [Clause [] (NormalB getPrimaryKeyE) []]
       secondaryKeysD = FunD 'secondaryKeys [Clause [] (NormalB getSecondaryKeysE) []]
-      mkSQLObjectD = FunD 'mkSQLObject [Clause [] (NormalB (VarE 'A.toJSON)) []]
 
   return
     [ InstanceD
